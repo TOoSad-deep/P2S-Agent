@@ -2,7 +2,7 @@
 
 import base64
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import httpx
 from openai import OpenAI
@@ -99,14 +99,14 @@ class BaseAgent:
         self,
         system_prompt: str,
         user_prompt: str,
-        image_paths: list[str] | None = None,
+        image_paths: Optional[list[str]] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         return_raw: bool = False,
         enable_thinking: bool = False,
-        thinking_budget: int | None = None,
-        response_format: dict | None = None,
-    ) -> str | dict:
+        thinking_budget: Optional[int] = None,
+        response_format: Optional[dict] = None,
+    ) -> Union[str, dict]:
         """
         调用 LLM，支持可选的图片输入（多模态）
 
@@ -126,14 +126,14 @@ class BaseAgent:
         self,
         system_prompt: str,
         user_prompt: str,
-        image_paths: list[str] | None,
+        image_paths: Optional[list[str]],
         temperature: float,
         max_tokens: int,
         return_raw: bool = False,
         enable_thinking: bool = False,
-        thinking_budget: int | None = None,
-        response_format: dict | None = None,
-    ) -> str | dict:
+        thinking_budget: Optional[int] = None,
+        response_format: Optional[dict] = None,
+    ) -> Union[str, dict]:
         """OpenAI-compatible API 调用
 
         V2.0: 支持 thinking mode（Qwen3/DeepSeek）

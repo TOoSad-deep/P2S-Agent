@@ -68,3 +68,4 @@ class P2SPipelineState(TypedDict, total=False):
     refinement_patience: int
     protected_aspects: list[str]
     quality_mode: str
+    force_failure_type: Optional[str]
