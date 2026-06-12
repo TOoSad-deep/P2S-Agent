@@ -180,7 +180,8 @@ def save_preprocess_artifacts(
     # normalized_input.png — 128×128 thumbnail (center-crop then resize)
     img = Image.open(image_path)
     thumb = _center_crop_resize(img, 128, 128)
-    thumb.convert("RGB").save(run_dir / "normalized_input.png")
+    _composite_for_model_view(thumb).save(run_dir / "normalized_input.png")
+    _composite_for_model_view(img).save(run_dir / "llm_reference_input.png")
 
     # alpha_mask.png — 128×128 grayscale alpha
     if img.mode in ("RGBA", "LA"):
@@ -219,6 +220,25 @@ def _center_crop_resize(img: Image.Image, target_w: int, target_h: int) -> Image
         img = img.crop((0, top, w, top + new_h))
 
     return img.resize((target_w, target_h), Image.LANCZOS)
+
+
+def _composite_for_model_view(
+    img: Image.Image,
+    *,
+    background: tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
+    """Return an opaque RGB image matching the black-canvas preview.
+
+    Some VLM providers mishandle transparent PNGs and effectively show the
+    alpha mask instead of the intended color result. The UI and metrics use a
+    black preview background, so the model-facing artifact should do the same.
+    """
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and img.info.get("transparency") is not None):
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (*background, 255))
+        bg.alpha_composite(rgba)
+        return bg.convert("RGB")
+    return img.convert("RGB")
 
 
 def _count_components(

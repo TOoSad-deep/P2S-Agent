@@ -65,6 +65,7 @@ def run_candidate_pool(
     input_spec: dict,
     *,
     image_path: "Path | None" = None,
+    llm_image_path: "Path | None" = None,
     llm_enabled: bool = False,
     llm_implementation: Implementation = "auto",
     cv_enabled: bool = True,
@@ -85,6 +86,8 @@ def run_candidate_pool(
         image_path: Optional path to the source image; passed to the CV
             candidate so it can do real shape detection from the actual
             pixels rather than falling back to preprocess heuristics.
+        llm_image_path: Optional model-facing PNG; when omitted, the source
+            image is sent to the LLM candidate generator.
         llm_enabled: Whether to call the LLM candidate generator.
         llm_implementation: Which LLM implementation to request. ``auto``
             chooses DSL for shape/icon-like inputs and Shadertoy GLSL for
@@ -164,12 +167,14 @@ def run_candidate_pool(
 
     # 1d. LLM — optional
     _llm_io: dict | None = None
+    _llm_attempted = bool(llm_enabled)
+    _llm_empty_kind = "glsl" if llm_implementation == "shadertoy_glsl" else "dsl"
     try:
         llm_candidate = generate_llm_scene_candidate(
             preprocess,
             canvas_width,
             canvas_height,
-            image_path=image_path,
+            image_path=llm_image_path or image_path,
             llm_enabled=llm_enabled,
             implementation=llm_implementation,
         )
@@ -184,8 +189,13 @@ def run_candidate_pool(
                 str(output_kind),
                 int(llm_priority),
             )
+        elif llm_enabled:
+            candidates_raw.append(("llm_0", "llm", 3, None, _llm_empty_kind))
+            logger.info("candidate generated: source=llm returned none")
     except Exception:
         logger.warning("LLM candidate failed", exc_info=True)
+        if _llm_attempted:
+            candidates_raw.append(("llm_0", "llm", 3, None, _llm_empty_kind))
 
     # 1e. Fallback — always last
     try:
@@ -409,6 +419,7 @@ def build_scoreboard(candidates: list[CandidateRecord]) -> dict:
             "validation_valid": c.validation_valid,
             "compile_success": c.compile_success,
             "previewable": bool(c.compile_success and c.compile_glsl.strip()),
+            "score_status": _score_status(c),
             "final_score": c.final_score,
             "objective_metrics": c.objective_metrics,
             "quality_router": c.quality_router,
@@ -416,6 +427,8 @@ def build_scoreboard(candidates: list[CandidateRecord]) -> dict:
             "quality_band": c.quality_router.get("quality_band") if c.quality_router else None,
             "selected": c.selected,
             "reason": c.reason,
+            "validation_errors": c.validation_errors,
+            "compile_errors": c.compile_errors,
             "compile_glsl": c.compile_glsl,
             "llm_io": c.llm_io,
             "glsl_metadata": c.glsl_metadata,
@@ -454,4 +467,19 @@ def _candidate_detail(candidate: CandidateRecord) -> dict:
         "shader_chars": len(candidate.compile_glsl),
         "llm_io": candidate.llm_io,
         "glsl_metadata": candidate.glsl_metadata,
+        "score_status": _score_status(candidate),
     }
+
+
+def _score_status(candidate: CandidateRecord) -> str:
+    if not candidate.enabled:
+        return "disabled"
+    if not candidate.validation_valid:
+        return "validation_failed"
+    if not candidate.compile_success:
+        return "compile_failed"
+    if candidate.quality_router is not None:
+        if candidate.objective_metrics.get("backend_rasterized") is False:
+            return "preview_only"
+        return "scored"
+    return "pending"

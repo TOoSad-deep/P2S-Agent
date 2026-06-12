@@ -320,6 +320,38 @@ def test_build_scoreboard_marks_empty_glsl_not_previewable():
     entry = scoreboard["candidates"][0]
     assert entry["compile_success"] is True
     assert entry["previewable"] is False
+    assert entry["score_status"] == "pending"
+
+
+def test_run_candidate_pool_passes_model_reference_to_llm(tmp_path, monkeypatch):
+    preprocess = _preprocess_from_png(tmp_path)
+    input_spec = _make_minimal_input_spec()
+    source_path = tmp_path / "source.png"
+    llm_path = tmp_path / "llm_reference_input.png"
+    source_path.write_bytes(b"source")
+    llm_path.write_bytes(b"llm")
+    captured = {}
+
+    def fake_llm_candidate(*args, **kwargs):
+        captured["image_path"] = kwargs.get("image_path")
+        return None
+
+    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+
+    records = run_candidate_pool(
+        preprocess,
+        input_spec,
+        image_path=source_path,
+        llm_image_path=llm_path,
+        llm_enabled=True,
+        llm_implementation="shadertoy_glsl",
+        cv_enabled=False,
+    )
+
+    assert captured["image_path"] == llm_path
+    llm = next(record for record in records if record.id == "llm_0")
+    assert llm.enabled is False
+    assert llm.output_kind == "glsl"
 
 
 # ---------------------------------------------------------------------------

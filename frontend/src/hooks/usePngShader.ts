@@ -38,6 +38,7 @@ export interface LlmIO {
   /** Compiled GLSL produced by the initial LLM call, snapshotted before any
    *  later refinement mutates the candidate's compile_glsl in place. */
   compile_glsl?: string | null;
+  image_paths?: string[];
 }
 
 export interface CandidateEntry {
@@ -47,9 +48,12 @@ export interface CandidateEntry {
   enabled: boolean;
   priority: number;
   validation_valid: boolean;
+  validation_errors?: string[];
   compile_success: boolean;
+  compile_errors?: string[];
   compile_glsl: string;
   previewable?: boolean;
+  score_status?: "pending" | "scored" | "preview_only" | "disabled" | "validation_failed" | "compile_failed" | string;
   final_score: number;
   objective_metrics?: Record<string, unknown>;
   quality_router?: QualityRouterOutput | null;

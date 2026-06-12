@@ -17,6 +17,7 @@ class P2SPipelineState(TypedDict, total=False):
 
     # === Input fields ===
     image_path: str
+    llm_image_path: str
     input_spec: dict
     run_id: str
     run_dir: str

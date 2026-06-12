@@ -88,6 +88,14 @@ function IOView({ io }: { io: LlmIO }) {
               <span className="text-[10px] text-[var(--text-muted)]">
                 {io.raw_response.length} chars
               </span>
+              {io.image_paths && io.image_paths.length > 0 && (
+                <span
+                  className="text-[10px] text-[var(--text-muted)] truncate max-w-full"
+                  title={io.image_paths.join("\n")}
+                >
+                  images: <span className="text-[var(--text-primary)]">{io.image_paths.length}</span>
+                </span>
+              )}
             </div>
             <CollapsibleBlock text={io.raw_response} maxLines={20} />
           </>

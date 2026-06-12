@@ -1,6 +1,6 @@
 // CandidateScoreboard.tsx
-import { Check, X, Star, Cpu, Eye } from "lucide-react";
-import type { Scoreboard } from "../hooks/usePngShader";
+import { Check, X, Star, Cpu, Eye, Minus, AlertTriangle } from "lucide-react";
+import type { CandidateEntry, Scoreboard } from "../hooks/usePngShader";
 
 interface Props {
   scoreboard: Scoreboard | null;
@@ -15,6 +15,32 @@ const SOURCE_COLORS: Record<string, string> = {
   fallback: "bg-orange-500/20 text-orange-400 border border-orange-500/30",
   llm: "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30",
 };
+
+function issueTitle(candidate: CandidateEntry): string | undefined {
+  const issues = [
+    ...(candidate.validation_errors ?? []),
+    ...(candidate.compile_errors ?? []),
+    ...(candidate.reason ?? []),
+  ].filter(Boolean);
+  return issues.length ? issues.slice(0, 4).join("\n") : undefined;
+}
+
+function scoreText(candidate: CandidateEntry): string {
+  const routerScore = candidate.quality_router?.final_score;
+  if (typeof routerScore === "number" && Number.isFinite(routerScore)) {
+    return routerScore.toFixed(2);
+  }
+  if (candidate.score_status === "pending") return "待评分";
+  return "—";
+}
+
+function scoreClass(candidate: CandidateEntry): string {
+  const score = candidate.quality_router?.final_score;
+  if (typeof score !== "number" || !Number.isFinite(score)) return "text-[var(--text-muted)]";
+  if (score >= 0.8) return "text-green-400";
+  if (score >= 0.5) return "text-amber-400";
+  return "text-red-400";
+}
 
 export default function CandidateScoreboard({ scoreboard, previewId, onCandidateClick }: Props) {
   if (!scoreboard) {
@@ -66,6 +92,7 @@ export default function CandidateScoreboard({ scoreboard, previewId, onCandidate
               const isSelected = c.selected;
               const hasPreviewGlsl = c.previewable ?? (c.compile_success && Boolean(c.compile_glsl?.trim()));
               const isClickable = hasPreviewGlsl && !!onCandidateClick;
+              const title = issueTitle(c) ?? (!hasPreviewGlsl && c.compile_success ? "该候选缺少可预览 GLSL" : undefined);
 
               return (
                 <tr
@@ -80,7 +107,7 @@ export default function CandidateScoreboard({ scoreboard, previewId, onCandidate
                       ? "hover:bg-[var(--bg-tertiary)] cursor-pointer"
                       : "opacity-70"
                   }`}
-                  title={!hasPreviewGlsl && c.compile_success ? "该候选缺少可预览 GLSL" : undefined}
+                  title={title}
                 >
                   <td className="py-1.5 pr-2">
                     <div className="flex items-center gap-1">
@@ -104,25 +131,27 @@ export default function CandidateScoreboard({ scoreboard, previewId, onCandidate
                   </td>
                   <td className="text-right py-1.5 px-2 text-[var(--text-muted)]">{c.priority}</td>
                   <td className="text-center py-1.5 px-2">
-                    {c.validation_valid ? (
+                    {!c.enabled ? (
+                      <Minus className="w-3 h-3 text-[var(--text-muted)] inline" />
+                    ) : c.validation_valid ? (
                       <Check className="w-3 h-3 text-green-400 inline" />
                     ) : (
-                      <X className="w-3 h-3 text-red-400 inline" />
+                      <AlertTriangle className="w-3 h-3 text-red-400 inline" />
                     )}
                   </td>
                   <td className="text-center py-1.5 px-2">
-                    {c.compile_success ? (
+                    {!c.enabled ? (
+                      <Minus className="w-3 h-3 text-[var(--text-muted)] inline" />
+                    ) : c.compile_success ? (
                       <Check className="w-3 h-3 text-green-400 inline" />
                     ) : (
                       <X className="w-3 h-3 text-red-400 inline" />
                     )}
                   </td>
-                  <td className="text-right py-1.5 px-2 text-[var(--text-primary)]">
-                    {c.final_score > 0 ? c.final_score.toFixed(2) : c.output_kind === "glsl" && c.source === "llm" ? (
-                      <span className="text-[9px] text-amber-400" title="GLSL 候选无法通过像素指标评分，需 WebGL 渲染">
-                        WebGL
-                      </span>
-                    ) : "—"}
+                  <td className={`text-right py-1.5 px-2 ${scoreClass(c)}`}>
+                    <span title={c.score_status === "preview_only" ? "GLSL 可预览，但本次未完成 WebGL 像素评分" : undefined}>
+                      {scoreText(c)}
+                    </span>
                   </td>
                   <td className="text-center py-1.5 pl-2">
                     {isPreviewing ? (

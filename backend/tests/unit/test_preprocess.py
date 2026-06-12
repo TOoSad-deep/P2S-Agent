@@ -255,6 +255,7 @@ def test_save_preprocess_artifacts_creates_files(tmp_path):
 
     assert (run_dir / "preprocess.json").exists()
     assert (run_dir / "normalized_input.png").exists()
+    assert (run_dir / "llm_reference_input.png").exists()
     assert (run_dir / "alpha_mask.png").exists()
 
 
@@ -285,3 +286,22 @@ def test_save_preprocess_artifacts_normalized_size(tmp_path):
 
     alpha_img = Image.open(run_dir / "alpha_mask.png")
     assert alpha_img.size == (128, 128)
+
+
+def test_save_preprocess_artifacts_composites_model_reference_over_black(tmp_path):
+    img_path = make_png(
+        tmp_path,
+        "transparent_red",
+        "RGBA",
+        (8, 8),
+        lambda x, y: (255, 0, 0, 255) if 2 <= x < 6 and 2 <= y < 6 else (255, 255, 255, 0),
+    )
+    data = preprocess_image(img_path)
+
+    run_dir = tmp_path / "run4"
+    save_preprocess_artifacts(data, run_dir, img_path)
+
+    model_img = Image.open(run_dir / "llm_reference_input.png")
+    assert model_img.mode == "RGB"
+    assert model_img.getpixel((0, 0)) == (0, 0, 0)
+    assert model_img.getpixel((3, 3)) == (255, 0, 0)

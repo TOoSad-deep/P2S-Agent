@@ -60,16 +60,17 @@ function bucketKey(name: string): string {
 function extractGroups(params: ShaderParameter[]): ParamGroup[] {
   const defines = params.filter(p => p.category === "define");
 
-  // Pre-pass: recover L*_*_r/_g/_b triplets so they don't pollute the bucket
-  // count. Only matches the deterministic compiler convention (lowercase _r/_g/_b).
+  // Pre-pass: recover *_r/*_g/*_b triplets so they don't pollute the bucket
+  // count. This covers deterministic compiler output (lowercase) and LLM
+  // Shadertoy output such as COLOR_CENTER_R/G/B (uppercase).
   const tripletRecovered = new Set<string>();
   const tripletByBucket = new Map<string, ColorTriplet[]>();
 
-  const lowercaseRGBCandidates = defines.filter(p => p.type === "float" && /_r$/.test(p.name));
-  for (const rp of lowercaseRGBCandidates) {
+  const colorChannelCandidates = defines.filter(p => p.type === "float" && /_r$/i.test(p.name));
+  for (const rp of colorChannelCandidates) {
     const base = rp.name.slice(0, -2);
-    const gp = defines.find(p => p.type === "float" && p.name === `${base}_g`);
-    const bp = defines.find(p => p.type === "float" && p.name === `${base}_b`);
+    const gp = defines.find(p => p.type === "float" && p.name.toLowerCase() === `${base}_g`.toLowerCase());
+    const bp = defines.find(p => p.type === "float" && p.name.toLowerCase() === `${base}_b`.toLowerCase());
     if (!gp || !bp) continue;
     const bucket = bucketKey(rp.name);
     const labelSegs = base.split("_").filter(s => !/^L\d+$/.test(s));

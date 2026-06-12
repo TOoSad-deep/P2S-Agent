@@ -111,7 +111,7 @@ export default function PngShaderView({
     setEditedGlsl(null);
     setPreviewCandidateId(null);
     setLlmPreview({ glsl: null, label: null, key: null });
-  }, [result]);
+  }, [result?.run_id]);
 
   // Clicking a candidate row clears any LLM-panel preview override so the
   // candidate selection actually wins the preview chain (otherwise llmPreview

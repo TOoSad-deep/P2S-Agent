@@ -69,6 +69,8 @@ def node_preprocess(state: P2SPipelineState) -> dict:
 
     preprocess = preprocess_image(image_path)
     save_preprocess_artifacts(preprocess, run_dir, image_path)
+    llm_image_path = run_dir / "llm_reference_input.png"
+    preprocess["llm_reference_background"] = "#000000"
 
     logger.info(
         "preprocess done: alpha_coverage=%.3f colors=%d edge_sharpness=%.3f",
@@ -77,7 +79,11 @@ def node_preprocess(state: P2SPipelineState) -> dict:
         float(preprocess.get("edge_sharpness", 0.0)),
     )
 
-    return {"preprocess": preprocess, "progress": "preprocessing"}
+    return {
+        "preprocess": preprocess,
+        "llm_image_path": str(llm_image_path),
+        "progress": "preprocessing",
+    }
 
 
 def node_candidates(state: P2SPipelineState) -> dict:
@@ -87,11 +93,13 @@ def node_candidates(state: P2SPipelineState) -> dict:
     preprocess = state["preprocess"]
     input_spec = state["input_spec"]
     image_path = Path(state["image_path"])
+    llm_image_path = Path(state.get("llm_image_path") or image_path)
 
     candidates = run_candidate_pool(
         preprocess,
         input_spec,
         image_path=image_path,
+        llm_image_path=llm_image_path,
         llm_enabled=state.get("llm_enabled", False),
         llm_implementation=state.get("llm_implementation", "auto"),
         cv_enabled=state.get("cv_enabled", True),

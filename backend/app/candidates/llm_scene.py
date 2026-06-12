@@ -81,6 +81,7 @@ def generate_llm_scene_candidate(
         mode,
         visual_strategy=visual_strategy,
     )
+    image_paths_for_io = _normalize_image_paths(image_path)
 
     response = llm_response
     if response is None:
@@ -100,6 +101,11 @@ def generate_llm_scene_candidate(
         "user_prompt": user_prompt,
         "raw_response": content,
         "mode": mode,
+        "image_paths": (
+            image_paths_for_io
+            if image_paths_for_io and (llm_client is not None or settings.llm_supports_image)
+            else []
+        ),
     }
 
     if mode == "png_dsl":
@@ -186,10 +192,19 @@ def _build_prompts(
     *,
     visual_strategy: dict | None = None,
 ) -> tuple[str, str]:
+    alpha_note = ""
+    if bool(preprocess.get("has_alpha")) and float(preprocess.get("alpha_coverage", 1.0)) < 0.999:
+        alpha_note = (
+            " The attached reference is an opaque RGB preview composited over "
+            f"{preprocess.get('llm_reference_background', '#000000')}; match the visible colors and "
+            "lighting, and do not interpret transparency as a white alpha mask."
+        )
+
     common = (
         "You generate 2D/2.5D UI visual effects from image analysis features. "
         "Avoid 3D raymarching, volume rendering, and external textures. "
         "If a reference image is attached, inspect it directly and use the JSON features only as support."
+        + alpha_note
     )
     strategy = visual_strategy or build_visual_strategy(preprocess)
     payload = json.dumps(
@@ -254,7 +269,9 @@ def _build_prompts(
             + "\nFor a glowing sphere/bubble/orb, preserve center-to-edge brightness decay, soft outer halo, "
             + "rim light, and highlight placement. Never replace it with a single flat colored circle."
             + "\nUse #define for ALL tunable visual parameters so users can adjust them later. "
-            + "Use #define for colors as float 0-1 components, positions, radii, sizes, falloff powers, "
+            + "Prefer #define COLOR_NAME vec3(r, g, b) for colors with float 0-1 components; "
+            + "if you split colors into COLOR_NAME_R/G/B, keep all three channels adjacent. "
+            + "Use #define for positions, radii, sizes, falloff powers, "
             + "glow intensity, highlight position, noise scale, speed, and thresholds. "
             + "Reference these names in the shader body instead of hardcoding visual constants."
             + "\nSTRICT RULE: every ALL_CAPS identifier you reference in the shader body (e.g. CENTER_X, "
