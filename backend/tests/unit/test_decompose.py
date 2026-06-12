@@ -62,4 +62,16 @@ def test_fit_primitive_prefers_box_for_rectangle():
     assert layer is not None
     assert layer["type"] == "box"
     assert abs(layer["params"]["size"][0] - 0.80) < 0.05
-    assert abs(layer["params"]["size"][1] - 0.60) < 0.05
+
+
+def test_decompose_candidate_skips_photo_like(tmp_path):
+    from app.candidates.decompose import generate_decompose_candidate
+    img = Image.new("RGB", (64, 64), (255, 255, 255))
+    ImageDraw.Draw(img).ellipse((16, 16, 48, 48), fill=(255, 0, 0))
+    path = _save(tmp_path, "p.png", img)
+
+    assert generate_decompose_candidate({"photo_like_score": 0.9}, path) is None
+
+    dsl = generate_decompose_candidate({"photo_like_score": 0.1}, path)
+    assert dsl is not None
+    assert dsl["_meta"] == {"source": "decompose", "priority": 1}

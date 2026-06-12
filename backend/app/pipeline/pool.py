@@ -11,6 +11,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from app.candidates.baseline import generate_baseline_candidate
+from app.candidates.decompose import generate_decompose_candidate
 from app.candidates.fallback import generate_fallback_candidate
 from app.candidates.llm_scene import Implementation, generate_llm_scene_candidate
 from app.candidates.rule import generate_rule_candidate
@@ -124,6 +125,21 @@ def run_candidate_pool(
         logger.warning("rule candidate failed", exc_info=True)
         rule_dsl = None
     candidates_raw.append(("rule_0", "rule", 1, rule_dsl, "dsl"))
+
+    # 1b2. Decompose — measured-geometry candidate (needs opencv)
+    if image_path is not None:
+        try:
+            dec_dsl = generate_decompose_candidate(
+                preprocess, image_path, canvas_width, canvas_height
+            )
+            if dec_dsl is not None:
+                candidates_raw.append(("decompose_0", "decompose", 1, dec_dsl, "dsl"))
+                logger.info(
+                    "candidate generated: source=decompose layers=%d",
+                    len(dec_dsl.get("layers", []) or []),
+                )
+        except Exception:
+            logger.warning("decompose candidate failed", exc_info=True)
 
     # 1c. CV — optional
     if cv_enabled and _CV_AVAILABLE:
