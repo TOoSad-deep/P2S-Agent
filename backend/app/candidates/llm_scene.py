@@ -1013,3 +1013,102 @@ def generate_llm_refinement(
         "image_paths": image_paths if has_images else [],
     }
     return dsl
+
+
+def generate_llm_glsl_refinement(
+    current_glsl: str,
+    metrics: dict,
+    quality_router: dict,
+    *,
+    reference_image_path: "str | Path | None" = None,
+    current_render_path: "str | Path | None" = None,
+    extra_feedback: "list[str] | None" = None,
+    fresh_start: bool = False,
+    llm_client: LlmClient | None = None,
+) -> dict | None:
+    """Ask the LLM to revise a Shadertoy GLSL candidate from feedback."""
+    issues = _build_feedback_issues(metrics, quality_router)
+    if extra_feedback:
+        issues = list(extra_feedback) + issues
+    image_paths = _normalize_image_paths([reference_image_path, current_render_path])
+    has_images = bool(image_paths) and settings.llm_supports_image
+
+    restart_clause = (
+        "The previous incremental approach has stalled. Write a completely new "
+        "shader from scratch with a different technique; do not anchor on the "
+        "old implementation. "
+        if fresh_start
+        else ""
+    )
+
+    system_prompt = (
+        "You are a Shadertoy GLSL expert. "
+        + (
+            "Two images are attached: image 1 is the TARGET (reference PNG), "
+            "image 2 is the CURRENT rendered output. Diff them visually and "
+            "produce GLSL whose render matches image 1 more closely. "
+            if has_images
+            else "Given quality feedback about the current render, produce GLSL "
+                 "that better matches the reference image. "
+        )
+        + restart_clause
+        + "Rules: keep a valid `void mainImage(out vec4 fragColor, in vec2 fragCoord)` "
+        "entry point. Do NOT declare iTime/iResolution/iMouse/iFrame uniforms "
+        "(they are auto-injected). Do NOT use discard. Every float literal must "
+        "contain a decimal point (write 2.0, never 2). Keep all visually tunable "
+        "constants as `#define NAME value` lines at the top of the shader. "
+        "The target is a static image: do not animate with iTime. Return ONLY "
+        "a JSON object {\"glsl\": \"<the full shader>\"} with no markdown or "
+        "prose outside the JSON."
+    )
+
+    user_prompt = json.dumps(
+        {
+            **({} if fresh_start else {"current_glsl": current_glsl}),
+            "feedback": {
+                "current_score": round(float(quality_router.get("final_score", 0.0)), 4),
+                "quality_band": quality_router.get("quality_band", "unknown"),
+                "failure_type": quality_router.get("failure_type", "unknown"),
+                "issues": issues,
+                "instruction": f"Fix: {'; '.join(issues[:3])}.",
+            },
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    response = _call_llm(
+        system_prompt,
+        user_prompt,
+        image_paths=image_paths if has_images else None,
+        llm_client=llm_client,
+        max_tokens=6144,
+        response_format={"type": "json_object"},
+    )
+    content = _response_content(response)
+    if not content:
+        return None
+
+    payload = parse_glsl_response_payload(content)
+    glsl = _extract_glsl(str(payload.get("glsl") or ""))
+    if not glsl:
+        glsl = _extract_glsl(content)
+    if not glsl:
+        return None
+
+    normalized = normalize_shadertoy_glsl(glsl)
+    if "void mainImage" not in normalized.glsl:
+        return None
+
+    return {
+        "glsl": normalized.glsl,
+        "postprocess_warnings": list(normalized.warnings),
+        "_io": {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "raw_response": content,
+            "mode": "glsl_refinement",
+            "fresh_start": fresh_start,
+            "image_paths": image_paths if has_images else [],
+        },
+    }

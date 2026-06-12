@@ -23,6 +23,7 @@ from app.pipeline.glsl_optimizer import (
     build_glsl_optimization_artifacts,
     optimize_glsl_candidate,
 )
+from app.pipeline.glsl_refinement import run_glsl_refinement_loop
 from app.pipeline.input_spec import build_input_spec
 from app.pipeline.optimizer import build_optimization_artifacts, optimize_candidate
 from app.pipeline.pool import (
@@ -106,7 +107,7 @@ logger = logging.getLogger(__name__)
 # │   └─ next_action=optimize/revise 且允许迭代：GLSL optimizer + WebGL 评分│
 # │                                                                     │
 # │ LLM refinement                                                      │
-# │   └─ 根据 refinement_mode、阈值、LLM 开关决定是否闭环精修 DSL           │
+# │   └─ 根据 refinement_mode、阈值、LLM 开关决定是否闭环精修 DSL/GLSL      │
 # │      精修期间可读取运行中策略更新，也可响应 stop_requested             │
 # │                                                                     │
 # │ VLM final gate                                                      │
@@ -175,7 +176,7 @@ flowchart TD
         W --> U
 
         U --> X{"是否运行 LLM refinement？"}
-        X -->|"是"| Y["run_dsl_refinement_loop<br/>支持运行中策略更新和停止"]
+        X -->|"是"| Y["refinement loop（DSL/GLSL）<br/>支持运行中策略更新和停止"]
         X -->|"否"| Z["跳过精修"]
         Y --> AA{"启用 VLM final gate？"}
         Z --> AA
@@ -272,14 +273,10 @@ def node_selection(state: P2SPipelineState) -> dict:
 
     candidates = state["candidates"]
 
-    # Determine preference for GLSL output
+    # Determine preference for GLSL output. GLSL candidates are refinable, so
+    # an active refinement config no longer disables this preference.
     prefer_output_kind = None
-    refinement_requested = (
-        state.get("refinement_mode", "auto") != "off"
-        and state.get("max_refinement_iterations", 0) > 0
-    )
-
-    if state.get("glsl_render_enabled", False) and not refinement_requested:
+    if state.get("glsl_render_enabled", False):
         best_glsl_score = max(
             (
                 c.final_score
@@ -636,6 +633,12 @@ def _run_post_pipeline(
                 ))
                 if state.get("vlm_judge_enabled") else None
             ),
+            rubric_judge=(
+                (lambda render: judge_rubric(
+                    reference_path, render, work_dir=run_dir / "judge"
+                ))
+                if state.get("vlm_judge_enabled") else None
+            ),
         )
         refinement_history = ref_result.get("history", [])
         refinement_summary.update({
@@ -661,6 +664,79 @@ def _run_post_pipeline(
             selected_glsl = selected.compile_glsl
             selected_metrics = ref_result["best_metrics"]
             selected_quality = ref_result["best_quality"]
+
+    elif should_refine and selected and selected.output_kind == "glsl" and selected.compile_glsl:
+        if not state.get("glsl_render_enabled", False):
+            refinement_summary["enabled"] = False
+            refinement_summary["decision"] = "glsl_render_disabled"
+        else:
+            initial_refinement_score = selected.final_score
+
+            def _glsl_refinement_evaluate(
+                glsl: str, render_path: Path
+            ) -> tuple[dict, dict, float, "Path | None"]:
+                try:
+                    return _evaluate_glsl_with_webgl(
+                        glsl,
+                        reference_path,
+                        render_path,
+                        canvas_width=canvas_width,
+                        canvas_height=canvas_height,
+                        max_shader_chars=max_shader_chars,
+                    )
+                except Exception:
+                    logger.exception("glsl refinement evaluation failed")
+                    return {}, {}, 0.0, None
+
+            ref_result = run_glsl_refinement_loop(
+                selected.compile_glsl,
+                selected.final_score,
+                dict(selected.objective_metrics),
+                dict(selected.quality_router) if selected.quality_router else {},
+                reference_path,
+                evaluate_fn=_glsl_refinement_evaluate,
+                initial_render_path=Path(selected.render_path) if selected.render_path else None,
+                max_iterations=max_refinement_iterations,
+                threshold=refinement_threshold,
+                high_score_stop=refinement_high_score_stop,
+                min_improvement=refinement_min_improvement,
+                no_improvement_patience=refinement_patience,
+                force_first_iteration=effective_refinement_mode == "on",
+                loop_dir=run_dir / "glsl_refinement",
+                strategy_reader=strategy_reader,
+                pairwise_judge=(
+                    (lambda cur, new: judge_pairwise(
+                        reference_path, cur, new, work_dir=run_dir / "judge"
+                    ))
+                    if state.get("vlm_judge_enabled") else None
+                ),
+                rubric_judge=(
+                    (lambda render: judge_rubric(
+                        reference_path, render, work_dir=run_dir / "judge"
+                    ))
+                    if state.get("vlm_judge_enabled") else None
+                ),
+            )
+            refinement_history = ref_result.get("history", [])
+            refinement_summary.update({
+                "kind": "glsl",
+                "iterations": len(refinement_history),
+                "initial_score": initial_refinement_score,
+                "final_score": ref_result.get("best_score", initial_refinement_score),
+                "improved": ref_result.get("best_score", 0) > initial_refinement_score,
+                "stop_reason": ref_result.get("stop_reason"),
+            })
+
+            if ref_result.get("best_score", 0) > selected.final_score:
+                selected.compile_glsl = ref_result["best_glsl"]
+                selected.objective_metrics = ref_result["best_metrics"]
+                selected.quality_router = ref_result["best_quality"]
+                selected.final_score = ref_result["best_score"]
+                if ref_result.get("best_render_path"):
+                    selected.render_path = str(ref_result["best_render_path"])
+                selected_glsl = selected.compile_glsl
+                selected_metrics = ref_result["best_metrics"]
+                selected_quality = ref_result["best_quality"]
 
     # VLM final gate
     judge_summary = None

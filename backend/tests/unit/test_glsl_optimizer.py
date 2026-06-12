@@ -227,6 +227,76 @@ def test_optimize_respects_max_iterations(monkeypatch, tmp_path):
     assert result.iterations_run <= 2
 
 
+def test_optimize_early_stops_after_full_round_without_improvement(monkeypatch, tmp_path):
+    glsl = """
+#define A 0.2
+#define B 0.3
+#define C 0.4
+""".strip()
+
+    _make_score_driver(monkeypatch, lambda _g: 0.5)
+
+    result = optimize_glsl_candidate(
+        glsl,
+        tmp_path / "ref.png",
+        render_glsl_fn=lambda _g: tmp_path / "render.png",
+        max_iterations=100,
+    )
+
+    assert result.iterations_run <= 6
+
+
+def test_optimize_early_stops_after_improvement_then_plateau(monkeypatch, tmp_path):
+    glsl = """
+#define A 0.2
+#define B 0.3
+""".strip()
+
+    def score_for_glsl(g: str) -> float:
+        for line in g.splitlines():
+            if line.startswith("#define A"):
+                val = float(line.split()[-1])
+                return 1.0 - abs(0.25 - val)
+        return 0.0
+
+    _make_score_driver(monkeypatch, score_for_glsl)
+
+    result = optimize_glsl_candidate(
+        glsl,
+        tmp_path / "ref.png",
+        render_glsl_fn=lambda _g: tmp_path / "render.png",
+        max_iterations=100,
+        scale=0.05,
+    )
+
+    assert result.improved is True
+    assert result.iterations_run <= 8
+
+
+def test_optimize_uses_relative_step_for_large_values(monkeypatch, tmp_path):
+    glsl = "#define BIG_RADIUS 10.0\nvoid main() {}"
+
+    def score_for_glsl(g: str) -> float:
+        for line in g.splitlines():
+            if line.startswith("#define BIG_RADIUS"):
+                return float(line.split()[-1]) / 100.0
+        return 0.0
+
+    _make_score_driver(monkeypatch, score_for_glsl)
+
+    result = optimize_glsl_candidate(
+        glsl,
+        tmp_path / "ref.png",
+        render_glsl_fn=lambda _g: tmp_path / "render.png",
+        max_iterations=2,
+        scale=0.05,
+    )
+
+    accepted = [s for s in result.optimizer_log if s.accepted]
+    assert accepted
+    assert abs(float(accepted[0].new_value) - 10.0) >= 0.49
+
+
 def test_optimize_handles_vec_perturbation(monkeypatch, tmp_path):
     glsl = "#define CENTER vec2(0.5, 0.5)\nvoid main() {}"
 
