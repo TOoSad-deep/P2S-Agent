@@ -252,6 +252,7 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
                     canvas_height=canvas_height,
                     max_shader_chars=max_shader_chars,
                     protected_aspects=protected_aspects,
+                    reason=f"optimization improved score {selected.final_score:.4f} -> {opt_result.best_score:.4f}",
                 )
                 if accepted is not None:
                     selected_dsl, selected_glsl, selected_metrics, selected_quality = accepted
@@ -294,6 +295,7 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
                         canvas_height=canvas_height,
                         max_shader_chars=max_shader_chars,
                         protected_aspects=protected_aspects,
+                        reason=f"revision improved score {selected.final_score:.4f} -> {rev_result.best_score:.4f}",
                     )
                     if accepted is not None:
                         selected_dsl, selected_glsl, selected_metrics, selected_quality = accepted
@@ -441,6 +443,7 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
         (run_dir / "selected_shader.glsl").write_text(selected_glsl, encoding="utf-8")
 
     return {
+        **state,
         "optimization": optimization_summary,
         "revision": revision_summary,
         "refinement_summary": refinement_summary,
