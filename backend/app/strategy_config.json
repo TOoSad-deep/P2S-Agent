@@ -1,0 +1,96 @@
+{
+  "params": {
+    "max_iterations": {
+      "default": 5,
+      "min": 0,
+      "max": 8,
+      "step": 1,
+      "integer": true,
+      "label": "优化器预算",
+      "description": "Optimizer budget: 优化器每轮生成的候选 DSL 数量上限，值越大搜索空间越广但耗时线性增长"
+    },
+    "max_refinement_iterations": {
+      "default": 3,
+      "min": 0,
+      "max": 20,
+      "step": 1,
+      "integer": true,
+      "label": "闭环迭代上限",
+      "description": "Refinement loop cap: LLM 闭环优化的最大迭代轮数，每轮包含渲染→评估→修订的完整循环"
+    },
+    "refinement_threshold": {
+      "default": 0.80,
+      "min": 0.5,
+      "max": 1.0,
+      "step": 0.01,
+      "integer": false,
+      "label": "优化触发阈值",
+      "description": "Score threshold to trigger refinement: 当前得分低于此阈值时才进入闭环优化，高于则直接通过"
+    },
+    "refinement_high_score_stop": {
+      "default": 0.92,
+      "min": 0.7,
+      "max": 1.0,
+      "step": 0.01,
+      "integer": false,
+      "label": "高分早停",
+      "description": "Early stop on high score: 迭代中得分达到此值立即停止，避免不必要的后续迭代"
+    },
+    "refinement_min_improvement": {
+      "default": 0.01,
+      "min": 0.001,
+      "max": 0.05,
+      "step": 0.001,
+      "integer": false,
+      "label": "最小改进",
+      "description": "Minimum improvement delta: 相邻两轮得分提升低于此值时视为无改进，配合忍耐轮数触发早停"
+    },
+    "refinement_patience": {
+      "default": 2,
+      "min": 1,
+      "max": 5,
+      "step": 1,
+      "integer": true,
+      "label": "无改进忍耐",
+      "description": "Patience rounds: 连续多少轮无改进（低于 min_improvement）后提前终止闭环"
+    }
+  },
+  "presets": {
+    "fast": {
+      "description": "快速模式：适合实时预览和快速迭代，牺牲质量换取速度",
+      "max_iterations": 2,
+      "max_refinement_iterations": 1,
+      "refinement_threshold": 0.75,
+      "refinement_high_score_stop": 0.88,
+      "refinement_min_improvement": 0.02,
+      "refinement_patience": 1
+    },
+    "balanced": {
+      "description": "均衡模式：默认推荐，在质量和速度之间取得平衡",
+      "max_iterations": 5,
+      "max_refinement_iterations": 3,
+      "refinement_threshold": 0.80,
+      "refinement_high_score_stop": 0.92,
+      "refinement_min_improvement": 0.01,
+      "refinement_patience": 2
+    },
+    "quality": {
+      "description": "质量模式：追求更高还原度，允许更多迭代轮数和更宽松的早停条件",
+      "max_iterations": 8,
+      "max_refinement_iterations": 5,
+      "refinement_threshold": 0.85,
+      "refinement_high_score_stop": 0.95,
+      "refinement_min_improvement": 0.005,
+      "refinement_patience": 3
+    },
+    "aggressive": {
+      "description": "激进模式：最大化还原精度，强制开启闭环优化，适合最终出图",
+      "max_iterations": 6,
+      "max_refinement_iterations": 5,
+      "refinement_threshold": 0.90,
+      "refinement_high_score_stop": 0.97,
+      "refinement_min_improvement": 0.003,
+      "refinement_patience": 4
+    }
+  }
+}
