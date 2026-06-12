@@ -752,6 +752,78 @@ def test_pipeline_accepts_strategy_reader_kwarg(tmp_path):
     assert result["selected_glsl"]
 
 
+def test_pipeline_threads_strategy_reader_to_refinement_loop(tmp_path, monkeypatch):
+    from PIL import Image
+    from app.pipeline.input_spec import build_input_spec
+
+    img_path = tmp_path / "in.png"
+    Image.new("RGBA", (32, 32), (200, 50, 20, 255)).save(img_path)
+
+    spec = build_input_spec(
+        img_path,
+        candidates={
+            "llm_enabled": True,
+            "llm_implementation": "png_dsl",
+            "cv_enabled": False,
+        },
+        quality={
+            "max_iterations": 0,
+            "refinement_mode": "on",
+            "max_refinement_iterations": 1,
+            "refinement_threshold": 0.9,
+        },
+    )
+
+    def fake_llm_candidate(*args, **kwargs):
+        return {
+            "_meta": {"source": "llm", "priority": 0, "output_kind": "dsl"},
+            "schema_version": 1,
+            "canvas": {"width": 32, "height": 32, "background": "#000000"},
+            "layers": [],
+        }
+
+    def fake_score_candidates(candidates, *args, **kwargs):
+        for candidate in candidates:
+            if not candidate.compile_success:
+                continue
+            candidate.objective_metrics = {"mse": 0.4, "simple_ssim": 0.2}
+            candidate.quality_router = {
+                "status": "failed",
+                "quality_band": "poor",
+                "next_action": "manual_review",
+                "final_score": 0.2 if candidate.source == "llm" else 0.1,
+                "failure_type": "color",
+                "reason": ["needs improvement"],
+                "protected_aspects": [],
+            }
+            candidate.final_score = candidate.quality_router["final_score"]
+
+    captured = {}
+
+    def fake_refinement_loop(**kwargs):
+        captured["strategy_reader"] = kwargs.get("strategy_reader")
+        return {
+            "best_dsl": kwargs["initial_dsl"],
+            "best_glsl": "",
+            "best_score": kwargs["initial_score"],
+            "best_metrics": kwargs["initial_metrics"],
+            "best_quality": kwargs["initial_quality"],
+            "history": [],
+            "stop_reason": "user_stop",
+        }
+
+    def reader():
+        return {"strategy": {}, "stop_requested": True}
+
+    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("app.pipeline.graph._score_candidates", fake_score_candidates)
+    monkeypatch.setattr("app.pipeline.graph.run_dsl_refinement_loop", fake_refinement_loop)
+
+    run_png_shader_pipeline(img_path, spec, run_id="strategy_reader_refinement", strategy_reader=reader)
+
+    assert captured["strategy_reader"] is reader
+
+
 def test_pipeline_manifest_includes_strategy_fields(tmp_path):
     import json as _json
     from PIL import Image

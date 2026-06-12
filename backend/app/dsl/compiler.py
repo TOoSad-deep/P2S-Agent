@@ -476,6 +476,7 @@ def compile_dsl(dsl: dict) -> CompileResult:
     main_lines = [
         "void main() {",
         "  vec2 uv = gl_FragCoord.xy / iResolution.xy;",
+        "  uv.y = 1.0 - uv.y;",
         "  vec3 acc_color = vec3(bg_r, bg_g, bg_b);",
     ]
 

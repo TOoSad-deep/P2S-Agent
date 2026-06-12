@@ -1,27 +1,13 @@
 // ImageDiffPanel.tsx
 import { useEffect, useRef, useState } from "react";
 import { ShaderRenderer } from "../lib/shader-renderer";
+import { toShaderToyFragment } from "../lib/shader-format";
 
 interface Props {
   inputImageUrl: string | null;
   selectedGlsl: string | null;
   previewGlsl?: string | null;
   previewLabel?: string | null;
-}
-
-function toShaderToyFragment(glsl: string): string {
-  if (!glsl.trimStart().startsWith("#version 300 es")) {
-    return glsl;
-  }
-
-  return glsl
-    .replace(/^\s*#version\s+300\s+es\s*\n/, "")
-    .replace(/^\s*precision\s+\w+\s+float\s*;\s*\n/m, "")
-    .replace(/^\s*out\s+vec4\s+fragColor\s*;\s*\n/m, "")
-    .replace(/^\s*uniform\s+vec2\s+iResolution\s*;\s*\n/m, "")
-    .replace(/^\s*uniform\s+float\s+iTime\s*;\s*\n/m, "")
-    .replace(/\bvoid\s+main\s*\(\s*\)\s*\{/, "void mainImage(out vec4 fragColor, in vec2 fragCoord) {")
-    .replace(/\bgl_FragCoord\.xy\b/g, "fragCoord");
 }
 
 export default function ImageDiffPanel({ inputImageUrl, selectedGlsl, previewGlsl, previewLabel }: Props) {
@@ -31,6 +17,8 @@ export default function ImageDiffPanel({ inputImageUrl, selectedGlsl, previewGls
   const [shaderError, setShaderError] = useState<string | null>(null);
 
   useEffect(() => {
+    setShaderError(null);
+
     if (!activeGlsl || !canvasContainerRef.current) {
       if (rendererRef.current) {
         rendererRef.current.dispose();
@@ -102,18 +90,19 @@ export default function ImageDiffPanel({ inputImageUrl, selectedGlsl, previewGls
           </div>
           <div className="flex-1 bg-[var(--bg-tertiary)] rounded-lg flex items-center justify-center overflow-hidden min-h-0 relative">
             {activeGlsl ? (
-              shaderError ? (
-                <div className="p-2 text-center">
-                  <p className="text-xs text-red-400">着色器错误</p>
-                  <p className="text-[10px] text-[var(--text-muted)] mt-1 break-all">{shaderError.slice(0, 120)}</p>
-                </div>
-              ) : (
+              <>
                 <div
                   ref={canvasContainerRef}
                   style={{ width: 256, height: 256 }}
                   className="rounded overflow-hidden"
                 />
-              )
+                {shaderError && (
+                  <div className="absolute inset-0 p-2 text-center flex flex-col items-center justify-center bg-[var(--bg-tertiary)]/95">
+                    <p className="text-xs text-red-400">着色器错误</p>
+                    <p className="text-[10px] text-[var(--text-muted)] mt-1 break-all">{shaderError.slice(0, 120)}</p>
+                  </div>
+                )}
+              </>
             ) : (
               <span className="text-xs text-[var(--text-muted)]">暂无 GLSL</span>
             )}

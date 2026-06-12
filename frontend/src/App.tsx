@@ -1,9 +1,8 @@
 import { usePngShader, type LlmMode } from './hooks/usePngShader'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sparkles, Zap } from 'lucide-react'
 import PngShaderView from './components/PngShaderView'
-import type { StrategyConfig, StrategyMode } from './lib/strategy-presets'
-import { FALLBACK_DEFAULT_STRATEGY, FALLBACK_PRESETS } from './lib/strategy-presets'
+import type { StrategyConfig } from './lib/strategy-presets'
 
 export default function App() {
   const {
@@ -11,37 +10,51 @@ export default function App() {
     loading,
     error,
     runPngShader,
+    llmMode,
+    setLlmMode,
+    strategy,
+    setStrategyPartial,
+    applyPreset,
     stopRun,
     stopPending,
-    setStrategyPartial,
   } = usePngShader()
 
-  const [llmMode, setLlmMode] = useState<LlmMode>("off")
-  const [strategy, setStrategy] = useState<StrategyConfig>(FALLBACK_DEFAULT_STRATEGY)
   const [inputImageUrl, setInputImageUrl] = useState<string | null>(null)
+  const inputImageUrlRef = useRef<string | null>(null)
+
+  const ssimValue =
+    typeof result?.objective_metrics?.simple_ssim === 'number'
+      ? result.objective_metrics.simple_ssim
+      : typeof result?.objective_metrics?.ssim === 'number'
+        ? result.objective_metrics.ssim
+        : null
 
   const handleRun = useCallback((file: File) => {
     const url = URL.createObjectURL(file)
+    if (inputImageUrlRef.current) {
+      URL.revokeObjectURL(inputImageUrlRef.current)
+    }
+    inputImageUrlRef.current = url
     setInputImageUrl(url)
     runPngShader(file)
   }, [runPngShader])
 
   const handleLlmModeChange = useCallback((mode: LlmMode) => {
     setLlmMode(mode)
-  }, [])
+  }, [setLlmMode])
 
   const handleStrategyPartial = useCallback((partial: Partial<StrategyConfig>) => {
-    setStrategy(prev => ({ ...prev, ...partial }))
     setStrategyPartial(partial)
   }, [setStrategyPartial])
 
-  const handleApplyPreset = useCallback((mode: Exclude<StrategyMode, "custom">) => {
-    const preset = FALLBACK_PRESETS[mode]
-    if (preset) {
-      setStrategy(preset)
-      setStrategyPartial(preset)
+  useEffect(() => {
+    return () => {
+      if (inputImageUrlRef.current) {
+        URL.revokeObjectURL(inputImageUrlRef.current)
+        inputImageUrlRef.current = null
+      }
     }
-  }, [setStrategyPartial])
+  }, [])
 
   return (
     <div className="min-h-screen text-white" style={{ background: 'var(--bg-primary)' }}>
@@ -98,12 +111,12 @@ export default function App() {
                     {result.candidate_details?.length || 0} candidates
                   </span>
                 </div>
-                {result.objective_metrics?.ssim != null && (
+                {ssimValue != null && (
                   <div className={`score-badge ${
-                    (result.objective_metrics.ssim as number) >= 0.8 ? 'score-high' : 
-                    (result.objective_metrics.ssim as number) >= 0.5 ? 'score-medium' : 'score-low'
+                    ssimValue >= 0.8 ? 'score-high' :
+                    ssimValue >= 0.5 ? 'score-medium' : 'score-low'
                   }`}>
-                    SSIM: {((result.objective_metrics.ssim as number) * 100).toFixed(0)}%
+                    SSIM: {(ssimValue * 100).toFixed(0)}%
                   </div>
                 )}
               </div>
@@ -136,7 +149,7 @@ export default function App() {
           onLlmModeChange={handleLlmModeChange}
           strategy={strategy}
           onStrategyPartial={handleStrategyPartial}
-          onApplyPreset={handleApplyPreset}
+          onApplyPreset={applyPreset}
           onStop={stopRun}
           stopPending={stopPending}
         />

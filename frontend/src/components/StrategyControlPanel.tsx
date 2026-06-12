@@ -216,6 +216,36 @@ export default function StrategyControlPanel({
             {...meta("max_iterations", 0, 8, 1)}
             onChange={(v) => onChange({ max_iterations: v })}
           />
+          <SliderRow
+            label="残差增层"
+            value={strategy.max_added_layers}
+            {...meta("max_added_layers", 0, 8, 1)}
+            disabled={loading}
+            onChange={(v) => onChange({ max_added_layers: v })}
+          />
+          <div className="flex items-center gap-3 text-xs">
+            <span className="w-28 text-[var(--text-muted)]">VLM 评审</span>
+            <label className="flex items-center gap-2 text-[var(--text-primary)]">
+              <input
+                type="checkbox"
+                checked={strategy.vlm_judge_enabled === 1}
+                disabled={loading}
+                onChange={(e) => onChange({ vlm_judge_enabled: e.target.checked ? 1 : 0 })}
+                className="accent-[var(--accent-primary)] disabled:opacity-40"
+              />
+              <span className="text-[11px] text-[var(--text-muted)]">
+                {strategy.vlm_judge_enabled === 1 ? "开启" : "关闭"}
+              </span>
+            </label>
+          </div>
+          <SliderRow
+            label="近平局阈值"
+            value={strategy.vlm_tie_epsilon}
+            {...meta("vlm_tie_epsilon", 0, 0.2, 0.01)}
+            disabled={loading || strategy.vlm_judge_enabled !== 1}
+            format={(v) => v.toFixed(2)}
+            onChange={(v) => onChange({ vlm_tie_epsilon: v })}
+          />
 
           <div className="flex items-start gap-3 text-xs mt-1">
             <span className="w-28 text-[var(--text-muted)]">修复取向</span>

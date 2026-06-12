@@ -19,6 +19,8 @@ const SCORE_BARS: ScoreBar[] = [
 ];
 
 export default function SceneGraphPanel({ preprocess }: Props) {
+  const palette = Array.isArray(preprocess?.palette) ? preprocess.palette : [];
+
   return (
     <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl p-4 h-full flex flex-col overflow-hidden">
       <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3 flex-shrink-0 leading-tight">
@@ -69,11 +71,11 @@ export default function SceneGraphPanel({ preprocess }: Props) {
           </div>
 
           {/* Palette */}
-          {preprocess.palette.length > 0 && (
+          {palette.length > 0 && (
             <div>
               <p className="text-xs text-[var(--text-muted)] mb-1.5">调色板 <span className="text-[10px]">Palette</span></p>
               <div className="flex gap-1 flex-wrap">
-                {preprocess.palette.slice(0, 5).map((hex, i) => (
+                {palette.slice(0, 5).map((hex, i) => (
                   <div
                     key={i}
                     title={hex}
@@ -88,7 +90,8 @@ export default function SceneGraphPanel({ preprocess }: Props) {
           {/* Score bars */}
           <div className="space-y-2">
             {SCORE_BARS.map(({ key, label }) => {
-              const val = preprocess[key] as number;
+              const rawVal = preprocess[key];
+              const val = typeof rawVal === "number" ? rawVal : 0;
               const pct = Math.min(100, Math.max(0, val * 100));
               return (
                 <div key={key}>

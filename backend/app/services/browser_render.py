@@ -52,6 +52,10 @@ async def render_and_screenshot(
             "() => window.__shaderReady === true",
             timeout=settings.render_timeout_ms,
         )
+        shader_error = await page.evaluate("() => window.__shaderError || null")
+        if shader_error:
+            await browser.close()
+            raise RuntimeError(f"shader preview failed: {shader_error}")
 
         # 截图
         screenshot_path = Path(tempfile.mktemp(suffix=".png", prefix="vfx_screenshot_"))
@@ -96,6 +100,10 @@ def render_multiple_frames(
             "() => window.__shaderReady === true",
             timeout=settings.render_timeout_ms,
         )
+        shader_error = page.evaluate("() => window.__shaderError || null")
+        if shader_error:
+            browser.close()
+            raise RuntimeError(f"shader preview failed: {shader_error}")
 
         for t in times:
             # 通过 JS 设置渲染器时间并等待一帧

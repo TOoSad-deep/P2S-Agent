@@ -20,6 +20,9 @@ export interface PresetJSON {
   refinement_high_score_stop: number;
   refinement_min_improvement: number;
   refinement_patience: number;
+  max_added_layers: number;
+  vlm_judge_enabled: number;
+  vlm_tie_epsilon: number;
 }
 
 export interface StrategyConfigJSON {

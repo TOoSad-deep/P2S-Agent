@@ -71,6 +71,7 @@ export class ShaderRenderer {
 
   compileShader(fragShaderSource: string): { success: boolean; error: string | null } {
     const fullFrag = wrapFragmentShader(fragShaderSource);
+    let compileError: string | null = null;
 
     // 清除旧的 mesh
     if (this.mesh) {
@@ -96,23 +97,47 @@ export class ShaderRenderer {
       },
     });
 
-    // 检查编译错误
-    const gl = this.renderer.getContext();
-    gl.getParameter(gl.CURRENT_PROGRAM);
-
     const geometry = new THREE.PlaneGeometry(2, 2);
     this.mesh = new THREE.Mesh(geometry, material);
     this.scene.add(this.mesh);
 
-    // 尝试编译
-    this.renderer.render(this.scene, this.camera);
+    const debug = this.renderer.debug as unknown as {
+      checkShaderErrors: boolean;
+      onShaderError: (
+        | ((gl: WebGLRenderingContext, program: WebGLProgram, vertexShader: WebGLShader, fragmentShader: WebGLShader) => void)
+        | null
+      );
+    };
+    const previousCheckShaderErrors = debug.checkShaderErrors;
+    const previousOnShaderError = debug.onShaderError;
+    debug.checkShaderErrors = true;
+    debug.onShaderError = (gl, program, vertexShader, fragmentShader) => {
+      const logs = [
+        gl.getProgramInfoLog(program),
+        gl.getShaderInfoLog(vertexShader),
+        gl.getShaderInfoLog(fragmentShader),
+      ]
+        .map((log) => log?.trim())
+        .filter(Boolean);
+      compileError = logs.join("\n") || "Shader compile error";
+    };
 
-    const program = (material as any).program;
-    if (program) {
-      const diagnostics = program.getDiagnostics();
-      if (diagnostics && diagnostics.fragmentShaderLog) {
-        return { success: false, error: diagnostics.fragmentShaderLog };
-      }
+    // 尝试编译
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } catch (err) {
+      compileError = err instanceof Error ? err.message : "Shader compile error";
+    } finally {
+      debug.checkShaderErrors = previousCheckShaderErrors;
+      debug.onShaderError = previousOnShaderError;
+    }
+
+    if (compileError) {
+      this.scene.remove(this.mesh);
+      geometry.dispose();
+      material.dispose();
+      this.mesh = null;
+      return { success: false, error: compileError };
     }
 
     return { success: true, error: null };

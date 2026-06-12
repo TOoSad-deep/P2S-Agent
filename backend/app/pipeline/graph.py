@@ -204,7 +204,11 @@ def node_selection(state: P2SPipelineState) -> dict:
 # Post-pipeline processing (not a LangGraph node)
 # ---------------------------------------------------------------------------
 
-def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
+def _run_post_pipeline(
+    state: P2SPipelineState,
+    *,
+    strategy_reader: Callable[[], dict] | None = None,
+) -> P2SPipelineState:
     """Run optimization, revision, and refinement after selection.
 
     This is called after the LangGraph pipeline completes.
@@ -482,6 +486,7 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
             no_improvement_patience=refinement_patience,
             force_first_iteration=effective_refinement_mode == "on",
             loop_dir=run_dir / "refinement",
+            strategy_reader=strategy_reader,
             protected_aspects=protected_aspects,
             pairwise_judge=(
                 (lambda cur, new: judge_pairwise(
@@ -789,7 +794,7 @@ def run_png_shader_pipeline(
     if progress_callback:
         progress_callback("optimizing")
 
-    state = _run_post_pipeline(state)
+    state = _run_post_pipeline(state, strategy_reader=strategy_reader)
 
     logger.info("pipeline done: run_id=%s", effective_run_id)
 

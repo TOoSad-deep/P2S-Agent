@@ -37,6 +37,9 @@ export interface StrategyConfig {
   refinement_high_score_stop: number;  // 0.7-1.0
   refinement_min_improvement: number;  // 0.001-0.05
   refinement_patience: number;         // 1-5
+  max_added_layers: number;            // 0-8
+  vlm_judge_enabled: number;           // 0/1
+  vlm_tie_epsilon: number;             // 0.0-0.2
   force_failure_type: FailureType;
   protected_aspects: ProtectedAspect[];
 }
@@ -57,6 +60,9 @@ export const FALLBACK_PRESETS: Record<Exclude<StrategyMode, "custom">, StrategyC
     refinement_high_score_stop: 0.88,
     refinement_min_improvement: 0.02,
     refinement_patience: 1,
+    max_added_layers: 0,
+    vlm_judge_enabled: 0,
+    vlm_tie_epsilon: 0.05,
     force_failure_type: null,
     protected_aspects: [...DEFAULT_PROTECTED],
   },
@@ -69,6 +75,9 @@ export const FALLBACK_PRESETS: Record<Exclude<StrategyMode, "custom">, StrategyC
     refinement_high_score_stop: 0.92,
     refinement_min_improvement: 0.01,
     refinement_patience: 2,
+    max_added_layers: 4,
+    vlm_judge_enabled: 0,
+    vlm_tie_epsilon: 0.05,
     force_failure_type: null,
     protected_aspects: [...DEFAULT_PROTECTED],
   },
@@ -81,6 +90,9 @@ export const FALLBACK_PRESETS: Record<Exclude<StrategyMode, "custom">, StrategyC
     refinement_high_score_stop: 0.95,
     refinement_min_improvement: 0.005,
     refinement_patience: 3,
+    max_added_layers: 6,
+    vlm_judge_enabled: 1,
+    vlm_tie_epsilon: 0.05,
     force_failure_type: null,
     protected_aspects: [...DEFAULT_PROTECTED],
   },
@@ -93,6 +105,9 @@ export const FALLBACK_PRESETS: Record<Exclude<StrategyMode, "custom">, StrategyC
     refinement_high_score_stop: 0.97,
     refinement_min_improvement: 0.003,
     refinement_patience: 4,
+    max_added_layers: 6,
+    vlm_judge_enabled: 1,
+    vlm_tie_epsilon: 0.05,
     force_failure_type: null,
     protected_aspects: [...DEFAULT_PROTECTED],
   },
@@ -114,6 +129,9 @@ const COMPARED_FIELDS: (keyof StrategyConfig)[] = [
   "refinement_high_score_stop",
   "refinement_min_improvement",
   "refinement_patience",
+  "max_added_layers",
+  "vlm_judge_enabled",
+  "vlm_tie_epsilon",
   "force_failure_type",
   "protected_aspects",
 ];
@@ -154,6 +172,9 @@ export function toQualityOverrides(cfg: StrategyConfig): Record<string, unknown>
     refinement_high_score_stop: cfg.refinement_high_score_stop,
     refinement_min_improvement: cfg.refinement_min_improvement,
     refinement_patience: cfg.refinement_patience,
+    max_added_layers: cfg.max_added_layers,
+    vlm_judge_enabled: cfg.vlm_judge_enabled,
+    vlm_tie_epsilon: cfg.vlm_tie_epsilon,
     force_failure_type: cfg.force_failure_type,
     protected_aspects: cfg.protected_aspects,
   };
@@ -173,6 +194,9 @@ export function buildPresetsFromAPI(
       refinement_high_score_stop: preset.refinement_high_score_stop,
       refinement_min_improvement: preset.refinement_min_improvement,
       refinement_patience: preset.refinement_patience,
+      max_added_layers: preset.max_added_layers,
+      vlm_judge_enabled: preset.vlm_judge_enabled,
+      vlm_tie_epsilon: preset.vlm_tie_epsilon,
       force_failure_type: null,
       protected_aspects: [...DEFAULT_PROTECTED],
     };
@@ -193,6 +217,9 @@ export function buildDefaultStrategyFromAPI(
     refinement_high_score_stop: balanced.refinement_high_score_stop,
     refinement_min_improvement: balanced.refinement_min_improvement,
     refinement_patience: balanced.refinement_patience,
+    max_added_layers: balanced.max_added_layers,
+    vlm_judge_enabled: balanced.vlm_judge_enabled,
+    vlm_tie_epsilon: balanced.vlm_tie_epsilon,
     force_failure_type: null,
     protected_aspects: [...DEFAULT_PROTECTED],
   };
