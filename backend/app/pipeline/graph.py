@@ -1,9 +1,10 @@
 """P2S-Agent Pipeline Orchestrator
 
-Uses LangGraph StateGraph for the core pipeline flow:
+核心 LangGraph 流程:
   preprocess -> candidates -> scoring -> selection
 
-Optimization, revision, and refinement stages run as post-pipeline functions.
+优化、修订、残差补层、LLM 精修和 VLM 评审作为 post-pipeline
+同步函数运行。修改下方编排逻辑时，请同步维护 CORE_PIPELINE_FLOWCHART。
 """
 
 from __future__ import annotations
@@ -54,6 +55,139 @@ from app.state import P2SPipelineState
 from app.strategy_config_loader import clamp as strategy_clamp, get_default
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 核心流程图
+# ---------------------------------------------------------------------------
+# 这张图是 graph.py 的“开发者阅读版流程图”：
+# - LangGraph 只负责四个确定性节点：预处理、候选池、评分、选择。
+# - 质量驱动的优化、修订、残差补层、LLM 精修、VLM 评审都在后处理运行。
+# - 更细的候选生成实现维护在 app.pipeline.pool 和 app.candidates.* 中。
+#
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ 入口：run_png_shader_pipeline(image_path, input_spec, run_id, ...) │
+# └───────────────────────────────┬─────────────────────────────────────┘
+#                                 ▼
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ 初始化运行上下文                                                    │
+# │ 1. input_spec 缺省补全与校验                                         │
+# │ 2. 解析 target / candidates / quality 配置                           │
+# │ 3. 创建 artifacts/run_dir，保存 manifest、reference_input、input_spec │
+# └───────────────────────────────┬─────────────────────────────────────┘
+#                                 ▼
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ LangGraph 核心链路                                                   │
+# │                                                                     │
+# │ preprocess_step                                                     │
+# │   └─ preprocess_image：提取尺寸、透明度、调色板、边缘、纹理等特征       │
+# │                                                                     │
+# │ candidates_step                                                     │
+# │   └─ run_candidate_pool：生成 baseline / rule / decompose / CV / LLM │
+# │      / fallback 候选，并完成 DSL 校验、DSL 编译或 raw GLSL 校验         │
+# │                                                                     │
+# │ scoring_step                                                        │
+# │   └─ 渲染候选，计算 MSE / SSIM / alpha / color / edge / shader budget │
+# │      等指标，再通过 quality_router 产出 final_score 和 next_action     │
+# │                                                                     │
+# │ selection_step                                                      │
+# │   └─ 可选 VLM 近分仲裁后，按 score / priority / GLSL 长度选择最佳候选   │
+# └───────────────────────────────┬─────────────────────────────────────┘
+#                                 ▼
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ Post Pipeline：质量驱动后处理                                        │
+# │                                                                     │
+# │ selected 是 DSL                                                     │
+# │   ├─ next_action=optimize/revise 且允许迭代：坐标下降参数优化          │
+# │   ├─ next_action=revise/fallback：生成 revision patch，失败则回滚      │
+# │   └─ 分数不足且允许补层：基于残差添加 layer                            │
+# │                                                                     │
+# │ selected 是 GLSL                                                    │
+# │   └─ next_action=optimize/revise 且允许迭代：GLSL optimizer + WebGL 评分│
+# │                                                                     │
+# │ LLM refinement                                                      │
+# │   └─ 根据 refinement_mode、阈值、LLM 开关决定是否闭环精修 DSL           │
+# │      精修期间可读取运行中策略更新，也可响应 stop_requested             │
+# │                                                                     │
+# │ VLM final gate                                                      │
+# │   └─ 可选 judge_rubric，将语义评分融合回 final_score                  │
+# └───────────────────────────────┬─────────────────────────────────────┘
+#                                 ▼
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │ 收尾输出                                                            │
+# │ 同步 selected record，保存 candidates/scoreboard/metrics/quality/    │
+# │ selected_dsl/selected_shader/refinement_summary，并返回结构化结果。    │
+# └─────────────────────────────────────────────────────────────────────┘
+CORE_PIPELINE_FLOWCHART = """
+flowchart TD
+    A["入口：run_png_shader_pipeline"] --> B["补全 input_spec"]
+    B --> C["解析 target / candidates / quality 配置"]
+    C --> D["创建 run_dir"]
+    D --> E["保存 manifest / reference_input / input_spec"]
+
+    subgraph LG["LangGraph 核心链路"]
+        F["preprocess_step<br/>提取图像特征并保存预处理工件"]
+        G["candidates_step<br/>运行候选池"]
+        H["scoring_step<br/>渲染、计算客观指标、质量路由"]
+        I["selection_step<br/>选择最佳候选"]
+        F --> G --> H --> I
+    end
+
+    E --> F
+
+    subgraph POOL["候选池内部摘要"]
+        G1["baseline / rule<br/>确定性基础候选"]
+        G2["decompose / CV<br/>基于图像结构的候选"]
+        G3["LLM<br/>可选 DSL 或 GLSL 候选"]
+        G4["fallback<br/>兜底候选"]
+        G5["校验 DSL/GLSL<br/>编译 DSL 或校验 raw GLSL"]
+        G1 --> G5
+        G2 --> G5
+        G3 --> G5
+        G4 --> G5
+    end
+
+    G -.-> G1
+    G5 -.-> H
+
+    I --> J{"启用 VLM 近分仲裁？"}
+    J -->|"是"| K["judge_pairwise<br/>调整近分候选分数"]
+    J -->|"否"| L["保留 objective ranking"]
+    K --> M["selected candidate"]
+    L --> M
+
+    subgraph POST["Post Pipeline：质量驱动后处理"]
+        M --> N{"选中结果类型？"}
+        N -->|"DSL"| O{"quality.next_action"}
+        O -->|"optimize / revise"| P["DSL 参数优化<br/>只接受提分结果"]
+        O -->|"revise / fallback"| Q["revision patch<br/>失败自动回滚"]
+        O -->|"其他"| R["跳过 DSL 修正"]
+        P --> S{"允许残差补层且分数不足？"}
+        Q --> S
+        R --> S
+        S -->|"是"| T["residual_layers<br/>基于残差添加 layer"]
+        S -->|"否"| U["进入精修判断"]
+        T --> U
+
+        N -->|"GLSL"| V{"quality.next_action"}
+        V -->|"optimize / revise"| W["GLSL optimizer<br/>WebGL 渲染评分"]
+        V -->|"其他"| U
+        W --> U
+
+        U --> X{"是否运行 LLM refinement？"}
+        X -->|"是"| Y["run_dsl_refinement_loop<br/>支持运行中策略更新和停止"]
+        X -->|"否"| Z["跳过精修"]
+        Y --> AA{"启用 VLM final gate？"}
+        Z --> AA
+        AA -->|"是"| AB["judge_rubric<br/>融合语义评分"]
+        AA -->|"否"| AC["同步 selected record"]
+        AB --> AC
+    end
+
+    AC --> AD["保存 candidates / scoreboard / metrics / quality"]
+    AD --> AE["保存 selected_dsl / selected_shader / summaries"]
+    AE --> AF["返回结构化结果"]
+"""
 
 
 # ---------------------------------------------------------------------------
