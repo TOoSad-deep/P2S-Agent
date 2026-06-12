@@ -1,4 +1,4 @@
-"""Unit tests for app.png_shader.input_spec (Phase 2)."""
+"""Unit tests for app.pipeline.input_spec (Phase 2)."""
 
 from __future__ import annotations
 

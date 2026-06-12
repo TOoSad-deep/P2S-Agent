@@ -137,7 +137,7 @@ def _make_score_driver(monkeypatch, score_for_glsl):
         calls.append(glsl)
         return score_for_glsl(glsl)
 
-    monkeypatch.setattr("app.png_shader.glsl_optimizer.score_glsl", fake_score)
+    monkeypatch.setattr("app.pipeline.glsl_optimizer.score_glsl", fake_score)
     return calls
 
 
@@ -148,7 +148,7 @@ def test_optimize_returns_unchanged_when_no_defines(monkeypatch, tmp_path):
         return tmp_path / "render.png"
 
     monkeypatch.setattr(
-        "app.png_shader.glsl_optimizer.score_glsl",
+        "app.pipeline.glsl_optimizer.score_glsl",
         lambda *a, **k: 0.5,
     )
 

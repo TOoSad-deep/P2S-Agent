@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.pipeline import quality_router
+from app.metrics import quality_router
 from app.metrics.quality_router import (
     FAILURE_TYPE_VALUES,
     NEXT_ACTION_VALUES,

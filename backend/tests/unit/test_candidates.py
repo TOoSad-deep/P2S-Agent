@@ -118,7 +118,7 @@ def test_llm_candidate_returns_none_when_disabled():
 
 def test_llm_candidate_returns_none_when_enabled(monkeypatch):
     """Without an injected response/client or configured key, this remains no-op."""
-    monkeypatch.setattr("app.png_shader.candidates.llm_scene_candidate.settings.llm_api_key", "")
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "")
     preprocess = _make_preprocess()
     result = generate_llm_scene_candidate(preprocess, llm_enabled=True)
     assert result is None
@@ -315,8 +315,8 @@ def test_png_shader_llm_does_not_send_image_to_generate_model_by_default(monkeyp
             calls.append(kwargs)
             return "ok"
 
-    monkeypatch.setattr("app.png_shader.candidates.llm_scene_candidate.settings.llm_api_key", "test-key")
-    monkeypatch.setattr("app.png_shader.candidates.llm_scene_candidate.settings.llm_supports_image", False)
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", False)
     monkeypatch.setattr("app.agents.base.BaseAgent", FakeAgent)
 
     result = _call_llm(
@@ -341,8 +341,8 @@ def test_png_shader_llm_can_send_image_when_generate_model_supports_it(monkeypat
             calls.append(kwargs)
             return "ok"
 
-    monkeypatch.setattr("app.png_shader.candidates.llm_scene_candidate.settings.llm_api_key", "test-key")
-    monkeypatch.setattr("app.png_shader.candidates.llm_scene_candidate.settings.llm_supports_image", True)
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", True)
     monkeypatch.setattr("app.agents.base.BaseAgent", FakeAgent)
 
     result = _call_llm(

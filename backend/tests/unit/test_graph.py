@@ -408,7 +408,7 @@ def test_run_candidate_pool_accepts_glsl_llm_candidate(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(
-        "app.png_shader.pool.generate_llm_scene_candidate",
+        "app.pipeline.pool.generate_llm_scene_candidate",
         fake_llm_candidate,
     )
 
@@ -457,10 +457,10 @@ def test_run_pipeline_auto_scores_glsl_llm_candidate_from_input_spec(tmp_path, m
         return [str(render_path)]
 
     monkeypatch.setattr(
-        "app.png_shader.pool.generate_llm_scene_candidate",
+        "app.pipeline.pool.generate_llm_scene_candidate",
         fake_llm_candidate,
     )
-    monkeypatch.setattr("app.png_shader.scoring.render_multiple_frames", fake_render_multiple_frames)
+    monkeypatch.setattr("app.pipeline.scoring.render_multiple_frames", fake_render_multiple_frames)
 
     result = run_png_shader_pipeline(png_path, input_spec=input_spec)
 
@@ -512,8 +512,8 @@ def test_run_pipeline_can_webgl_score_glsl_llm_candidate(tmp_path, monkeypatch):
         Image.new("RGBA", (64, 64), (255, 255, 255, 255)).save(render_path)
         return [str(render_path)]
 
-    monkeypatch.setattr("app.png_shader.pool.generate_llm_scene_candidate", fake_llm_candidate)
-    monkeypatch.setattr("app.png_shader.scoring.render_multiple_frames", fake_render_multiple_frames)
+    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("app.pipeline.scoring.render_multiple_frames", fake_render_multiple_frames)
 
     result = run_png_shader_pipeline(png_path, input_spec=input_spec)
 
@@ -547,7 +547,7 @@ def test_refinement_loop_records_llm_call_exception(tmp_path, monkeypatch):
         raise TimeoutError("upstream gateway timed out after 50s")
 
     monkeypatch.setattr(
-        "app.png_shader.candidates.llm_scene_candidate.generate_llm_refinement",
+        "app.candidates.llm_scene.generate_llm_refinement",
         fake_refinement,
     )
 
@@ -644,9 +644,9 @@ def test_run_pipeline_syncs_refined_llm_candidate_glsl_into_scoreboard(tmp_path,
             "stop_reason": "max_iterations",
         }
 
-    monkeypatch.setattr("app.png_shader.pool.generate_llm_scene_candidate", fake_llm_candidate)
-    monkeypatch.setattr("app.png_shader.graph._score_candidates", fake_score_candidates)
-    monkeypatch.setattr("app.png_shader.graph.run_dsl_refinement_loop", fake_refinement_loop)
+    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("app.pipeline.graph._score_candidates", fake_score_candidates)
+    monkeypatch.setattr("app.pipeline.graph.run_dsl_refinement_loop", fake_refinement_loop)
 
     result = run_png_shader_pipeline(png_path, input_spec=input_spec)
 

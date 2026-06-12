@@ -1,4 +1,4 @@
-"""Unit tests for app.png_shader.optimizer (Phase 6).
+"""Unit tests for app.pipeline.optimizer (Phase 6).
 
 No LLM, no browser. Uses a mock render_fn that writes a synthetic PNG.
 """

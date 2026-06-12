@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw
 
-from app.pipeline import metrics
+from app.metrics import compute as metrics
 from app.metrics.compute import compute_objective_metrics, grid_color_report
 
 

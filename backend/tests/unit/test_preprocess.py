@@ -1,4 +1,4 @@
-"""Unit tests for app.png_shader.preprocess (Phase 2).
+"""Unit tests for app.pipeline.preprocess (Phase 2).
 
 All tests create synthetic PNG images in tmp_path using Pillow — no real
 images, no network, no LLM.
