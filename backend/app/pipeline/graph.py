@@ -260,6 +260,9 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
         next_action = selected_quality.get("next_action") if selected_quality else None
         if next_action in {"revise", "fallback"} and selected.dsl:
             effective_failure_type = selected_quality.get("failure_type", "parameter") if selected_quality else "parameter"
+            force_failure_type = state.get("force_failure_type")
+            if force_failure_type:
+                effective_failure_type = force_failure_type
             patch = _build_revision_patch(
                 selected.dsl,
                 state.get("preprocess", {}),
@@ -578,6 +581,8 @@ def run_png_shader_pipeline(
     if not isinstance(protected_aspects, list):
         protected_aspects = ["layer_count", "primitive_types", "background"]
 
+    force_failure_type = quality_config.get("force_failure_type", None)
+
     # Write manifest
     write_manifest(
         run_dir_obj,
@@ -599,6 +604,7 @@ def run_png_shader_pipeline(
             "refinement_patience": refinement_patience,
             "protected_aspects": list(protected_aspects),
             "quality_mode": quality_config.get("mode", "balanced"),
+            "force_failure_type": force_failure_type,
         },
     )
     copy_artifact(image_path, run_dir_obj.path / "reference_input.png")
@@ -626,6 +632,7 @@ def run_png_shader_pipeline(
         "refinement_patience": refinement_patience,
         "protected_aspects": protected_aspects,
         "quality_mode": quality_config.get("mode", "balanced"),
+        "force_failure_type": force_failure_type,
     }
 
     # Run the LangGraph pipeline

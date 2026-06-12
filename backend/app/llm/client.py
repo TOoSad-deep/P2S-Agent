@@ -2,7 +2,7 @@
 
 import base64
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from openai import OpenAI
@@ -50,7 +50,7 @@ class BaseAgent:
                 )
             )
 
-    def _create_http_client(self, proxy: str | None) -> httpx.Client:
+    def _create_http_client(self, proxy: Optional[str]) -> httpx.Client:
         """创建 httpx client，支持代理和超时配置"""
         # Increase timeout for LLM API calls (may need longer for code generation)
         timeout = httpx.Timeout(120.0, connect=10.0, read=120.0, write=120.0)
