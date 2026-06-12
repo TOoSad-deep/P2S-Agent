@@ -193,6 +193,13 @@ def _clamp_value(candidate: float, anchor: float, name: str) -> float:
     return max(0.0, min(upper, candidate))
 
 
+def _step_for(value: float, scale: float) -> float:
+    """Return an absolute step for normalized values, relative elsewhere."""
+    if 0.0 <= value <= 1.0:
+        return scale
+    return scale * max(abs(value), 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
@@ -292,7 +299,7 @@ def optimize_glsl_candidate(
 
     step_count = 0
     param_idx = 0
-    seen_param_keys: set[str] = set()
+    params_since_improvement = 0
 
     while step_count < max_iterations and collected:
         param = collected[param_idx % len(collected)]
@@ -300,16 +307,19 @@ def optimize_glsl_candidate(
 
         if param.glsl_type == "float":
             original = float(param.value)  # type: ignore[arg-type]
-            plus = _clamp_value(original + scale, original, param.name)
-            minus = _clamp_value(original - scale, original, param.name)
+            step = _step_for(original, scale)
+            plus = _clamp_value(original + step, original, param.name)
+            minus = _clamp_value(original - step, original, param.name)
             trials: list[float | list[float]] = [plus, minus]
         else:
             original_components = list(param.value)  # type: ignore[arg-type]
             plus = [
-                _clamp_value(v + scale, v, param.name) for v in original_components
+                _clamp_value(v + _step_for(v, scale), v, param.name)
+                for v in original_components
             ]
             minus = [
-                _clamp_value(v - scale, v, param.name) for v in original_components
+                _clamp_value(v - _step_for(v, scale), v, param.name)
+                for v in original_components
             ]
             trials = [plus, minus]
 
@@ -356,16 +366,13 @@ def optimize_glsl_candidate(
             best_score = best_trial_score
             loss_curve.append(best_score)
             collected = parse_glsl_defines(best_glsl)
+            params_since_improvement = 0
+        else:
+            params_since_improvement += 1
 
-        # Stop when one full round produced no improvement and we've visited
-        # every param at least once. Prevents redundant later rounds on the
-        # same defines when there's no gradient left.
-        seen_param_keys.add(param.name)
-        if (
-            len(seen_param_keys) >= len(collected)
-            and best_score == initial_score
-            and step_count > 0
-        ):
+        # Stop once a full pass over every param produced no accepted trial
+        # since the last improvement.
+        if collected and params_since_improvement >= len(collected) and step_count > 0:
             break
 
     return GlslOptimizeResult(
