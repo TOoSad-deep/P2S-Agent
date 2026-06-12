@@ -317,7 +317,7 @@ def test_png_shader_llm_does_not_send_image_to_generate_model_by_default(monkeyp
 
     monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
     monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", False)
-    monkeypatch.setattr("app.agents.base.BaseAgent", FakeAgent)
+    monkeypatch.setattr("app.llm.client.BaseAgent", FakeAgent)
 
     result = _call_llm(
         "system",
@@ -343,7 +343,7 @@ def test_png_shader_llm_can_send_image_when_generate_model_supports_it(monkeypat
 
     monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
     monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", True)
-    monkeypatch.setattr("app.agents.base.BaseAgent", FakeAgent)
+    monkeypatch.setattr("app.llm.client.BaseAgent", FakeAgent)
 
     result = _call_llm(
         "system",

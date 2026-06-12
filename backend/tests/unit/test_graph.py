@@ -699,7 +699,7 @@ def test_pipeline_force_failure_type_overrides_router(tmp_path, monkeypatch):
     from PIL import Image
     from app.pipeline import graph as graph_module
     from app.pipeline import scoring as scoring_module
-    from app.pipeline import quality_router as qr_module
+    from app.metrics import quality_router as qr_module
     from app.pipeline.input_spec import build_input_spec
 
     img_path = tmp_path / "in.png"
