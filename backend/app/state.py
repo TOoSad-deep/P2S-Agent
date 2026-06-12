@@ -69,3 +69,4 @@ class P2SPipelineState(TypedDict, total=False):
     protected_aspects: list[str]
     quality_mode: str
     force_failure_type: Optional[str]
+    max_added_layers: int

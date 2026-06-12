@@ -53,6 +53,15 @@
       "integer": true,
       "label": "无改进忍耐",
       "description": "Patience rounds: 连续多少轮无改进（低于 min_improvement）后提前终止闭环"
+    },
+    "max_added_layers": {
+      "default": 4,
+      "min": 0,
+      "max": 8,
+      "step": 1,
+      "integer": true,
+      "label": "残差增层上限",
+      "description": "Residual layer budget: 残差驱动增层阶段最多新增的图层数，0 表示关闭该阶段"
     }
   },
   "presets": {
@@ -63,7 +72,8 @@
       "refinement_threshold": 0.75,
       "refinement_high_score_stop": 0.88,
       "refinement_min_improvement": 0.02,
-      "refinement_patience": 1
+      "refinement_patience": 1,
+      "max_added_layers": 0
     },
     "balanced": {
       "description": "均衡模式：默认推荐，在质量和速度之间取得平衡",
@@ -72,7 +82,8 @@
       "refinement_threshold": 0.80,
       "refinement_high_score_stop": 0.92,
       "refinement_min_improvement": 0.01,
-      "refinement_patience": 2
+      "refinement_patience": 2,
+      "max_added_layers": 4
     },
     "quality": {
       "description": "质量模式：追求更高还原度，允许更多迭代轮数和更宽松的早停条件",
@@ -81,7 +92,8 @@
       "refinement_threshold": 0.85,
       "refinement_high_score_stop": 0.95,
       "refinement_min_improvement": 0.005,
-      "refinement_patience": 3
+      "refinement_patience": 3,
+      "max_added_layers": 6
     },
     "aggressive": {
       "description": "激进模式：最大化还原精度，强制开启闭环优化，适合最终出图",
@@ -90,7 +102,8 @@
       "refinement_threshold": 0.90,
       "refinement_high_score_stop": 0.97,
       "refinement_min_improvement": 0.003,
-      "refinement_patience": 4
+      "refinement_patience": 4,
+      "max_added_layers": 6
     }
   }
 }

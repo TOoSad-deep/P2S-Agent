@@ -38,6 +38,7 @@ from app.pipeline.refinement import (
     run_dsl_refinement_loop,
 )
 from app.pipeline.revision import apply_revision_with_rollback, build_revision_log_entry
+from app.pipeline.residual_layers import add_residual_layers
 from app.pipeline.scoring import (
     _accept_improvement,
     _evaluate_glsl_with_webgl,
@@ -299,6 +300,61 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
                         max_shader_chars=max_shader_chars,
                         protected_aspects=protected_aspects,
                         reason=f"revision improved score {selected.final_score:.4f} -> {rev_result.best_score:.4f}",
+                    )
+                    if accepted is not None:
+                        selected_dsl, selected_glsl, selected_metrics, selected_quality = accepted
+
+        # Residual-driven layer addition: construct what optimization can't fix.
+        max_added_layers_val = int(state.get("max_added_layers", 0))
+        if max_added_layers_val > 0 and selected.final_score < float(
+            state.get("refinement_high_score_stop", 0.95)
+        ):
+            res_dir = run_dir / "residual_layers"
+            res_render_fn = _make_render_dsl_fn(
+                res_dir / "renders",
+                canvas_width=canvas_width,
+                canvas_height=canvas_height,
+            )
+            _res_score = _make_revision_scorer(
+                res_dir / "scores",
+                canvas_width=canvas_width,
+                canvas_height=canvas_height,
+                max_shader_chars=max_shader_chars,
+                protected_aspects=protected_aspects,
+            )
+            try:
+                res_result = add_residual_layers(
+                    selected.dsl,
+                    reference_path,
+                    score_fn=lambda d: _res_score(d, reference_path),
+                    render_fn=lambda d: res_render_fn(d, ""),
+                    max_added=max_added_layers_val,
+                )
+            except Exception:
+                logger.exception("residual layer addition failed")
+                res_result = None
+
+            if res_result is not None:
+                save_json(res_dir / "residual.json", {
+                    "initial_score": res_result.initial_score,
+                    "final_score": res_result.final_score,
+                    "layers_added": res_result.layers_added,
+                    "log": res_result.log,
+                })
+                if res_result.layers_added > 0 and res_result.final_score > selected.final_score:
+                    accepted = _accept_improvement(
+                        selected,
+                        res_result.final_dsl,
+                        reference_path,
+                        res_dir / "residual_render.png",
+                        canvas_width=canvas_width,
+                        canvas_height=canvas_height,
+                        max_shader_chars=max_shader_chars,
+                        protected_aspects=protected_aspects,
+                        reason=(
+                            f"residual layers (+{res_result.layers_added}) improved score "
+                            f"{res_result.initial_score:.4f} -> {res_result.final_score:.4f}"
+                        ),
                     )
                     if accepted is not None:
                         selected_dsl, selected_glsl, selected_metrics, selected_quality = accepted
@@ -575,6 +631,12 @@ def run_png_shader_pipeline(
             int(quality_config.get("refinement_patience", get_default("refinement_patience"))),
         )
     )
+    max_added_layers = int(
+        strategy_clamp(
+            "max_added_layers",
+            int(quality_config.get("max_added_layers", get_default("max_added_layers"))),
+        )
+    )
     protected_aspects = quality_config.get(
         "protected_aspects", ["layer_count", "primitive_types", "background"]
     )
@@ -605,6 +667,7 @@ def run_png_shader_pipeline(
             "protected_aspects": list(protected_aspects),
             "quality_mode": quality_config.get("mode", "balanced"),
             "force_failure_type": force_failure_type,
+            "max_added_layers": max_added_layers,
         },
     )
     copy_artifact(image_path, run_dir_obj.path / "reference_input.png")
@@ -633,6 +696,7 @@ def run_png_shader_pipeline(
         "protected_aspects": protected_aspects,
         "quality_mode": quality_config.get("mode", "balanced"),
         "force_failure_type": force_failure_type,
+        "max_added_layers": max_added_layers,
     }
 
     # Run the LangGraph pipeline

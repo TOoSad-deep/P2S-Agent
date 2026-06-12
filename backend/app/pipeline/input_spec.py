@@ -35,6 +35,7 @@ DEFAULT_INPUT_SPEC: dict[str, Any] = {
         "refinement_min_improvement": 0.01,
         "refinement_patience": 2,
         "force_failure_type": None,
+        "max_added_layers": 4,
         "protected_aspects": ["layer_count", "primitive_types", "background"],
     },
     "candidates": {
