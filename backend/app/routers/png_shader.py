@@ -290,7 +290,7 @@ async def refine_png_shader(
     canvas_height = int(canvas.get("height", 512))
 
     try:
-        from app.png_shader.candidates.llm_scene_candidate import generate_llm_refinement
+        from app.candidates.llm_scene import generate_llm_refinement
 
         revised = generate_llm_refinement(
             preprocess=preprocess,
@@ -309,8 +309,8 @@ async def refine_png_shader(
 
     io_record = revised.pop("_io", None)
 
-    from app.png_shader.compiler import compile_dsl
-    from app.png_shader.dsl_validator import validate_dsl
+    from app.dsl.compiler import compile_dsl
+    from app.dsl.validator import validate_dsl
 
     val = validate_dsl(revised)
     if not val.valid:
