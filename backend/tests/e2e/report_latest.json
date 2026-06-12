@@ -1,0 +1,79 @@
+{
+  "n": 10,
+  "avg_final_score": 0.6757,
+  "pass": 2,
+  "acceptable": 4,
+  "fail": 4,
+  "rows": [
+    {
+      "sample": "81ebfa1e23ac2ca8582edeefdc9016be",
+      "run_id": "run_fa0f31f4",
+      "status": "completed",
+      "final_score": 0.7957487327170629,
+      "selected_source": null
+    },
+    {
+      "sample": "box-gradient",
+      "run_id": "run_e5a5e57e",
+      "status": "completed",
+      "final_score": 0.9870235215015066,
+      "selected_source": null
+    },
+    {
+      "sample": "circle",
+      "run_id": "run_c552a4bc",
+      "status": "completed",
+      "final_score": 0.9209037595546062,
+      "selected_source": null
+    },
+    {
+      "sample": "glow-ring",
+      "run_id": "run_63fca77a",
+      "status": "completed",
+      "final_score": 0.6365204887468936,
+      "selected_source": null
+    },
+    {
+      "sample": "images (1)",
+      "run_id": "run_a5fd06ff",
+      "status": "completed",
+      "final_score": 0.5158548423406736,
+      "selected_source": null
+    },
+    {
+      "sample": "images",
+      "run_id": "run_dfeb881d",
+      "status": "completed",
+      "final_score": 0.38486526636122326,
+      "selected_source": null
+    },
+    {
+      "sample": "roundedbox-vignette",
+      "run_id": "run_2ad1a308",
+      "status": "completed",
+      "final_score": 0.752473972133048,
+      "selected_source": null
+    },
+    {
+      "sample": "下载 (1)",
+      "run_id": "run_7ad56d67",
+      "status": "completed",
+      "final_score": 0.5162799991558994,
+      "selected_source": null
+    },
+    {
+      "sample": "下载 (2)",
+      "run_id": "run_5facc26f",
+      "status": "completed",
+      "final_score": 0.5134590102375104,
+      "selected_source": null
+    },
+    {
+      "sample": "下载",
+      "run_id": "run_000b24c3",
+      "status": "completed",
+      "final_score": 0.7334500257340905,
+      "selected_source": null
+    }
+  ]
+}

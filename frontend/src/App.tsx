@@ -1,6 +1,6 @@
 import { usePngShader, type LlmMode } from './hooks/usePngShader'
 import { useState, useCallback } from 'react'
-import { Sparkles, Zap, Github } from 'lucide-react'
+import { Sparkles, Zap } from 'lucide-react'
 import PngShaderView from './components/PngShaderView'
 import type { StrategyConfig, StrategyMode } from './lib/strategy-presets'
 import { FALLBACK_DEFAULT_STRATEGY, FALLBACK_PRESETS } from './lib/strategy-presets'
@@ -10,20 +10,21 @@ export default function App() {
     result,
     loading,
     error,
-    inputImageUrl,
-    runPipeline,
-    stopPipeline,
+    runPngShader,
+    stopRun,
     stopPending,
-    strategy: hookStrategy,
     setStrategyPartial,
   } = usePngShader()
 
   const [llmMode, setLlmMode] = useState<LlmMode>("off")
   const [strategy, setStrategy] = useState<StrategyConfig>(FALLBACK_DEFAULT_STRATEGY)
+  const [inputImageUrl, setInputImageUrl] = useState<string | null>(null)
 
   const handleRun = useCallback((file: File) => {
-    runPipeline(file, { llm_mode: llmMode })
-  }, [runPipeline, llmMode])
+    const url = URL.createObjectURL(file)
+    setInputImageUrl(url)
+    runPngShader(file)
+  }, [runPngShader])
 
   const handleLlmModeChange = useCallback((mode: LlmMode) => {
     setLlmMode(mode)
@@ -97,12 +98,12 @@ export default function App() {
                     {result.candidate_details?.length || 0} candidates
                   </span>
                 </div>
-                {result.objective_metrics?.ssim !== undefined && (
+                {result.objective_metrics?.ssim != null && (
                   <div className={`score-badge ${
-                    result.objective_metrics.ssim >= 0.8 ? 'score-high' : 
-                    result.objective_metrics.ssim >= 0.5 ? 'score-medium' : 'score-low'
+                    (result.objective_metrics.ssim as number) >= 0.8 ? 'score-high' : 
+                    (result.objective_metrics.ssim as number) >= 0.5 ? 'score-medium' : 'score-low'
                   }`}>
-                    SSIM: {(result.objective_metrics.ssim * 100).toFixed(0)}%
+                    SSIM: {((result.objective_metrics.ssim as number) * 100).toFixed(0)}%
                   </div>
                 )}
               </div>
@@ -136,7 +137,7 @@ export default function App() {
           strategy={strategy}
           onStrategyPartial={handleStrategyPartial}
           onApplyPreset={handleApplyPreset}
-          onStop={stopPipeline}
+          onStop={stopRun}
           stopPending={stopPending}
         />
       </main>
