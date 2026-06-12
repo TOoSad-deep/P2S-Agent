@@ -88,6 +88,7 @@ def run_dsl_refinement_loop(
     force_first_iteration: bool = False,
     loop_dir: Path,
     strategy_reader: "Callable[[], dict] | None" = None,
+    pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
 ) -> dict:
     """Drive LLM to iteratively revise a DSL candidate.
 
@@ -300,6 +301,20 @@ def run_dsl_refinement_loop(
             bool(entry["improved"]),
             (entry["changes_summary"] or "")[:120],
         )
+
+        # Arbitrate noise-level gains: objective metrics can't tell 0.005
+        # improvement from rendering noise — let the judge veto.
+        if (
+            pairwise_judge is not None
+            and 0.0 < delta < min_improvement
+            and current_render_path is not None
+            and render_path.exists()
+        ):
+            verdict = pairwise_judge(current_render_path, render_path)
+            if verdict == "A":  # judge prefers the previous best
+                entry["vlm_override"] = "veto_small_gain"
+                delta = 0.0
+                entry["improved"] = False
 
         if delta > 0.0:
             best_dsl = revised

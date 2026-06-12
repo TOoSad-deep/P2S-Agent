@@ -70,3 +70,5 @@ class P2SPipelineState(TypedDict, total=False):
     quality_mode: str
     force_failure_type: Optional[str]
     max_added_layers: int
+    vlm_judge_enabled: bool
+    vlm_tie_epsilon: float

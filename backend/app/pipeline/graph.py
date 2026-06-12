@@ -39,6 +39,8 @@ from app.pipeline.refinement import (
 )
 from app.pipeline.revision import apply_revision_with_rollback, build_revision_log_entry
 from app.pipeline.residual_layers import add_residual_layers
+from app.llm.vlm_judge import judge_pairwise, judge_rubric
+from app.metrics.quality_router import compute_final_score
 from app.pipeline.scoring import (
     _accept_improvement,
     _evaluate_glsl_with_webgl,
@@ -157,6 +159,34 @@ def node_selection(state: P2SPipelineState) -> dict:
         )
         if best_glsl_score > 0 and best_glsl_score >= best_dsl_score:
             prefer_output_kind = "glsl"
+
+    # VLM near-tie arbitration
+    if state.get("vlm_judge_enabled"):
+        run_dir = Path(state["run_dir"])
+        reference_path = run_dir / "reference_input.png"
+        ranked = sorted(
+            [c for c in candidates if c.compile_success and c.render_path],
+            key=lambda c: -c.final_score,
+        )
+        if (
+            len(ranked) >= 2
+            and (ranked[0].final_score - ranked[1].final_score)
+            < float(state.get("vlm_tie_epsilon", 0.05))
+        ):
+            verdict = judge_pairwise(
+                reference_path, ranked[0].render_path, ranked[1].render_path,
+                work_dir=run_dir / "judge",
+            )
+            logger.info(
+                "vlm near-tie arbitration: %s vs %s -> %s",
+                ranked[0].id, ranked[1].id, verdict,
+            )
+            if verdict == "B":
+                bump = ranked[0].final_score - ranked[1].final_score + 0.001
+                ranked[1].final_score += bump
+                ranked[1].reason.append(f"vlm pairwise judge won near-tie (+{bump:.4f})")
+            elif verdict == "A":
+                ranked[0].reason.append("vlm pairwise judge confirmed near-tie winner")
 
     selected = select_best_candidate(candidates, prefer_output_kind=prefer_output_kind)
 
@@ -453,6 +483,12 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
             force_first_iteration=effective_refinement_mode == "on",
             loop_dir=run_dir / "refinement",
             protected_aspects=protected_aspects,
+            pairwise_judge=(
+                (lambda cur, new: judge_pairwise(
+                    reference_path, cur, new, work_dir=run_dir / "judge"
+                ))
+                if state.get("vlm_judge_enabled") else None
+            ),
         )
         refinement_history = ref_result.get("history", [])
         refinement_summary.update({
@@ -478,6 +514,33 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
             selected_glsl = selected.compile_glsl
             selected_metrics = ref_result["best_metrics"]
             selected_quality = ref_result["best_quality"]
+
+    # VLM final gate
+    judge_summary = None
+    if state.get("vlm_judge_enabled") and selected is not None and selected.render_path:
+        rubric = judge_rubric(
+            reference_path, selected.render_path, work_dir=run_dir / "judge"
+        )
+        if rubric is not None:
+            blended = compute_final_score(selected_metrics, rubric["semantic_scores"])
+            judge_summary = {
+                **rubric,
+                "objective_score": float(selected.final_score),
+                "blended_score": blended,
+            }
+            logger.info(
+                "vlm final gate: objective=%.4f blended=%.4f failure_type=%s",
+                float(selected.final_score), blended, rubric["failure_type"],
+            )
+            if selected_quality is not None:
+                selected_quality = {
+                    **selected_quality,
+                    "final_score": blended,
+                    "semantic_scores": rubric["semantic_scores"],
+                    "vlm_failure_type": rubric["failure_type"],
+                }
+            selected.final_score = blended
+            save_json(run_dir / "judge" / "final_rubric.json", judge_summary)
 
     # Sync selected record
     _sync_selected_record_for_response(
@@ -513,6 +576,7 @@ def _run_post_pipeline(state: P2SPipelineState) -> P2SPipelineState:
         "selected_glsl": selected_glsl,
         "selected_metrics": selected_metrics,
         "selected_quality": selected_quality or {},
+        "vlm_judge": judge_summary,
     }
 
 
@@ -637,6 +701,17 @@ def run_png_shader_pipeline(
             int(quality_config.get("max_added_layers", get_default("max_added_layers"))),
         )
     )
+    vlm_judge_enabled = (
+        bool(int(strategy_clamp(
+            "vlm_judge_enabled",
+            int(quality_config.get("vlm_judge_enabled", get_default("vlm_judge_enabled"))),
+        )))
+        and effective_llm_enabled
+    )
+    vlm_tie_epsilon = float(strategy_clamp(
+        "vlm_tie_epsilon",
+        float(quality_config.get("vlm_tie_epsilon", get_default("vlm_tie_epsilon"))),
+    ))
     protected_aspects = quality_config.get(
         "protected_aspects", ["layer_count", "primitive_types", "background"]
     )
@@ -668,6 +743,8 @@ def run_png_shader_pipeline(
             "quality_mode": quality_config.get("mode", "balanced"),
             "force_failure_type": force_failure_type,
             "max_added_layers": max_added_layers,
+            "vlm_judge_enabled": vlm_judge_enabled,
+            "vlm_tie_epsilon": vlm_tie_epsilon,
         },
     )
     copy_artifact(image_path, run_dir_obj.path / "reference_input.png")
@@ -697,6 +774,8 @@ def run_png_shader_pipeline(
         "quality_mode": quality_config.get("mode", "balanced"),
         "force_failure_type": force_failure_type,
         "max_added_layers": max_added_layers,
+        "vlm_judge_enabled": vlm_judge_enabled,
+        "vlm_tie_epsilon": vlm_tie_epsilon,
     }
 
     # Run the LangGraph pipeline
@@ -730,4 +809,5 @@ def run_png_shader_pipeline(
         "refinement_summary": state.get("refinement_summary", {}),
         "refinement_history": state.get("refinement_history", []),
         "candidate_details": state.get("candidate_details", []),
+        "vlm_judge": state.get("vlm_judge"),
     }
