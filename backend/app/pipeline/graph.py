@@ -817,7 +817,8 @@ def _run_seed_glsl_path(
     GLSL candidate, then hands off to the unchanged ``_run_post_pipeline``.
 
     Raises ValueError when the seed cannot be adapted to renderable Shadertoy
-    GLSL, so the caller/worker marks the run failed.
+    GLSL, so the caller/worker marks the run failed.  Raises RuntimeError when
+    the WebGL renderer is unavailable during initial scoring of the seed shader.
     """
     from app.pipeline.seed_glsl import adapt_seed_glsl, build_seed_candidate
 
@@ -849,14 +850,19 @@ def _run_seed_glsl_path(
     reference_path = run_dir / "reference_input.png"
     candidate_dir = run_dir / "candidates"
     candidate_dir.mkdir(parents=True, exist_ok=True)
-    metrics, quality, score, render_path = _evaluate_glsl_with_webgl(
-        adapted.glsl,
-        reference_path,
-        candidate_dir / f"{candidate.id}_webgl.png",
-        canvas_width=state.get("canvas_width", 512),
-        canvas_height=state.get("canvas_height", 512),
-        max_shader_chars=state.get("max_shader_chars", 12000),
-    )
+    try:
+        metrics, quality, score, render_path = _evaluate_glsl_with_webgl(
+            adapted.glsl,
+            reference_path,
+            candidate_dir / f"{candidate.id}_webgl.png",
+            canvas_width=state.get("canvas_width", 512),
+            canvas_height=state.get("canvas_height", 512),
+            max_shader_chars=state.get("max_shader_chars", 12000),
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"seed GLSL initial scoring failed (WebGL renderer unavailable?): {exc}"
+        ) from exc
     candidate.objective_metrics = metrics
     candidate.quality_router = quality
     candidate.final_score = score
