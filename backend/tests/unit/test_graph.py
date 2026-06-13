@@ -20,6 +20,7 @@ from app.pipeline.graph import (
     run_png_shader_pipeline,
     select_best_candidate,
 )
+from app.pipeline.input_spec import build_input_spec
 from app.pipeline.preprocess import preprocess_image
 
 
@@ -1105,3 +1106,62 @@ def test_pipeline_manifest_includes_strategy_fields(tmp_path):
     assert cfg.get("force_failure_type") == "color"
     assert cfg.get("protected_aspects") == ["layer_count", "visual_causality"]
     assert cfg.get("quality_mode") == "aggressive"
+
+
+def test_seed_glsl_pipeline_skips_pool_and_refines(tmp_path, monkeypatch):
+    """A seed_glsl run must build one 'seed' candidate (no pool generation)
+    and drive it through run_glsl_refinement_loop."""
+    import app.pipeline.graph as graph_mod
+
+    png = make_solid_png(tmp_path, color=(120, 60, 30, 255))
+
+    seed = (
+        "#define R 0.30\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(R); }"
+    )
+    improved = seed.replace("0.30", "0.50")
+
+    def fake_eval(glsl, ref_path, output_path, *, canvas_width, canvas_height, max_shader_chars):
+        score = 0.30
+        for line in glsl.splitlines():
+            if line.startswith("#define R"):
+                score = float(line.split()[-1])
+        return ({"mse": 1.0 - score}, {"final_score": score, "next_action": "refine"}, score, output_path)
+
+    def fake_refine(**kwargs):
+        return {"glsl": improved, "_io": {"mode": "glsl_refinement"}}
+
+    monkeypatch.setattr(graph_mod, "_evaluate_glsl_with_webgl", fake_eval)
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    spec = build_input_spec(
+        png,
+        quality={"refinement_mode": "on", "max_refinement_iterations": 2, "refinement_patience": 1},
+        candidates={"glsl_render_enabled": True},
+    )
+
+    result = run_png_shader_pipeline(png, spec, run_id="seedtest", seed_glsl=seed)
+
+    details = result["candidate_details"]
+    assert len(details) == 1
+    assert details[0]["source"] == "seed"
+    assert result["refinement_summary"]["enabled"] is True
+    assert "0.50" in (result["selected_glsl"] or "")
+
+
+def test_seed_glsl_invalid_raises(tmp_path, monkeypatch):
+    """A seed that cannot be adapted (and no LLM client) must raise so the
+    background worker marks the run failed."""
+    png = make_solid_png(tmp_path)
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **kwargs: None,
+    )
+    spec = build_input_spec(png, candidates={"glsl_render_enabled": True})
+
+    with pytest.raises(ValueError, match="seed GLSL"):
+        run_png_shader_pipeline(
+            png, spec, run_id="seedbad", seed_glsl="float helper(){ return 1.0; }"
+        )
