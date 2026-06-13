@@ -43,7 +43,12 @@ def _wrap_legacy_main(glsl: str) -> str | None:
     legacy fragment shader (already has ``mainImage``, no ``main()``, or never
     writes ``gl_FragColor``). The transform is textual and best-effort: when it
     produces something that still fails validation, the caller falls back to the
-    LLM port stage.
+    LLM port stage.  ``gl_FragCoord`` is rewritten to ``vec4(fragCoord, 0.0,
+    1.0)``, so ``.xy`` stays correct but ``.z``/``.w`` become hardcoded ``0.0``/
+    ``1.0`` (depth/clip channels are lost); such shaders still compile, so this
+    is not caught by re-validation.  Only ``gl_FragData[0]`` is rewritten; MRT
+    indices (``gl_FragData[1]``+) are left as-is, which fails re-validation and
+    correctly falls through to the LLM port stage.
     """
     if "void mainImage" in glsl:
         return None

@@ -59,3 +59,19 @@ def test_empty_source_is_invalid():
     result = adapt_seed_glsl("   ")
     assert result.valid is False
     assert result.adapted_by == "failed"
+    assert result.errors
+
+
+def test_build_seed_candidate_fields():
+    candidate = build_seed_candidate(
+        VALID_SHADERTOY, adapted_by="normalized", warnings=["w1"]
+    )
+    assert candidate.id == "seed_0"
+    assert candidate.source == "seed"
+    assert candidate.output_kind == "glsl"
+    assert candidate.dsl is None
+    assert candidate.compile_success is True
+    assert candidate.compile_glsl == VALID_SHADERTOY
+    assert candidate.selected is True
+    assert candidate.glsl_metadata["adapted_by"] == "normalized"
+    assert candidate.glsl_metadata["warnings"] == ["w1"]
