@@ -73,7 +73,10 @@ export default function PngShaderView({
   const handleSeedFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    file.text().then((text) => setSeedGlsl(text));
+    file
+      .text()
+      .then((text) => setSeedGlsl(text))
+      .catch((err) => console.error("seed file read failed", err));
   }, []);
 
   const [dragging, setDragging] = useState(false);
