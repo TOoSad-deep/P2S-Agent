@@ -1214,3 +1214,128 @@ def test_dsl_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
     )
 
     assert snaps == [1, 2]
+
+
+def test_run_post_pipeline_publishes_baseline_and_iterations(tmp_path, monkeypatch):
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    cand = CandidateRecord(
+        id="llm_0",
+        source="llm",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.4,
+        selected=True,
+        objective_metrics={"mse": 0.5},
+        quality_router={"final_score": 0.4, "next_action": "accept"},
+    )
+    improved_glsl = "#define R 0.9\n" + glsl
+
+    def fake_loop(*args, **kwargs):
+        on_iteration = kwargs.get("on_iteration")
+        if on_iteration is not None:
+            on_iteration({
+                "best_glsl": improved_glsl,
+                "best_score": 0.8,
+                "best_metrics": {"mse": 0.1},
+                "best_quality": {"final_score": 0.8, "next_action": "accept"},
+                "history": [{"iteration": 1, "score_after": 0.8, "improved": True}],
+            })
+        return {
+            "best_glsl": improved_glsl,
+            "best_score": 0.8,
+            "best_metrics": {"mse": 0.1},
+            "best_quality": {"final_score": 0.8, "next_action": "accept"},
+            "best_render_path": None,
+            "history": [{"iteration": 1, "score_after": 0.8, "improved": True}],
+            "stop_reason": "threshold_reached",
+        }
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+
+    published: list[dict] = []
+    result = _run_post_pipeline(
+        {
+            "selected_candidate_id": "llm_0",
+            "candidates": [cand],
+            "run_dir": str(tmp_path),
+            "preprocess": {"palette": ["#ffffff"]},
+            "selected_dsl": None,
+            "selected_glsl": glsl,
+            "selected_metrics": {"mse": 0.5},
+            "selected_quality": {"final_score": 0.4, "next_action": "accept"},
+            "refinement_mode": "on",
+            "max_refinement_iterations": 2,
+            "llm_enabled": False,
+            "glsl_render_enabled": True,
+            "vlm_judge_enabled": False,
+        },
+        publish_partial=lambda p: published.append(p),
+    )
+
+    assert any("scoreboard" in p for p in published)
+    iter_partials = [p for p in published if "refinement_history" in p]
+    assert iter_partials, "expected at least one per-iteration partial"
+    last = iter_partials[-1]
+    assert last["refinement_history"][0]["iteration"] == 1
+    assert last["selected_glsl"] == improved_glsl
+    assert last["refinement_summary"]["iterations"] == 1
+    assert last["refinement_summary"]["enabled"] is True
+    assert result["selected_glsl"] == improved_glsl
+
+
+def test_pipeline_threads_publish_partial_baseline(tmp_path):
+    png = make_solid_png(tmp_path)
+    seen: list[dict] = []
+    run_png_shader_pipeline(
+        png, run_id="pub_smoke", publish_partial=lambda p: seen.append(p)
+    )
+    assert any("scoreboard" in p for p in seen)
+    # Both baseline publishes fire on a normal run; guards the threading too.
+    assert len(seen) >= 2
+
+
+def test_seed_pipeline_publishes_iterations(tmp_path, monkeypatch):
+    import app.pipeline.graph as graph_mod
+
+    png = make_solid_png(tmp_path, color=(120, 60, 30, 255))
+    seed = (
+        "#define R 0.30\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(R); }"
+    )
+    improved = seed.replace("0.30", "0.50")
+
+    def fake_eval(glsl, ref_path, output_path, *, canvas_width, canvas_height, max_shader_chars):
+        score = 0.30
+        for line in glsl.splitlines():
+            if line.startswith("#define R"):
+                score = float(line.split()[-1])
+        return ({"mse": 1.0 - score}, {"final_score": score, "next_action": "refine"}, score, output_path)
+
+    def fake_refine(**kwargs):
+        return {"glsl": improved, "_io": {"mode": "glsl_refinement"}}
+
+    monkeypatch.setattr(graph_mod, "_evaluate_glsl_with_webgl", fake_eval)
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    spec = build_input_spec(
+        png,
+        quality={"refinement_mode": "on", "max_refinement_iterations": 2, "refinement_patience": 1},
+        candidates={"glsl_render_enabled": True},
+    )
+    seen: list[dict] = []
+    result = run_png_shader_pipeline(
+        png, spec, run_id="seedpub", seed_glsl=seed, publish_partial=lambda p: seen.append(p)
+    )
+
+    assert any("refinement_history" in p for p in seen)
+    # Final result converged to the improved shader (not reverted).
+    assert "0.50" in (result["selected_glsl"] or "")

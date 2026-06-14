@@ -350,10 +350,14 @@ def _run_post_pipeline(
     state: P2SPipelineState,
     *,
     strategy_reader: Callable[[], dict] | None = None,
+    publish_partial: Callable[[dict], None] | None = None,
 ) -> P2SPipelineState:
     """Run optimization, revision, and refinement after selection.
 
-    This is called after the LangGraph pipeline completes.
+    This is called after the LangGraph pipeline completes. When
+    ``publish_partial`` is provided, a baseline snapshot is published before
+    refinement and one partial per refinement iteration via ``on_iteration``,
+    so a polling client can render progress live.
     """
     from app.pipeline.scoring import _accept_improvement  # avoid circular import
 
@@ -397,6 +401,42 @@ def _run_post_pipeline(
         "patience": state.get("refinement_patience", 2),
     }
     refinement_history: list = []
+
+    def _publish_iteration(snapshot: dict) -> None:
+        if publish_partial is None:
+            return
+        hist = list(snapshot.get("history") or [])
+        best = snapshot.get("best_score")
+        try:
+            publish_partial({
+                "refinement_history": hist,
+                "refinement_summary": {
+                    **refinement_summary,
+                    "enabled": True,
+                    "iterations": len(hist),
+                    "final_score": best if best is not None
+                    else refinement_summary.get("final_score"),
+                },
+                "selected_glsl": snapshot.get("best_glsl") or None,
+                "objective_metrics": dict(snapshot.get("best_metrics") or {}),
+                "quality_router": dict(snapshot.get("best_quality") or {}),
+            })
+        except Exception:
+            logger.warning("publish_partial (iteration) failed", exc_info=True)
+
+    # Baseline #1: surface candidates + initial selection ASAP.
+    if publish_partial is not None:
+        try:
+            publish_partial({
+                "preprocess": state.get("preprocess", {}),
+                "scoreboard": build_scoreboard(candidates),
+                "selected_candidate_id": selected.id,
+                "selected_glsl": selected.compile_glsl,
+                "objective_metrics": dict(selected.objective_metrics),
+                "quality_router": dict(selected.quality_router) if selected.quality_router else {},
+            })
+        except Exception:
+            logger.warning("publish_partial (baseline) failed", exc_info=True)
 
     # Optimization and revision
     if selected.dsl and selected_quality:
@@ -593,6 +633,18 @@ def _run_post_pipeline(
     refinement_min_improvement = state.get("refinement_min_improvement", 0.01)
     refinement_patience = state.get("refinement_patience", 2)
 
+    # Baseline #2: reflect optimizer / revision / residual gains before refinement.
+    if publish_partial is not None:
+        try:
+            publish_partial({
+                "scoreboard": build_scoreboard(candidates),
+                "selected_glsl": selected_glsl,
+                "objective_metrics": dict(selected_metrics),
+                "quality_router": dict(selected_quality) if selected_quality else {},
+            })
+        except Exception:
+            logger.warning("publish_partial (pre-refine) failed", exc_info=True)
+
     should_refine, refinement_decision = _should_run_refinement(
         effective_refinement_mode,
         selected,
@@ -611,6 +663,8 @@ def _run_post_pipeline(
 
     if should_refine and selected and selected.dsl:
         initial_refinement_score = selected.final_score
+        # Reflect the post-optimization baseline in iteration partials.
+        refinement_summary["initial_score"] = initial_refinement_score
         ref_result = run_dsl_refinement_loop(
             preprocess=state.get("preprocess", {}),
             initial_dsl=selected.dsl,
@@ -642,6 +696,7 @@ def _run_post_pipeline(
                 ))
                 if state.get("vlm_judge_enabled") else None
             ),
+            on_iteration=_publish_iteration,
         )
         refinement_history = ref_result.get("history", [])
         refinement_summary.update({
@@ -674,6 +729,8 @@ def _run_post_pipeline(
             refinement_summary["decision"] = "glsl_render_disabled"
         else:
             initial_refinement_score = selected.final_score
+            # Reflect the post-optimization baseline in iteration partials.
+            refinement_summary["initial_score"] = initial_refinement_score
 
             def _glsl_refinement_evaluate(
                 glsl: str, render_path: Path
@@ -719,6 +776,7 @@ def _run_post_pipeline(
                     ))
                     if state.get("vlm_judge_enabled") else None
                 ),
+                on_iteration=_publish_iteration,
             )
             refinement_history = ref_result.get("history", [])
             refinement_summary.update({
@@ -811,6 +869,7 @@ def _run_seed_glsl_path(
     state: P2SPipelineState,
     *,
     strategy_reader: Callable[[], dict] | None = None,
+    publish_partial: Callable[[dict], None] | None = None,
 ) -> P2SPipelineState:
     """Seed entry: refine an externally-supplied GLSL instead of generating
     candidates. Runs preprocess + adapt + score to synthesize a single selected
@@ -875,7 +934,9 @@ def _run_seed_glsl_path(
     state["selected_metrics"] = dict(metrics)
     state["selected_quality"] = dict(quality)
 
-    return _run_post_pipeline(state, strategy_reader=strategy_reader)
+    return _run_post_pipeline(
+        state, strategy_reader=strategy_reader, publish_partial=publish_partial
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +981,7 @@ def run_png_shader_pipeline(
     llm_implementation: Implementation | None = None,
     progress_callback: Callable[[str], None] | None = None,
     strategy_reader: Callable[[], dict] | None = None,
+    publish_partial: Callable[[dict], None] | None = None,
 ) -> dict:
     """Run the full PNG-to-Shader pipeline and return structured results.
 
@@ -1094,7 +1156,8 @@ def run_png_shader_pipeline(
         if progress_callback:
             progress_callback("optimizing")
         state = _run_seed_glsl_path(
-            seed_glsl, initial_state, strategy_reader=strategy_reader
+            seed_glsl, initial_state, strategy_reader=strategy_reader,
+            publish_partial=publish_partial,
         )
     else:
         state = _pipeline_graph.invoke(initial_state)
@@ -1103,7 +1166,9 @@ def run_png_shader_pipeline(
         if progress_callback:
             progress_callback("optimizing")
 
-        state = _run_post_pipeline(state, strategy_reader=strategy_reader)
+        state = _run_post_pipeline(
+            state, strategy_reader=strategy_reader, publish_partial=publish_partial
+        )
 
     logger.info("pipeline done: run_id=%s", effective_run_id)
 
