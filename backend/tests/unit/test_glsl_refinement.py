@@ -335,3 +335,38 @@ def test_build_recent_history_notes_excludes_code_and_caps_entries():
     assert len(notes) == 3
     assert "[HISTORY iter 3]" in notes[0]
     assert "[HISTORY iter 5]" in notes[2]
+
+
+def test_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
+    glsls = [VALID_GLSL_A.replace("0.30", v) for v in ("0.40", "0.55")]
+    seq = iter(glsls)
+
+    def fake_refine(**kwargs):
+        return {"glsl": next(seq), "_io": {}}
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    snaps: list[dict] = []
+    run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {"mse": 0.7},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r,
+        max_iterations=2,
+        threshold=0.99,
+        high_score_stop=0.999,
+        min_improvement=0.001,
+        no_improvement_patience=5,
+        loop_dir=tmp_path / "loop",
+        on_iteration=lambda s: snaps.append(
+            {"len": len(s["history"]), "best": s["best_score"], "glsl": s["best_glsl"]}
+        ),
+    )
+
+    assert [s["len"] for s in snaps] == [1, 2]
+    assert snaps[-1]["best"] == pytest.approx(0.55)
+    assert "0.55" in snaps[-1]["glsl"]

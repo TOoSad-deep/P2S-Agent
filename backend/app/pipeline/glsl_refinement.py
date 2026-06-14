@@ -80,6 +80,7 @@ def run_glsl_refinement_loop(
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
     rubric_judge: "Callable[[Path], dict | None] | None" = None,
+    on_iteration: "Callable[[dict], None] | None" = None,
 ) -> dict:
     """Drive iterative LLM revisions for a raw Shadertoy GLSL candidate."""
     from app.candidates.llm_scene import generate_llm_glsl_refinement
@@ -102,6 +103,22 @@ def run_glsl_refinement_loop(
     fresh_restarts_left = max_fresh_restarts
     pending_fresh_start = False
     stagnation_anchor = 0
+
+    def _record(entry: dict) -> None:
+        history.append(entry)
+        save_json(loop_dir / f"iter_{i + 1}.json", entry)
+        if on_iteration is None:
+            return
+        try:
+            on_iteration({
+                "best_glsl": best_glsl,
+                "best_score": best_score,
+                "best_metrics": best_metrics,
+                "best_quality": best_quality,
+                "history": list(history),
+            })
+        except Exception:
+            logger.warning("on_iteration publish failed", exc_info=True)
 
     def _trigger_fresh_restart() -> bool:
         nonlocal fresh_restarts_left, pending_fresh_start
@@ -214,8 +231,7 @@ def run_glsl_refinement_loop(
             entry["llm_duration_ms"] = int((time.monotonic() - llm_start) * 1000)
             entry["error_type"] = exc.__class__.__name__
             entry["error"] = f"LLM call failed: {_short_exception(exc)}"
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             stop_reason = "llm_call_failed"
             break
 
@@ -230,16 +246,14 @@ def run_glsl_refinement_loop(
                 "LLM returned no usable GLSL: response content was empty, was "
                 "not valid JSON, or did not contain a mainImage entry point."
             )
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             stop_reason = "llm_returned_none"
             break
 
         static = validate_shader_static(revised_glsl)
         if not static["valid"]:
             entry["error"] = f"GLSL invalid: {static['errors'][:2]}"
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             no_improvement_count += 1
             extra_feedback = [
                 "[COMPILE FEEDBACK] Your last revision failed static validation: "
@@ -264,8 +278,7 @@ def run_glsl_refinement_loop(
                 "(compile or runtime error)"
             )
             entry["score_after"] = 0.0
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             no_improvement_count += 1
             extra_feedback = [
                 "[RENDER FAILED] The revised shader passed static checks but "
@@ -319,8 +332,7 @@ def run_glsl_refinement_loop(
         else:
             no_improvement_count += 1
 
-        history.append(entry)
-        save_json(loop_dir / f"iter_{i + 1}.json", entry)
+        _record(entry)
 
         if no_improvement_count >= no_improvement_patience and not _trigger_fresh_restart():
             stop_reason = "no_improvement_patience"
