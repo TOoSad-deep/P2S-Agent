@@ -43,6 +43,21 @@ def _store_run(run_id: str, payload: dict) -> None:
         _run_store[run_id] = payload
 
 
+def _publish_partial_to_store(run_id: str, partial: dict) -> None:
+    """Merge a partial pipeline result into a still-running run's store entry.
+
+    Best-effort: silently no-ops when the run was evicted or already reached a
+    terminal state, so a late partial can't resurrect a finished run. Only data
+    fields are merged; control fields (strategy / stop_requested /
+    strategy_revision / status / ...) are preserved.
+    """
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+        if stored is None or stored.get("status") != "running":
+            return
+        stored.update(partial)
+
+
 def _run_png_shader_background(
     *,
     run_id: str,
@@ -68,6 +83,9 @@ def _run_png_shader_background(
                 "stop_requested": bool(stored.get("stop_requested")),
             }
 
+    def _publish_partial(partial: dict) -> None:
+        _publish_partial_to_store(run_id, partial)
+
     run_log_path = Path("artifacts") / run_id / "run.log"
     with attach_run_log(run_id=run_id, log_file=run_log_path):
         logger.info("worker start: run_id=%s image=%s", run_id, image_path.name)
@@ -85,6 +103,7 @@ def _run_png_shader_background(
                     seed_glsl=seed_glsl,
                     progress_callback=_progress,
                     strategy_reader=_strategy_reader,
+                    publish_partial=_publish_partial,
                 )
                 result_with_status = {**pipeline_result, "status": "completed", "current_phase": "done"}
                 with _run_store_lock:
@@ -147,6 +166,12 @@ async def run_png_shader(
                 detail=f"Invalid input_spec_json: {exc}",
             ) from exc
 
+    if input_spec is not None and not isinstance(input_spec, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="input_spec_json must decode to an object",
+        )
+
     if seed_glsl is not None:
         if not seed_glsl.strip():
             raise HTTPException(
@@ -154,7 +179,7 @@ async def run_png_shader(
                 detail="seed_glsl must be a non-empty string when provided",
             )
         # Default the seed run to always-refine unless the caller set the mode.
-        overrides = dict(input_spec) if isinstance(input_spec, dict) else {}
+        overrides = dict(input_spec or {})
         quality = dict(overrides.get("quality") or {})
         quality.setdefault("refinement_mode", "on")
         overrides["quality"] = quality
@@ -183,12 +208,6 @@ async def run_png_shader(
 
         pipeline_input_spec = None
         if input_spec is not None:
-            if not isinstance(input_spec, dict):
-                shutil.rmtree(upload_dir, ignore_errors=True)
-                raise HTTPException(
-                    status_code=422,
-                    detail="input_spec_json must decode to an object",
-                )
             pipeline_input_spec = build_input_spec(image_path, **input_spec)
             errors = validate_input_spec(pipeline_input_spec)
             if errors:

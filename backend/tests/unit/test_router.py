@@ -260,3 +260,64 @@ def test_run_rejects_blank_seed_glsl(tmp_path):
         files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
     )
     assert response.status_code == 422
+
+
+def test_run_rejects_non_object_input_spec_with_seed_glsl(tmp_path):
+    _run_store.clear()
+    client = _client()
+    seed = "void mainImage(out vec4 c, in vec2 p){ c = vec4(0.3); }"
+    response = client.post(
+        "/png-shader/run",
+        data={"seed_glsl": seed, "input_spec_json": "[]"},
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert response.status_code == 422
+    assert "input_spec_json must decode to an object" in response.text
+
+
+def test_publish_partial_merges_into_running_store():
+    from app.routers.png_shader import _publish_partial_to_store
+
+    _run_store.clear()
+    _run_store["run_x"] = {
+        "run_id": "run_x",
+        "status": "running",
+        "strategy": {"refinement_threshold": 0.8},
+        "stop_requested": False,
+        "strategy_revision": 1,
+    }
+
+    _publish_partial_to_store(
+        "run_x",
+        {"scoreboard": {"selected_id": "seed_0"}, "refinement_history": [{"iteration": 1}]},
+    )
+
+    stored = _run_store["run_x"]
+    assert stored["status"] == "running"
+    assert stored["scoreboard"]["selected_id"] == "seed_0"
+    assert stored["refinement_history"] == [{"iteration": 1}]
+    assert stored["strategy"] == {"refinement_threshold": 0.8}
+    assert stored["stop_requested"] is False
+    assert stored["strategy_revision"] == 1
+
+
+def test_publish_partial_noop_when_terminal():
+    from app.routers.png_shader import _publish_partial_to_store
+
+    _run_store.clear()
+    _run_store["run_done"] = {"run_id": "run_done", "status": "completed"}
+    _publish_partial_to_store("run_done", {"scoreboard": {"x": 1}})
+    assert "scoreboard" not in _run_store["run_done"]
+
+    # A partial arriving after a crash must not mutate a failed run either.
+    _run_store["run_failed"] = {"run_id": "run_failed", "status": "failed"}
+    _publish_partial_to_store("run_failed", {"scoreboard": {"x": 1}})
+    assert "scoreboard" not in _run_store["run_failed"]
+
+
+def test_publish_partial_noop_when_missing():
+    from app.routers.png_shader import _publish_partial_to_store
+
+    _run_store.clear()
+    _publish_partial_to_store("ghost", {"scoreboard": {}})
+    assert "ghost" not in _run_store
