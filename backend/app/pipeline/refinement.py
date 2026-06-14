@@ -118,6 +118,7 @@ def run_dsl_refinement_loop(
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
     rubric_judge: "Callable[[Path], dict | None] | None" = None,
+    on_iteration: "Callable[[dict], None] | None" = None,
 ) -> dict:
     """Drive LLM to iteratively revise a DSL candidate.
 
@@ -172,6 +173,23 @@ def run_dsl_refinement_loop(
     stop_reason = "max_iterations"
     no_improvement_count = 0
     extra_feedback: list[str] = []
+
+    def _record(entry: dict) -> None:
+        history.append(entry)
+        save_json(loop_dir / f"iter_{i + 1}.json", entry)
+        if on_iteration is None:
+            return
+        try:
+            on_iteration({
+                "best_dsl": best_dsl,
+                "best_glsl": best_glsl,
+                "best_score": best_score,
+                "best_metrics": best_metrics,
+                "best_quality": best_quality,
+                "history": list(history),
+            })
+        except Exception:
+            logger.warning("on_iteration publish failed", exc_info=True)
 
     for i in range(max_iterations):
         # P2: read latest strategy + stop flag (one-shot per iteration)
@@ -266,8 +284,7 @@ def run_dsl_refinement_loop(
             entry["llm_duration_ms"] = int((time.monotonic() - llm_start) * 1000)
             entry["error_type"] = exc.__class__.__name__
             entry["error"] = f"LLM call failed: {_short_exception(exc)}"
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             stop_reason = "llm_call_failed"
             break
 
@@ -284,8 +301,7 @@ def run_dsl_refinement_loop(
                 "the previous iteration's llm_io."
             )
             logger.info("refinement iter=%d skipped: llm_returned_none", i + 1)
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             stop_reason = "llm_returned_none"
             break
 
@@ -293,8 +309,7 @@ def run_dsl_refinement_loop(
         if not val.valid:
             entry["error"] = f"DSL invalid: {val.errors[:2]}"
             logger.info("refinement iter=%d skipped: dsl_invalid errors=%s", i + 1, val.errors[:2])
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             no_improvement_count += 1
             if no_improvement_count >= no_improvement_patience:
                 stop_reason = "no_improvement_patience"
@@ -305,8 +320,7 @@ def run_dsl_refinement_loop(
         if not cr.success:
             entry["error"] = f"Compile failed: {cr.errors[:1]}"
             logger.info("refinement iter=%d skipped: compile_failed errors=%s", i + 1, cr.errors[:1])
-            history.append(entry)
-            save_json(loop_dir / f"iter_{i + 1}.json", entry)
+            _record(entry)
             no_improvement_count += 1
             if no_improvement_count >= no_improvement_patience:
                 stop_reason = "no_improvement_patience"
@@ -382,8 +396,7 @@ def run_dsl_refinement_loop(
         else:
             no_improvement_count += 1
 
-        history.append(entry)
-        save_json(loop_dir / f"iter_{i + 1}.json", entry)
+        _record(entry)
 
         if no_improvement_count >= no_improvement_patience:
             stop_reason = "no_improvement_patience"

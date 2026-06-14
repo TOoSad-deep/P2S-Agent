@@ -1165,3 +1165,52 @@ def test_seed_glsl_invalid_raises(tmp_path, monkeypatch):
         run_png_shader_pipeline(
             png, spec, run_id="seedbad", seed_glsl="float helper(){ return 1.0; }"
         )
+
+
+def test_dsl_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    def fake_refinement(**kwargs):
+        return {"layers": [], "_io": {}}
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_refinement", fake_refinement
+    )
+    monkeypatch.setattr(
+        "app.pipeline.refinement.render_dsl_to_image", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "app.dsl.validator.validate_dsl",
+        lambda d: SimpleNamespace(valid=True, errors=[]),
+    )
+    monkeypatch.setattr(
+        "app.dsl.compiler.compile_dsl",
+        lambda d: SimpleNamespace(success=True, glsl="void mainImage(){}", errors=[]),
+    )
+    scores = iter([0.6, 0.7])
+    monkeypatch.setattr(
+        "app.pipeline.refinement._evaluate_dsl",
+        lambda *a, **k: ({}, {"final_score": 0.6}, next(scores), None),
+    )
+
+    snaps: list[int] = []
+    run_dsl_refinement_loop(
+        preprocess={},
+        initial_dsl={"layers": [{"id": "a", "type": "circle", "params": {}}]},
+        initial_score=0.5,
+        initial_metrics={},
+        initial_quality={"final_score": 0.5},
+        reference_path=tmp_path / "ref.png",
+        canvas_width=64,
+        canvas_height=64,
+        max_shader_chars=12000,
+        max_iterations=2,
+        threshold=0.99,
+        high_score_stop=0.999,
+        min_improvement=0.001,
+        no_improvement_patience=5,
+        loop_dir=tmp_path / "loop",
+        on_iteration=lambda s: snaps.append(len(s["history"])),
+    )
+
+    assert snaps == [1, 2]
