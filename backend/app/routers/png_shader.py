@@ -49,6 +49,7 @@ def _run_png_shader_background(
     image_path: Path,
     upload_dir: Path,
     pipeline_input_spec: Optional[dict],
+    seed_glsl: Optional[str],
     trace_input: dict,
     trace_metadata: dict,
 ) -> None:
@@ -81,6 +82,7 @@ def _run_png_shader_background(
                     image_path,
                     pipeline_input_spec,
                     run_id=run_id,
+                    seed_glsl=seed_glsl,
                     progress_callback=_progress,
                     strategy_reader=_strategy_reader,
                 )
@@ -132,6 +134,7 @@ def _run_png_shader_background(
 async def run_png_shader(
     image: UploadFile = File(...),
     input_spec_json: Optional[str] = Form(default=None),
+    seed_glsl: Optional[str] = Form(default=None),
 ) -> dict:
     """Submit an image and run the PNG-to-Shader pipeline in the background."""
     input_spec: Optional[dict] = None
@@ -143,6 +146,19 @@ async def run_png_shader(
                 status_code=422,
                 detail=f"Invalid input_spec_json: {exc}",
             ) from exc
+
+    if seed_glsl is not None:
+        if not seed_glsl.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="seed_glsl must be a non-empty string when provided",
+            )
+        # Default the seed run to always-refine unless the caller set the mode.
+        overrides = dict(input_spec) if isinstance(input_spec, dict) else {}
+        quality = dict(overrides.get("quality") or {})
+        quality.setdefault("refinement_mode", "on")
+        overrides["quality"] = quality
+        input_spec = overrides
 
     run_id = "run_" + str(uuid4())[:8]
     logger.info(
@@ -218,6 +234,7 @@ async def run_png_shader(
                 "image_path": image_path,
                 "upload_dir": upload_dir,
                 "pipeline_input_spec": pipeline_input_spec,
+                "seed_glsl": seed_glsl,
                 "trace_input": trace_input,
                 "trace_metadata": trace_metadata,
             },
