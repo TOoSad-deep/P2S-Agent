@@ -438,6 +438,17 @@ export default function LlmIOPanel({ llmIO, llmMode, refinementSummary, refineme
         </div>
       ) : (
         <>
+          {/* Live iteration/score indicator — visible only during active refinement */}
+          {refinementSummary && (refinementSummary as Record<string, unknown>).enabled ? (
+            <div className="text-[11px] text-[var(--text-muted)] px-2 py-1 flex-shrink-0">
+              迭代 {Number((refinementSummary as Record<string, unknown>).iterations ?? 0)}
+              {" · 当前最优 "}
+              {typeof (refinementSummary as Record<string, unknown>).final_score === "number"
+                ? Number((refinementSummary as Record<string, unknown>).final_score).toFixed(3)
+                : "—"}
+            </div>
+          ) : null}
+
           {/* Top-level tabs: Initial call | Refinement loop */}
           <div className="flex gap-0.5 mb-2 bg-[var(--bg-tertiary)] rounded-lg p-0.5 flex-shrink-0">
             <button
