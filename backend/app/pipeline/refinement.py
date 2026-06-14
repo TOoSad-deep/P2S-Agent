@@ -68,6 +68,34 @@ def _diff_dsl_summary(old_dsl: dict, new_dsl: dict) -> str:
     return "; ".join(changes[:8]) if changes else "no changes"
 
 
+def build_semantic_notes(rubric: dict) -> list[str]:
+    """Convert judge_rubric differences and hints into LLM feedback lines."""
+    notes: list[str] = []
+    for diff in list(rubric.get("differences", []))[:4]:
+        notes.append(f"[VISUAL ISSUE] {diff}")
+    for hint in list(rubric.get("revision_hints", []))[:3]:
+        notes.append(f"[VISUAL GOAL] {hint}")
+    return notes
+
+
+def build_recent_history_notes(history: list[dict], max_entries: int = 3) -> list[str]:
+    """Summarize recent iterations without embedding shader or DSL bodies."""
+    notes: list[str] = []
+    for h in history[-max_entries:]:
+        if h.get("improved"):
+            outcome = "accepted"
+        elif h.get("error"):
+            outcome = f"failed ({h.get('error_type') or 'error'})"
+        else:
+            outcome = "rejected"
+        notes.append(
+            f"[HISTORY iter {h.get('iteration')}] score "
+            f"{h.get('score_before')} -> {h.get('score_after')} ({outcome}); "
+            f"changes: {(h.get('changes_summary') or 'n/a')[:160]}"
+        )
+    return notes
+
+
 def run_dsl_refinement_loop(
     preprocess: dict,
     initial_dsl: dict,
@@ -89,6 +117,7 @@ def run_dsl_refinement_loop(
     loop_dir: Path,
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
+    rubric_judge: "Callable[[Path], dict | None] | None" = None,
 ) -> dict:
     """Drive LLM to iteratively revise a DSL candidate.
 
@@ -206,6 +235,18 @@ def run_dsl_refinement_loop(
             except Exception:
                 logger.warning("grid_color_report failed", exc_info=True)
 
+        semantic_notes: list[str] = []
+        if rubric_judge is not None and current_render_path is not None:
+            try:
+                rubric = rubric_judge(current_render_path)
+            except Exception:
+                rubric = None
+                logger.warning("rubric judge failed", exc_info=True)
+            if rubric:
+                semantic_notes = build_semantic_notes(rubric)
+
+        history_notes = build_recent_history_notes(history)
+
         llm_start = time.monotonic()
         try:
             revised = generate_llm_refinement(
@@ -217,7 +258,9 @@ def run_dsl_refinement_loop(
                 canvas_height=canvas_height,
                 reference_image_path=reference_path,
                 current_render_path=current_render_path,
-                extra_feedback=(extra_feedback + region_notes) or None,
+                extra_feedback=(
+                    extra_feedback + history_notes + semantic_notes + region_notes
+                ) or None,
             )
         except Exception as exc:
             entry["llm_duration_ms"] = int((time.monotonic() - llm_start) * 1000)
@@ -373,13 +416,20 @@ def _should_run_refinement(
     threshold: float,
     high_score_stop: float,
 ) -> tuple[bool, str]:
-    """Decide whether to enter the LLM DSL refinement loop."""
+    """Decide whether to enter the LLM refinement loop (DSL or GLSL)."""
     if refinement_mode == "off":
         return False, "refinement_mode_off"
     if selected is None:
         return False, "no_selected_candidate"
-    if selected.dsl is None:
-        return False, "selected_candidate_is_not_dsl"
+    is_dsl = selected.dsl is not None
+    is_glsl = (
+        not is_dsl
+        and selected.output_kind == "glsl"
+        and selected.compile_success
+        and bool(selected.compile_glsl)
+    )
+    if not is_dsl and not is_glsl:
+        return False, "selected_candidate_not_refinable"
     if selected_quality is None:
         return False, "missing_quality_router"
 

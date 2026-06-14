@@ -5,12 +5,26 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 import httpx
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 from google import genai
 from google.genai import types
 
 from app.config import ModelConfig
 from app.services.langsmith_tracing import wrap_openai_client
+
+
+# 不再接受 `temperature` 参数的模型前缀（OpenAI 推理系列、GPT-5、
+# 以及 aihubmix 上的 claude-opus-4-8 等）。匹配为小写前缀。
+_NO_TEMPERATURE_PREFIXES = (
+    "o1", "o3", "o4",
+    "gpt-5",
+    "claude-opus-4-8",
+)
+
+
+def _model_supports_temperature(model: str) -> bool:
+    name = (model or "").lower()
+    return not any(name.startswith(p) for p in _NO_TEMPERATURE_PREFIXES)
 
 
 class BaseAgent:
@@ -167,15 +181,24 @@ class BaseAgent:
         create_kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if _model_supports_temperature(self.model):
+            create_kwargs["temperature"] = temperature
         if extra_body:
             create_kwargs["extra_body"] = extra_body
         if response_format is not None:
             create_kwargs["response_format"] = response_format
 
-        response = self._openai_client.chat.completions.create(**create_kwargs)
+        try:
+            response = self._openai_client.chat.completions.create(**create_kwargs)
+        except BadRequestError as e:
+            # 兜底：未知模型若返回 temperature 已弃用错误，剥离参数后重试一次
+            if "temperature" in str(e).lower() and "temperature" in create_kwargs:
+                create_kwargs.pop("temperature", None)
+                response = self._openai_client.chat.completions.create(**create_kwargs)
+            else:
+                raise
 
         raw_content = response.choices[0].message.content
         response_content = raw_content or ""

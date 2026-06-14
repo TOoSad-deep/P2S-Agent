@@ -241,7 +241,7 @@ export function usePngShader() {
     }
   }, [stopPolling]);
 
-  const runPngShader = useCallback(async (file: File): Promise<void> => {
+  const runPngShader = useCallback(async (file: File, seedGlsl?: string): Promise<void> => {
     stopPolling();
     setStopPending(false);
     setLoading(true);
@@ -258,6 +258,9 @@ export function usePngShader() {
           mergeInputSpecs(LLM_MODE_SPEC[llmMode], { quality: toQualityOverrides(strategy) })
         )
       );
+      if (seedGlsl && seedGlsl.trim()) {
+        formData.append("seed_glsl", seedGlsl);
+      }
 
       const response = await fetch(`${API_BASE}/png-shader/run`, {
         method: "POST",

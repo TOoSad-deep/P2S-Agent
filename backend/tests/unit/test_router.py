@@ -214,3 +214,49 @@ def test_stop_409_for_completed_run(tmp_path):
     _wait_for_completion(client, run_id)
     stop = client.post(f"/png-shader/runs/{run_id}/stop")
     assert stop.status_code == 409
+
+
+def test_run_accepts_seed_glsl_and_defaults_refinement_on(tmp_path, monkeypatch):
+    _run_store.clear()
+    captured: dict = {}
+
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, seed_glsl=None, **kwargs):
+        captured["seed_glsl"] = seed_glsl
+        captured["refinement_mode"] = (
+            (input_spec or {}).get("quality", {}).get("refinement_mode")
+        )
+        return {
+            "run_id": run_id,
+            "selected_glsl": seed_glsl or "",
+            "scoreboard": {},
+            "quality_router": {},
+            "refinement_summary": {},
+        }
+
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", fake_pipeline
+    )
+    client = _client()
+    seed = "void mainImage(out vec4 c, in vec2 p){ c = vec4(0.3); }"
+
+    response = client.post(
+        "/png-shader/run",
+        data={"seed_glsl": seed},
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert response.status_code == 200
+    data = _wait_for_completion(client, response.json()["run_id"])
+    assert data["status"] == "completed"
+    assert "mainImage" in captured["seed_glsl"]
+    assert captured["refinement_mode"] == "on"
+
+
+def test_run_rejects_blank_seed_glsl(tmp_path):
+    _run_store.clear()
+    client = _client()
+    response = client.post(
+        "/png-shader/run",
+        data={"seed_glsl": "   "},
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert response.status_code == 422

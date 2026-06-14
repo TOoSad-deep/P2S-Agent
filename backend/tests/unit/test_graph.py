@@ -11,13 +11,16 @@ import pytest
 
 from app.pipeline.graph import (
     CandidateRecord,
+    _run_post_pipeline,
     _should_run_refinement,
     build_scoreboard,
+    node_selection,
     run_candidate_pool,
     run_dsl_refinement_loop,
     run_png_shader_pipeline,
     select_best_candidate,
 )
+from app.pipeline.input_spec import build_input_spec
 from app.pipeline.preprocess import preprocess_image
 
 
@@ -158,7 +161,8 @@ def test_should_run_refinement_on_forces_until_high_score_stop():
     assert excellent_reason == "force_high_score_stop"
 
 
-def test_should_run_refinement_skips_non_dsl_candidate():
+def test_should_run_refinement_allows_glsl_candidate():
+    """GLSL candidates with compiled shader text are now refinable."""
     candidate = _make_refinement_candidate(score=0.3, has_dsl=False)
 
     should_run, reason = _should_run_refinement(
@@ -169,8 +173,25 @@ def test_should_run_refinement_skips_non_dsl_candidate():
         high_score_stop=0.92,
     )
 
+    assert should_run is True
+    assert reason == "force_enabled"
+
+
+def test_should_run_refinement_skips_unrefinable_candidate():
+    candidate = _make_refinement_candidate(score=0.3, has_dsl=False)
+    candidate.compile_glsl = ""
+    candidate.compile_success = False
+
+    should_run, reason = _should_run_refinement(
+        "on",
+        candidate,
+        {"final_score": 0.3},
+        threshold=0.8,
+        high_score_stop=0.92,
+    )
+
     assert should_run is False
-    assert reason == "selected_candidate_is_not_dsl"
+    assert reason == "selected_candidate_not_refinable"
 
 
 def test_run_candidate_pool_returns_records(tmp_path):
@@ -255,6 +276,48 @@ def test_select_best_candidate_lowest_priority_wins(tmp_path):
     assert selected is not None
     # Baseline has priority 0, which is the lowest (best)
     assert selected.priority < 99
+
+
+def test_node_selection_prefers_glsl_even_when_refinement_requested():
+    glsl_cand = CandidateRecord(
+        id="llm_0",
+        source="llm",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl="void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}",
+        compile_errors=[],
+        final_score=0.7,
+        selected=False,
+    )
+    dsl_cand = CandidateRecord(
+        id="rule_0",
+        source="rule",
+        enabled=True,
+        priority=1,
+        dsl={"layers": []},
+        output_kind="dsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl="void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(0.0);}",
+        compile_errors=[],
+        final_score=0.7,
+        selected=False,
+    )
+
+    result = node_selection({
+        "candidates": [dsl_cand, glsl_cand],
+        "glsl_render_enabled": True,
+        "refinement_mode": "on",
+        "max_refinement_iterations": 3,
+    })
+
+    assert result["selected_candidate_id"] == "llm_0"
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +671,169 @@ def test_refinement_loop_records_llm_call_exception(tmp_path, monkeypatch):
     assert (loop_dir / "iter_1.json").exists()
 
 
+def test_run_post_pipeline_runs_glsl_refinement(tmp_path, monkeypatch):
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    cand = CandidateRecord(
+        id="llm_0",
+        source="llm",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.4,
+        selected=True,
+        objective_metrics={"mse": 0.5},
+        quality_router={"final_score": 0.4, "next_action": "accept"},
+    )
+    improved_glsl = "#define R 0.9\n" + glsl
+    improved_render = tmp_path / "glsl_refinement" / "renders" / "iter_1.png"
+
+    def fake_loop(*args, **kwargs):
+        return {
+            "best_glsl": improved_glsl,
+            "best_score": 0.8,
+            "best_metrics": {"mse": 0.1},
+            "best_quality": {"final_score": 0.8, "next_action": "accept"},
+            "best_render_path": str(improved_render),
+            "history": [{"iteration": 1, "score_after": 0.8, "improved": True}],
+            "stop_reason": "threshold_reached",
+        }
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+
+    result = _run_post_pipeline({
+        "selected_candidate_id": "llm_0",
+        "candidates": [cand],
+        "run_dir": str(tmp_path),
+        "selected_dsl": None,
+        "selected_glsl": glsl,
+        "selected_metrics": {"mse": 0.5},
+        "selected_quality": {"final_score": 0.4, "next_action": "accept"},
+        "refinement_mode": "on",
+        "max_refinement_iterations": 2,
+        "llm_enabled": False,
+        "glsl_render_enabled": True,
+        "vlm_judge_enabled": False,
+    })
+
+    assert result["selected_glsl"] == improved_glsl
+    assert result["refinement_summary"]["enabled"] is True
+    assert result["refinement_summary"]["decision"] == "force_enabled"
+    assert result["refinement_summary"]["improved"] is True
+    assert result["refinement_summary"]["stop_reason"] == "threshold_reached"
+    assert cand.final_score == 0.8
+    assert cand.compile_glsl == improved_glsl
+    assert cand.render_path == str(improved_render)
+    assert (tmp_path / "selected_shader.glsl").read_text(encoding="utf-8") == improved_glsl
+
+
+def test_run_post_pipeline_skips_glsl_refinement_when_render_disabled(tmp_path, monkeypatch):
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    cand = CandidateRecord(
+        id="llm_0",
+        source="llm",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.4,
+        selected=True,
+        quality_router={"final_score": 0.4, "next_action": "accept"},
+    )
+
+    def fail_loop(*args, **kwargs):
+        raise AssertionError("refinement loop must not run without the renderer")
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fail_loop)
+
+    result = _run_post_pipeline({
+        "selected_candidate_id": "llm_0",
+        "candidates": [cand],
+        "run_dir": str(tmp_path),
+        "selected_dsl": None,
+        "selected_glsl": glsl,
+        "selected_metrics": {},
+        "selected_quality": {"final_score": 0.4, "next_action": "accept"},
+        "refinement_mode": "on",
+        "max_refinement_iterations": 2,
+        "llm_enabled": False,
+        "glsl_render_enabled": False,
+        "vlm_judge_enabled": False,
+    })
+
+    assert result["selected_glsl"] == glsl
+    assert result["refinement_summary"]["decision"] == "glsl_render_disabled"
+    assert result["refinement_summary"]["enabled"] is False
+
+
+def test_dsl_refinement_feeds_history_and_semantic_notes(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    captured: list[dict] = []
+
+    def fake_refinement(**kwargs):
+        captured.append(kwargs)
+        return {"layers": [], "_io": {}}
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_refinement",
+        fake_refinement,
+    )
+    monkeypatch.setattr(
+        "app.pipeline.refinement.render_dsl_to_image",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.dsl.validator.validate_dsl",
+        lambda d: SimpleNamespace(valid=True, errors=[]),
+    )
+    monkeypatch.setattr(
+        "app.dsl.compiler.compile_dsl",
+        lambda d: SimpleNamespace(success=True, glsl="void mainImage(){}", errors=[]),
+    )
+    monkeypatch.setattr(
+        "app.pipeline.refinement._evaluate_dsl",
+        lambda *a, **k: ({}, {"final_score": 0.2}, 0.2, None),
+    )
+
+    run_dsl_refinement_loop(
+        preprocess={},
+        initial_dsl={"layers": [{"id": "a", "type": "circle", "params": {}}]},
+        initial_score=0.5,
+        initial_metrics={},
+        initial_quality={"final_score": 0.5},
+        reference_path=tmp_path / "ref.png",
+        canvas_width=512,
+        canvas_height=512,
+        max_shader_chars=12000,
+        max_iterations=2,
+        threshold=0.9,
+        high_score_stop=0.95,
+        no_improvement_patience=3,
+        loop_dir=tmp_path / "loop",
+        rubric_judge=lambda render: {
+            "differences": ["edges too sharp"],
+            "revision_hints": ["soften the edges"],
+        },
+    )
+
+    assert len(captured) == 2
+    second_feedback = captured[1]["extra_feedback"]
+    assert any("[HISTORY iter 1]" in n for n in second_feedback)
+    assert any("[VISUAL ISSUE] edges too sharp" in n for n in second_feedback)
+    assert any("[ROLLBACK]" in n for n in second_feedback)
+
+
 def test_run_pipeline_syncs_refined_llm_candidate_glsl_into_scoreboard(tmp_path, monkeypatch):
     png_path = make_solid_png(tmp_path)
     input_spec = _make_minimal_input_spec()
@@ -880,3 +1106,62 @@ def test_pipeline_manifest_includes_strategy_fields(tmp_path):
     assert cfg.get("force_failure_type") == "color"
     assert cfg.get("protected_aspects") == ["layer_count", "visual_causality"]
     assert cfg.get("quality_mode") == "aggressive"
+
+
+def test_seed_glsl_pipeline_skips_pool_and_refines(tmp_path, monkeypatch):
+    """A seed_glsl run must build one 'seed' candidate (no pool generation)
+    and drive it through run_glsl_refinement_loop."""
+    import app.pipeline.graph as graph_mod
+
+    png = make_solid_png(tmp_path, color=(120, 60, 30, 255))
+
+    seed = (
+        "#define R 0.30\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) { fragColor = vec4(R); }"
+    )
+    improved = seed.replace("0.30", "0.50")
+
+    def fake_eval(glsl, ref_path, output_path, *, canvas_width, canvas_height, max_shader_chars):
+        score = 0.30
+        for line in glsl.splitlines():
+            if line.startswith("#define R"):
+                score = float(line.split()[-1])
+        return ({"mse": 1.0 - score}, {"final_score": score, "next_action": "refine"}, score, output_path)
+
+    def fake_refine(**kwargs):
+        return {"glsl": improved, "_io": {"mode": "glsl_refinement"}}
+
+    monkeypatch.setattr(graph_mod, "_evaluate_glsl_with_webgl", fake_eval)
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    spec = build_input_spec(
+        png,
+        quality={"refinement_mode": "on", "max_refinement_iterations": 2, "refinement_patience": 1},
+        candidates={"glsl_render_enabled": True},
+    )
+
+    result = run_png_shader_pipeline(png, spec, run_id="seedtest", seed_glsl=seed)
+
+    details = result["candidate_details"]
+    assert len(details) == 1
+    assert details[0]["source"] == "seed"
+    assert result["refinement_summary"]["enabled"] is True
+    assert "0.50" in (result["selected_glsl"] or "")
+
+
+def test_seed_glsl_invalid_raises(tmp_path, monkeypatch):
+    """A seed that cannot be adapted (and no LLM client) must raise so the
+    background worker marks the run failed."""
+    png = make_solid_png(tmp_path)
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **kwargs: None,
+    )
+    spec = build_input_spec(png, candidates={"glsl_render_enabled": True})
+
+    with pytest.raises(ValueError, match="seed GLSL"):
+        run_png_shader_pipeline(
+            png, spec, run_id="seedbad", seed_glsl="float helper(){ return 1.0; }"
+        )

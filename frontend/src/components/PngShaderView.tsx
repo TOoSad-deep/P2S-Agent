@@ -24,7 +24,7 @@ interface Props {
   result: PngShaderResult | null;
   loading: boolean;
   error: string | null;
-  onRun: (file: File) => void;
+  onRun: (file: File, seedGlsl?: string) => void;
   inputImageUrl: string | null;
   llmMode: LlmMode;
   onLlmModeChange: (mode: LlmMode) => void;
@@ -67,6 +67,18 @@ export default function PngShaderView({
   const { config: strategyConfig } = useStrategyConfig();
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [seedEnabled, setSeedEnabled] = useState(false);
+  const [seedGlsl, setSeedGlsl] = useState("");
+
+  const handleSeedFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    file
+      .text()
+      .then((text) => setSeedGlsl(text))
+      .catch((err) => console.error("seed file read failed", err));
+  }, []);
+
   const [dragging, setDragging] = useState(false);
   const [previewCandidateId, setPreviewCandidateId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -96,8 +108,8 @@ export default function PngShaderView({
   );
 
   const handleRun = useCallback(() => {
-    if (selectedFile) onRun(selectedFile);
-  }, [selectedFile, onRun]);
+    if (selectedFile) onRun(selectedFile, seedEnabled ? seedGlsl : undefined);
+  }, [selectedFile, onRun, seedEnabled, seedGlsl]);
 
   const handleClear = useCallback(() => {
     setSelectedFile(null);
@@ -219,6 +231,41 @@ export default function PngShaderView({
         </div>
 
         <div className="mt-2 flex flex-col gap-2">
+          {/* Seed GLSL: start the closed loop from an existing shader */}
+          <div className="flex flex-col gap-2 px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={seedEnabled}
+                onChange={(e) => setSeedEnabled(e.target.checked)}
+                disabled={loading}
+                className="accent-emerald-500"
+              />
+              <span className="text-xs font-medium text-[var(--text-primary)]">
+                从已有着色器开始
+                <span className="ml-2 text-[var(--text-muted)] font-normal">Seed GLSL</span>
+              </span>
+            </label>
+            {seedEnabled && (
+              <>
+                <textarea
+                  value={seedGlsl}
+                  onChange={(e) => setSeedGlsl(e.target.value)}
+                  disabled={loading}
+                  placeholder="粘贴已有 GLSL（Shadertoy mainImage 或普通 main 片元着色器）"
+                  rows={6}
+                  className="w-full text-xs font-mono p-2 rounded bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-primary)] resize-y"
+                />
+                <input
+                  type="file"
+                  accept=".glsl,.frag,.txt,text/plain"
+                  onChange={handleSeedFile}
+                  disabled={loading}
+                  className="text-xs text-[var(--text-muted)]"
+                />
+              </>
+            )}
+          </div>
           {/* LLM mode selector */}
           <div className="flex items-center gap-3 px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg min-w-0">
             <Cpu className={`w-4 h-4 flex-shrink-0 ${llmMode !== "off" ? "text-[var(--accent-primary)]" : "text-[var(--text-muted)]"}`} />
