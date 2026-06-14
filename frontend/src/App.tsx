@@ -29,14 +29,14 @@ export default function App() {
         ? result.objective_metrics.ssim
         : null
 
-  const handleRun = useCallback((file: File) => {
+  const handleRun = useCallback((file: File, seedGlsl?: string) => {
     const url = URL.createObjectURL(file)
     if (inputImageUrlRef.current) {
       URL.revokeObjectURL(inputImageUrlRef.current)
     }
     inputImageUrlRef.current = url
     setInputImageUrl(url)
-    runPngShader(file)
+    runPngShader(file, seedGlsl)
   }, [runPngShader])
 
   const handleLlmModeChange = useCallback((mode: LlmMode) => {
