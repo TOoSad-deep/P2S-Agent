@@ -10,7 +10,16 @@ import DslLayerPanel from "./DslLayerPanel";
 import LlmIOPanel, { type LlmPreviewSelection } from "./LlmIOPanel";
 import PngShaderParamPanel from "./PngShaderParamPanel";
 import HumanLoopPanel from "./HumanLoopPanel";
-import type { PngShaderResult, BranchRefineRequest, PipelineCheckpointMeta } from "../hooks/usePngShader";
+import BranchWorkspacePanel from "./BranchWorkspacePanel";
+import type {
+  PngShaderResult,
+  BranchRefineRequest,
+  PipelineCheckpointMeta,
+  CheckpointTimelineEntry,
+  BranchTreeResponse,
+  RunMetadataPatch,
+  RunMetadataRecord,
+} from "../hooks/usePngShader";
 import StrategyControlPanel from "./StrategyControlPanel";
 import ModelSelectorPanel from "./ModelSelectorPanel";
 import type { ModelControls } from "../hooks/useModels";
@@ -39,6 +48,11 @@ interface Props {
   stopPending?: boolean;
   parameterizeGlsl: (glsl: string) => Promise<{ glsl: string; param_count_before: number; param_count_after: number }>;
   onBranchRefine: (request: BranchRefineRequest) => void;
+  runId: string | null;
+  fetchTimeline: (id: string) => Promise<CheckpointTimelineEntry[]>;
+  fetchBranches: (id: string) => Promise<BranchTreeResponse>;
+  updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<RunMetadataRecord>;
+  switchRun: (id: string) => void;
 }
 
 /** Mirror of backend list_checkpoints: candidates with GLSL, iteration
@@ -116,6 +130,11 @@ export default function PngShaderView({
   stopPending,
   parameterizeGlsl,
   onBranchRefine,
+  runId,
+  fetchTimeline,
+  fetchBranches,
+  updateRunMetadata,
+  switchRun,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
@@ -408,6 +427,21 @@ export default function PngShaderView({
               lineage={result.lineage ?? null}
               disabled={loading}
               busy={loading}
+            />
+          )}
+
+          {/* Branch workspace: timeline + branch tree + compare strip */}
+          {result && runId && (
+            <BranchWorkspacePanel
+              runId={runId}
+              result={result}
+              activeCheckpointId={branchCheckpointId}
+              onCheckpointSelect={setBranchCheckpointId}
+              onSwitchRun={switchRun}
+              fetchTimeline={fetchTimeline}
+              fetchBranches={fetchBranches}
+              updateRunMetadata={updateRunMetadata}
+              disabled={loading}
             />
           )}
         </div>

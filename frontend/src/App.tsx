@@ -21,6 +21,10 @@ export default function App() {
     stopRun,
     stopPending,
     branchRefine,
+    fetchTimeline,
+    fetchBranches,
+    updateRunMetadata,
+    switchRun,
   } = usePngShader()
 
   const models = useModels()
@@ -165,6 +169,11 @@ export default function App() {
           stopPending={stopPending}
           parameterizeGlsl={parameterizeGlsl}
           onBranchRefine={handleBranchRefine}
+          runId={runId}
+          fetchTimeline={fetchTimeline}
+          fetchBranches={fetchBranches}
+          updateRunMetadata={updateRunMetadata}
+          switchRun={switchRun}
         />
       </main>
 
