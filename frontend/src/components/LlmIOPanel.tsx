@@ -53,6 +53,7 @@ function CollapsibleBlock({ text, maxLines = 12 }: { text: string; maxLines?: nu
 
 function IOView({ io }: { io: LlmIO }) {
   const [tab, setTab] = useState<IOTab>("response");
+  const lastAttempt = io.attempts?.[io.attempts.length - 1];
   const TABS: { id: IOTab; label: string; sub: string }[] = [
     { id: "system", label: "系统", sub: "System" },
     { id: "user", label: "用户", sub: "User" },
@@ -96,6 +97,21 @@ function IOView({ io }: { io: LlmIO }) {
                   images: <span className="text-[var(--text-primary)]">{io.image_paths.length}</span>
                 </span>
               )}
+              {io.attempts && io.attempts.length > 0 && (
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  attempts: <span className="text-[var(--text-primary)]">{io.attempts.length}</span>
+                </span>
+              )}
+              {lastAttempt?.json_candidate_count !== undefined && (
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  json: <span className="text-[var(--text-primary)]">{lastAttempt.json_candidate_count}</span>
+                </span>
+              )}
+              {lastAttempt?.parsed_layer_count !== undefined && lastAttempt.parsed_layer_count !== null && (
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  layers: <span className="text-[var(--text-primary)]">{lastAttempt.parsed_layer_count}</span>
+                </span>
+              )}
             </div>
             <CollapsibleBlock text={io.raw_response} maxLines={20} />
           </>
@@ -137,8 +153,15 @@ function FullScreenIO({ entry, onClose }: { entry: RefinementEntry; onClose: () 
         </div>
         <div className="flex-1 min-h-0 overflow-hidden p-4 flex flex-col">
           {entry.error ? (
-            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-              <p className="text-xs text-red-400">{entry.error}</p>
+            <div className="flex flex-col gap-3 min-h-0 flex-1 overflow-hidden">
+              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex-shrink-0">
+                <p className="text-xs text-red-400">{entry.error}</p>
+              </div>
+              {entry.llm_io ? (
+                <IOView io={entry.llm_io} />
+              ) : (
+                <p className="text-xs text-[var(--text-muted)]">无 I/O 记录</p>
+              )}
             </div>
           ) : entry.llm_io ? (
             <IOView io={entry.llm_io} />
@@ -301,8 +324,15 @@ function RefinementView({
               )}
             </div>
             {activeEntry.error ? (
-              <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex-shrink-0 overflow-auto">
-                <p className="text-[10px] text-red-400 whitespace-pre-wrap break-words">{activeEntry.error}</p>
+              <div className="flex flex-col gap-2 min-h-0 flex-1 overflow-hidden">
+                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex-shrink-0 overflow-auto">
+                  <p className="text-[10px] text-red-400 whitespace-pre-wrap break-words">{activeEntry.error}</p>
+                </div>
+                {activeEntry.llm_io ? (
+                  <IOView io={activeEntry.llm_io} />
+                ) : (
+                  <p className="text-[10px] text-[var(--text-muted)] px-1">无 I/O 记录</p>
+                )}
               </div>
             ) : activeEntry.llm_io ? (
               <IOView io={activeEntry.llm_io} />

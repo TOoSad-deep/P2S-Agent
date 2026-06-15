@@ -1,8 +1,10 @@
 """Agent 基类：统一 LLM 调用封装，自动适配 Gemini 和 OpenAI API，支持代理"""
 
 import base64
+import logging
 from pathlib import Path
 from typing import Any, Optional, Union
+from urllib.parse import urlsplit
 
 import httpx
 from openai import OpenAI, BadRequestError
@@ -11,6 +13,9 @@ from google.genai import types
 
 from app.config import ModelConfig
 from app.services.langsmith_tracing import wrap_openai_client
+from app.services.logging_config import log_event
+
+logger = logging.getLogger(__name__)
 
 
 # 不再接受 `temperature` 参数的模型前缀（OpenAI 推理系列、GPT-5、
@@ -25,6 +30,48 @@ _NO_TEMPERATURE_PREFIXES = (
 def _model_supports_temperature(model: str) -> bool:
     name = (model or "").lower()
     return not any(name.startswith(p) for p in _NO_TEMPERATURE_PREFIXES)
+
+
+def _safe_base_url(base_url: str) -> str:
+    try:
+        parsed = urlsplit(base_url)
+    except Exception:
+        return "<invalid>"
+    if not parsed.netloc:
+        return base_url[:80]
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _message_content_to_text(raw_content: Any) -> str:
+    """Normalize provider-specific message content into plain text.
+
+    Some OpenAI-compatible Claude gateways return Anthropic-style content
+    blocks instead of a bare string. Passing Python's list/dict repr upstream
+    makes JSON parsing fail even when the model returned valid JSON inside a
+    text block.
+    """
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for block in raw_content:
+            if isinstance(block, str):
+                parts.append(block)
+                continue
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if isinstance(text, list):
+                    text = _message_content_to_text(text)
+                if text:
+                    parts.append(str(text))
+                continue
+            text = getattr(block, "text", None) or getattr(block, "content", None)
+            if text:
+                parts.append(str(text))
+        return "\n".join(parts)
+    return str(raw_content)
 
 
 class BaseAgent:
@@ -190,31 +237,102 @@ class BaseAgent:
         if response_format is not None:
             create_kwargs["response_format"] = response_format
 
+        log_event(
+            logger,
+            "llm_chat_request",
+            model=self.model,
+            base_url=_safe_base_url(self.model_config.base_url),
+            max_tokens=max_tokens,
+            has_images=bool(image_paths),
+            image_count=len(image_paths or []),
+            response_format=response_format,
+            temperature=create_kwargs.get("temperature"),
+            enable_thinking=enable_thinking,
+        )
+
         try:
             response = self._openai_client.chat.completions.create(**create_kwargs)
         except BadRequestError as e:
+            message = str(e).lower()
             # 兜底：未知模型若返回 temperature 已弃用错误，剥离参数后重试一次
-            if "temperature" in str(e).lower() and "temperature" in create_kwargs:
+            if "temperature" in message and "temperature" in create_kwargs:
                 create_kwargs.pop("temperature", None)
+                log_event(
+                    logger,
+                    "llm_chat_retry",
+                    level=logging.WARNING,
+                    reason="bad_request_temperature",
+                    model=self.model,
+                    response_format=create_kwargs.get("response_format"),
+                )
+                try:
+                    response = self._openai_client.chat.completions.create(**create_kwargs)
+                except BadRequestError as retry_error:
+                    if "response_format" in create_kwargs:
+                        create_kwargs.pop("response_format", None)
+                        log_event(
+                            logger,
+                            "llm_chat_retry",
+                            level=logging.WARNING,
+                            reason="bad_request_response_format_after_temperature",
+                            model=self.model,
+                        )
+                        response = self._openai_client.chat.completions.create(**create_kwargs)
+                    else:
+                        raise retry_error
+            elif "response_format" in create_kwargs:
+                create_kwargs.pop("response_format", None)
+                log_event(
+                    logger,
+                    "llm_chat_retry",
+                    level=logging.WARNING,
+                    reason="bad_request_response_format",
+                    model=self.model,
+                )
                 response = self._openai_client.chat.completions.create(**create_kwargs)
             else:
                 raise
 
         raw_content = response.choices[0].message.content
-        response_content = raw_content or ""
+        response_content = _message_content_to_text(raw_content)
         reasoning_content = getattr(response.choices[0].message, 'reasoning_content', None) or ""
         finish_reason = response.choices[0].finish_reason
 
+        usage_payload = {
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else None,
+            "completion_tokens": response.usage.completion_tokens if response.usage else None,
+            "total_tokens": response.usage.total_tokens if response.usage else None,
+            "reasoning_tokens": getattr(response.usage.completion_tokens_details, 'reasoning_tokens', None)
+                if response.usage and hasattr(response.usage, 'completion_tokens_details') else None,
+        }
+        log_event(
+            logger,
+            "llm_chat_response",
+            model=self.model,
+            finish_reason=finish_reason,
+            raw_content_type=type(raw_content).__name__,
+            content_len=len(response_content),
+            reasoning_len=len(reasoning_content),
+            usage=usage_payload,
+        )
+
         # 截断 / 空 content / content_filter 应当被显式区分，否则上层只会看到 ""
         if finish_reason and finish_reason != "stop":
-            print(
-                f"WARNING: Response not 'stop' (finish_reason={finish_reason}, "
-                f"content_len={len(response_content)}, reasoning_len={len(reasoning_content)})"
+            log_event(
+                logger,
+                "llm_chat_non_stop_finish",
+                level=logging.WARNING,
+                finish_reason=finish_reason,
+                content_len=len(response_content),
+                reasoning_len=len(reasoning_content),
             )
         if raw_content is None and not return_raw:
-            print(
-                f"WARNING: message.content is None (finish_reason={finish_reason}, "
-                f"reasoning_len={len(reasoning_content)})"
+            log_event(
+                logger,
+                "llm_chat_empty_content",
+                level=logging.WARNING,
+                finish_reason=finish_reason,
+                reasoning_len=len(reasoning_content),
             )
         
         # 打印 reasoning 信息（如果启用）
@@ -223,7 +341,12 @@ class BaseAgent:
             if response.usage and hasattr(response.usage, 'completion_tokens_details'):
                 details = response.usage.completion_tokens_details
                 reasoning_tokens = getattr(details, 'reasoning_tokens', 0) if details else 0
-            print(f"[Thinking] reasoning_tokens={reasoning_tokens}, reasoning_len={len(reasoning_content)}")
+            log_event(
+                logger,
+                "llm_chat_reasoning",
+                reasoning_tokens=reasoning_tokens,
+                reasoning_len=len(reasoning_content),
+            )
         
         if return_raw:
             return {
@@ -231,13 +354,7 @@ class BaseAgent:
                 "reasoning_content": reasoning_content,
                 "model": self.model,
                 "finish_reason": finish_reason,
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens if response.usage else None,
-                    "completion_tokens": response.usage.completion_tokens if response.usage else None,
-                    "total_tokens": response.usage.total_tokens if response.usage else None,
-                    "reasoning_tokens": getattr(response.usage.completion_tokens_details, 'reasoning_tokens', None) 
-                        if response.usage and hasattr(response.usage, 'completion_tokens_details') else None,
-                },
+                "usage": usage_payload,
             }
         
         return response_content

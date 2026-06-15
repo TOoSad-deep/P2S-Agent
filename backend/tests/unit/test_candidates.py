@@ -16,6 +16,8 @@ from app.candidates.llm_scene import (
     _call_llm,
     _normalize_gradient_fills,
     _normalize_linear_gradient_direction,
+    _parse_dsl_response,
+    _response_content,
     generate_llm_refinement,
     generate_llm_scene_candidate,
 )
@@ -356,6 +358,35 @@ def test_png_shader_llm_can_send_image_when_generate_model_supports_it(monkeypat
     assert calls[0]["image_paths"] == ["/tmp/reference.png"]
 
 
+def test_call_llm_retries_empty_json_mode_response_without_response_format(monkeypatch):
+    calls = []
+
+    class FakeAgent:
+        def __init__(self, model_config):
+            self.model_config = model_config
+
+        def chat(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("response_format") is not None:
+                return ""
+            return '{"schema_version":1,"layers":[]}'
+
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
+    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", False)
+    monkeypatch.setattr("app.llm.client.BaseAgent", FakeAgent)
+
+    result = _call_llm(
+        "system",
+        "user",
+        llm_client=None,
+        response_format={"type": "json_object"},
+    )
+
+    assert result == '{"schema_version":1,"layers":[]}'
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[1]["response_format"] is None
+
+
 def test_llm_candidate_normalizes_plain_color_gradient_stops():
     preprocess = _make_preprocess()
     llm_response = {
@@ -443,6 +474,116 @@ def test_llm_refinement_normalizes_gradient_stop_aliases_and_prompts_schema():
     assert '"position":0.0' in captured["system_prompt"]
     assert "center: [cx, cy]" in captured["system_prompt"]
     assert captured["image_paths"] is None
+
+
+def test_response_content_extracts_text_from_content_blocks():
+    content = _response_content([
+        {"type": "text", "text": '{"schema_version":1,"layers":[]}'},
+    ])
+
+    assert content == '{"schema_version":1,"layers":[]}'
+
+
+def test_parse_dsl_response_unwraps_revised_dsl_with_prose():
+    raw = (
+        "Here is the corrected object:\n"
+        '{"revised_dsl":{"schema_version":1,"canvas":{"width":64,"height":64,'
+        '"background":"#000000"},"layers":[{"id":"shape_0","type":"circle",'
+        '"fill":{"type":"solid","color":"#ffffff"},"params":{"center":[0.5,0.5],'
+        '"radius":0.25},"opacity":1.0}]}}'
+    )
+
+    result = _parse_dsl_response(raw, 64, 64)
+
+    assert result is not None
+    assert result["layers"][0]["id"] == "shape_0"
+    assert validate_dsl(result).valid
+
+
+def test_parse_dsl_response_uses_last_dsl_shaped_json_snippet():
+    raw = (
+        'Previous: {"schema_version":1,"layers":[{"id":"old","type":"circle",'
+        '"fill":{"type":"solid","color":"#000000"},"params":{"center":[0.5,0.5],'
+        '"radius":0.1},"opacity":1.0}]}\n'
+        'Revised: {"schema_version":1,"layers":[{"id":"new","type":"circle",'
+        '"fill":{"type":"solid","color":"#ffffff"},"params":{"center":[0.5,0.5],'
+        '"radius":0.25},"opacity":1.0}]}'
+    )
+
+    result = _parse_dsl_response(raw, 64, 64)
+
+    assert result is not None
+    assert result["layers"][0]["id"] == "new"
+    assert validate_dsl(result).valid
+
+
+def test_llm_refinement_retries_without_response_format(monkeypatch):
+    calls: list[dict] = []
+    revised = {
+        "schema_version": 1,
+        "canvas": {"width": 64, "height": 64, "background": "#000000"},
+        "layers": [
+            {
+                "id": "shape_0",
+                "type": "circle",
+                "fill": {"type": "solid", "color": "#ffffff"},
+                "params": {"center": [0.5, 0.5], "radius": 0.25},
+                "opacity": 1.0,
+            }
+        ],
+    }
+
+    def fake_call_llm(system_prompt, user_prompt, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return ""
+        return {"revised_dsl": revised}
+
+    monkeypatch.setattr("app.candidates.llm_scene._call_llm", fake_call_llm)
+
+    result = generate_llm_refinement(
+        _make_preprocess(),
+        current_dsl=revised,
+        metrics={"mse": 0.2, "simple_ssim": 0.4},
+        quality_router={"final_score": 0.4, "quality_band": "poor", "failure_type": "color"},
+        canvas_width=64,
+        canvas_height=64,
+    )
+
+    assert result is not None
+    assert result["layers"][0]["id"] == "shape_0"
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[1]["response_format"] is None
+    assert result["_io"]["attempts"][0]["parse_success"] is False
+    assert result["_io"]["attempts"][1]["parse_success"] is True
+
+
+def test_llm_refinement_returns_parse_diagnostic_with_attempts(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_call_llm(system_prompt, user_prompt, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return "I cannot produce JSON for this request."
+        return {"glsl": "void mainImage(out vec4 fragColor, in vec2 fragCoord){}"}
+
+    monkeypatch.setattr("app.candidates.llm_scene._call_llm", fake_call_llm)
+
+    result = generate_llm_refinement(
+        _make_preprocess(),
+        current_dsl={"schema_version": 1, "layers": []},
+        metrics={"mse": 0.2},
+        quality_router={"final_score": 0.4, "quality_band": "poor"},
+        canvas_width=64,
+        canvas_height=64,
+    )
+
+    assert result is not None
+    assert result["_parse_error"].startswith("LLM returned no usable DSL")
+    assert result["_io"]["attempts"][0]["parse_success"] is False
+    assert result["_io"]["attempts"][1]["parse_success"] is False
+    assert "I cannot produce JSON" in result["_io"]["raw_response"]
+    assert "glsl" in result["_io"]["raw_response"]
 
 
 # ---------------------------------------------------------------------------

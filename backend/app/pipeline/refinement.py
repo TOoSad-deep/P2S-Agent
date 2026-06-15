@@ -17,6 +17,7 @@ from app.dsl.renderer import render_dsl_to_image
 from app.pipeline.pool import CandidateRecord
 from app.pipeline.revision import PatchOp, RevisionPatch
 from app.pipeline.scoring import _evaluate_dsl, _metric_render_size
+from app.services.logging_config import log_event
 
 
 def _short_exception(exc: Exception) -> str:
@@ -145,6 +146,15 @@ def run_dsl_refinement_loop(
         float(high_score_stop),
         int(max_iterations),
     )
+    log_event(
+        logger,
+        "dsl_refinement_start",
+        initial_score=float(initial_score),
+        threshold=float(threshold),
+        high_score_stop=float(high_score_stop),
+        max_iterations=int(max_iterations),
+        loop_dir=str(loop_dir),
+    )
 
     best_dsl = initial_dsl
     best_score = initial_score
@@ -176,6 +186,8 @@ def run_dsl_refinement_loop(
 
     def _record(entry: dict) -> None:
         history.append(entry)
+        if entry.get("llm_io") is not None:
+            save_json(loop_dir / f"iter_{i + 1}_llm_io.json", entry["llm_io"])
         save_json(loop_dir / f"iter_{i + 1}.json", entry)
         if on_iteration is None:
             return
@@ -284,23 +296,42 @@ def run_dsl_refinement_loop(
             entry["llm_duration_ms"] = int((time.monotonic() - llm_start) * 1000)
             entry["error_type"] = exc.__class__.__name__
             entry["error"] = f"LLM call failed: {_short_exception(exc)}"
+            log_event(
+                logger,
+                "dsl_refinement_llm_call_failed",
+                level=logging.ERROR,
+                iteration=i + 1,
+                duration_ms=entry["llm_duration_ms"],
+                error=entry["error"],
+            )
             _record(entry)
             stop_reason = "llm_call_failed"
             break
 
         entry["llm_duration_ms"] = int((time.monotonic() - llm_start) * 1000)
+        parse_error = None
         if revised and isinstance(revised, dict):
             entry["llm_io"] = revised.pop("_io", None)
+            parse_error = revised.pop("_parse_error", None)
 
-        if revised is None:
+        if revised is None or parse_error:
             entry["error_type"] = "llm_returned_none"
-            entry["error"] = (
+            entry["error"] = parse_error or (
                 "LLM returned no usable DSL: response content was empty, was not "
                 "valid JSON, or did not contain a 'layers' field. Check provider "
                 "support for response_format=json_object and the raw_response in "
-                "the previous iteration's llm_io."
+                "this iteration's llm_io."
             )
-            logger.info("refinement iter=%d skipped: llm_returned_none", i + 1)
+            log_event(
+                logger,
+                "dsl_refinement_llm_parse_failed",
+                level=logging.WARNING,
+                iteration=i + 1,
+                duration_ms=entry["llm_duration_ms"],
+                error=entry["error"],
+                attempts=len((entry.get("llm_io") or {}).get("attempts") or []),
+                raw_response_len=len(str((entry.get("llm_io") or {}).get("raw_response") or "")),
+            )
             _record(entry)
             stop_reason = "llm_returned_none"
             break
@@ -308,7 +339,13 @@ def run_dsl_refinement_loop(
         val = _validate_dsl(revised)
         if not val.valid:
             entry["error"] = f"DSL invalid: {val.errors[:2]}"
-            logger.info("refinement iter=%d skipped: dsl_invalid errors=%s", i + 1, val.errors[:2])
+            log_event(
+                logger,
+                "dsl_refinement_validation_failed",
+                level=logging.WARNING,
+                iteration=i + 1,
+                errors=val.errors[:3],
+            )
             _record(entry)
             no_improvement_count += 1
             if no_improvement_count >= no_improvement_patience:
@@ -319,7 +356,13 @@ def run_dsl_refinement_loop(
         cr = compile_dsl(revised)
         if not cr.success:
             entry["error"] = f"Compile failed: {cr.errors[:1]}"
-            logger.info("refinement iter=%d skipped: compile_failed errors=%s", i + 1, cr.errors[:1])
+            log_event(
+                logger,
+                "dsl_refinement_compile_failed",
+                level=logging.WARNING,
+                iteration=i + 1,
+                errors=cr.errors[:3],
+            )
             _record(entry)
             no_improvement_count += 1
             if no_improvement_count >= no_improvement_patience:
@@ -357,6 +400,17 @@ def run_dsl_refinement_loop(
             float(delta),
             bool(entry["improved"]),
             (entry["changes_summary"] or "")[:120],
+        )
+        log_event(
+            logger,
+            "dsl_refinement_iteration_scored",
+            iteration=i + 1,
+            score_before=float(entry["score_before"]),
+            score_after=float(new_score),
+            delta=float(delta),
+            improved=bool(entry["improved"]),
+            meaningful_improvement=bool(entry["meaningful_improvement"]),
+            changes_summary=entry["changes_summary"],
         )
 
         # Arbitrate noise-level gains: objective metrics can't tell 0.005
@@ -409,6 +463,13 @@ def run_dsl_refinement_loop(
         stop_reason,
         float(best_score),
         len(history),
+    )
+    log_event(
+        logger,
+        "dsl_refinement_done",
+        stop_reason=stop_reason,
+        best_score=float(best_score),
+        iterations=len(history),
     )
     return {
         "best_dsl": best_dsl,

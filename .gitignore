@@ -11,6 +11,7 @@ dist/
 build/
 .env
 *.log
+logs/
 .DS_Store
 node_modules/
 frontend/dist/

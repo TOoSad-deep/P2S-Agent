@@ -55,6 +55,7 @@ from app.pipeline.scoring import (
     _score_candidates,
     _sync_selected_record_for_response,
 )
+from app.services.logging_config import log_event
 from app.state import P2SPipelineState
 from app.strategy_config_loader import clamp as strategy_clamp, get_default
 
@@ -521,7 +522,7 @@ def _run_post_pipeline(
                         canvas_height=canvas_height,
                         max_shader_chars=max_shader_chars,
                         protected_aspects=protected_aspects,
-                        reason=f"revision improved score {selected.final_score:.4f} -> {rev_result.best_score:.4f}",
+                        reason=f"revision improved score {selected.final_score:.4f} -> {rev_result.final_score:.4f}",
                     )
                     if accepted is not None:
                         selected_dsl, selected_glsl, selected_metrics, selected_quality = accepted
@@ -1154,7 +1155,16 @@ def run_png_shader_pipeline(
     }
 
     # Run the LangGraph pipeline
-    logger.info("pipeline start: run_id=%s image=%s", effective_run_id, image_path.name)
+    log_event(
+        logger,
+        "pipeline_start",
+        run_id=effective_run_id,
+        image=image_path.name,
+        run_dir=str(run_dir_obj.path),
+        llm_enabled=effective_llm_enabled,
+        refinement_mode=effective_refinement_mode,
+        max_refinement_iterations=max_refinement_iterations,
+    )
     if progress_callback:
         progress_callback("preprocessing")
 
@@ -1176,7 +1186,14 @@ def run_png_shader_pipeline(
             state, strategy_reader=strategy_reader, publish_partial=publish_partial
         )
 
-    logger.info("pipeline done: run_id=%s", effective_run_id)
+    log_event(
+        logger,
+        "pipeline_done",
+        run_id=effective_run_id,
+        selected_id=state.get("scoreboard", {}).get("selected_id"),
+        score=state.get("selected_quality", {}).get("final_score"),
+        refinement=state.get("refinement_summary", {}),
+    )
 
     return {
         "run_id": effective_run_id,

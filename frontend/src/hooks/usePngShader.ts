@@ -29,6 +29,7 @@ import {
   type StrategyConfig,
   type StrategyMode,
 } from "../lib/strategy-presets";
+import { logFrontendEvent, makeRequestId } from "../lib/logger";
 
 export interface LlmIO {
   system_prompt: string;
@@ -39,6 +40,15 @@ export interface LlmIO {
    *  later refinement mutates the candidate's compile_glsl in place. */
   compile_glsl?: string | null;
   image_paths?: string[];
+  attempts?: Array<{
+    mode?: string;
+    raw_response?: string;
+    parse_success?: boolean;
+    raw_response_len?: number;
+    json_candidate_count?: number;
+    candidate_shapes?: string[];
+    parsed_layer_count?: number | null;
+  }>;
 }
 
 export interface CandidateEntry {
@@ -201,9 +211,13 @@ export function usePngShader() {
     if (activeRunRef.current !== id) return;
 
     try {
-      const response = await fetch(`${API_BASE}/png-shader/status/${id}`);
+      const requestId = makeRequestId("status");
+      const response = await fetch(`${API_BASE}/png-shader/status/${id}`, {
+        headers: { "x-request-id": requestId, "x-run-id": id },
+      });
       if (!response.ok) {
         const text = await response.text();
+        logFrontendEvent("api_status_failed", { run_id: id, request_id: requestId, status: response.status }, "warn");
         throw new Error(`Status failed (${response.status}): ${text}`);
       }
 
@@ -228,6 +242,12 @@ export function usePngShader() {
       stopPolling();
       activeRunRef.current = null;
       setLoading(false);
+      logFrontendEvent("api_status_terminal", {
+        run_id: id,
+        request_id: requestId,
+        status: data.status,
+        final_score: data.quality_router?.final_score,
+      });
       if (data.status === "failed") {
         setError(data.error || "PNG shader pipeline failed");
       }
@@ -237,6 +257,7 @@ export function usePngShader() {
       stopPolling();
       activeRunRef.current = null;
       setLoading(false);
+      logFrontendEvent("api_status_error", { run_id: id, error: err instanceof Error ? err.message : String(err) }, "error");
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [stopPolling]);
@@ -262,17 +283,28 @@ export function usePngShader() {
         formData.append("seed_glsl", seedGlsl);
       }
 
+      const requestId = makeRequestId("run");
+      logFrontendEvent("api_run_submit", {
+        request_id: requestId,
+        filename: file.name,
+        size: file.size,
+        llm_mode: llmMode,
+        refinement_mode: strategy.refinement_mode,
+      });
       const response = await fetch(`${API_BASE}/png-shader/run`, {
         method: "POST",
+        headers: { "x-request-id": requestId },
         body: formData,
       });
 
       if (!response.ok) {
         const text = await response.text();
+        logFrontendEvent("api_run_failed", { request_id: requestId, status: response.status }, "warn");
         throw new Error(`Request failed (${response.status}): ${text}`);
       }
 
       const data: PngShaderResult = await response.json();
+      logFrontendEvent("api_run_accepted", { request_id: requestId, run_id: data.run_id, status: data.status });
       setRunId(data.run_id);
       setResult(data);
       activeRunRef.current = data.run_id;
@@ -289,6 +321,7 @@ export function usePngShader() {
       }
     } catch (err) {
       activeRunRef.current = null;
+      logFrontendEvent("api_run_error", { error: err instanceof Error ? err.message : String(err) }, "error");
       setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     }
@@ -314,12 +347,20 @@ export function usePngShader() {
       pendingPatchRef.current = {};
       if (!Object.keys(patch).length) return;
       try {
-        await fetch(`${API_BASE}/png-shader/runs/${id}/strategy`, {
+        const requestId = makeRequestId("strategy");
+        const response = await fetch(`${API_BASE}/png-shader/runs/${id}/strategy`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "x-request-id": requestId, "x-run-id": id },
           body: JSON.stringify({ quality: patch }),
         });
+        logFrontendEvent("api_strategy_patch", {
+          request_id: requestId,
+          run_id: id,
+          status: response.status,
+          fields: Object.keys(patch),
+        }, response.ok ? "debug" : "warn");
       } catch {
+        logFrontendEvent("api_strategy_patch_error", { run_id: id, fields: Object.keys(patch) }, "warn");
         // best-effort; next poll will re-sync
       }
     }, 250);
@@ -340,8 +381,14 @@ export function usePngShader() {
     if (!id) return;
     setStopPending(true);
     try {
-      await fetch(`${API_BASE}/png-shader/runs/${id}/stop`, { method: "POST" });
+      const requestId = makeRequestId("stop");
+      const response = await fetch(`${API_BASE}/png-shader/runs/${id}/stop`, {
+        method: "POST",
+        headers: { "x-request-id": requestId, "x-run-id": id },
+      });
+      logFrontendEvent("api_stop_run", { request_id: requestId, run_id: id, status: response.status }, response.ok ? "info" : "warn");
     } catch {
+      logFrontendEvent("api_stop_run_error", { run_id: id }, "warn");
       setStopPending(false);
     }
   }, [runId]);

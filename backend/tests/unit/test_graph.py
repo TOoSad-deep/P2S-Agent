@@ -5,6 +5,7 @@ No LLM, no browser. Uses synthetic PNGs created with Pillow.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -671,6 +672,68 @@ def test_refinement_loop_records_llm_call_exception(tmp_path, monkeypatch):
     assert (loop_dir / "iter_1.json").exists()
 
 
+def test_refinement_loop_records_llm_parse_diagnostic(tmp_path, monkeypatch):
+    png_path = make_solid_png(tmp_path)
+    preprocess = _preprocess_from_png(tmp_path)
+    initial_dsl = {
+        "schema_version": 1,
+        "canvas": {"width": 64, "height": 64, "background": "#000000"},
+        "layers": [
+            {
+                "id": "circle_01",
+                "type": "circle",
+                "fill": {"type": "solid", "color": "#ffffff"},
+                "params": {"center": [0.5, 0.5], "radius": 0.3},
+                "opacity": 1.0,
+            }
+        ],
+    }
+    io_record = {
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "raw_response": "[attempt=json_object parse_success=False]\nnot json",
+        "mode": "refinement",
+        "attempts": [{"mode": "json_object", "raw_response": "not json", "parse_success": False}],
+    }
+
+    def fake_refinement(**kwargs):
+        return {
+            "_parse_error": "LLM returned no usable DSL: diagnostic",
+            "_io": io_record,
+        }
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_refinement",
+        fake_refinement,
+    )
+
+    loop_dir = tmp_path / "refinement"
+    result = run_dsl_refinement_loop(
+        preprocess=preprocess,
+        initial_dsl=initial_dsl,
+        initial_score=0.2,
+        initial_metrics={"mse": 0.2},
+        initial_quality={"final_score": 0.2, "quality_band": "poor"},
+        reference_path=png_path,
+        canvas_width=64,
+        canvas_height=64,
+        max_shader_chars=12000,
+        max_iterations=1,
+        threshold=0.8,
+        high_score_stop=0.92,
+        loop_dir=loop_dir,
+    )
+
+    assert result["stop_reason"] == "llm_returned_none"
+    entry = result["history"][0]
+    assert entry["error_type"] == "llm_returned_none"
+    assert entry["error"] == "LLM returned no usable DSL: diagnostic"
+    assert entry["llm_io"] == io_record
+    llm_io_path = loop_dir / "iter_1_llm_io.json"
+    assert llm_io_path.exists()
+    assert json.loads(llm_io_path.read_text(encoding="utf-8")) == io_record
+
+
 def test_run_post_pipeline_runs_glsl_refinement(tmp_path, monkeypatch):
     glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
     cand = CandidateRecord(
@@ -774,6 +837,115 @@ def test_run_post_pipeline_skips_glsl_refinement_when_render_disabled(tmp_path, 
     assert result["selected_glsl"] == glsl
     assert result["refinement_summary"]["decision"] == "glsl_render_disabled"
     assert result["refinement_summary"]["enabled"] is False
+
+
+def test_run_post_pipeline_accepts_dsl_revision(tmp_path, monkeypatch):
+    """Regression: a low-scoring DSL candidate whose revision improves must not
+    crash the run.
+
+    The revision-accept branch builds its acceptance reason from the
+    RevisionResult. RevisionResult exposes ``final_score`` (not ``best_score``);
+    referencing the wrong attribute raised AttributeError and failed the whole
+    run. This drives the revise -> apply -> accept path end to end.
+    """
+    import app.pipeline.graph as graph_mod
+    import app.pipeline.scoring as scoring_mod
+    from app.pipeline.revision import RevisionPatch, RevisionResult
+
+    dsl = {
+        "schema_version": 1,
+        "canvas": {"width": 64, "height": 64, "background": "#000000"},
+        "layers": [
+            {
+                "id": "circle_01",
+                "type": "circle",
+                "fill": {"type": "solid", "color": "#ffffff"},
+                "params": {"center": [0.5, 0.5], "radius": 0.30},
+                "opacity": 1.0,
+            }
+        ],
+    }
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    cand = CandidateRecord(
+        id="rule_0",
+        source="rule",
+        enabled=True,
+        priority=1,
+        dsl=dsl,
+        output_kind="dsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.40,
+        selected=True,
+        objective_metrics={"mse": 0.5},
+        quality_router={
+            "final_score": 0.40,
+            "next_action": "revise",
+            "failure_type": "parameter",
+        },
+    )
+
+    revised_dsl = {
+        **dsl,
+        "layers": [{**dsl["layers"][0], "params": {"center": [0.5, 0.5], "radius": 0.35}}],
+    }
+
+    def fake_build_patch(*args, **kwargs):
+        return RevisionPatch(revision_type="parameter", failure_type="parameter", ops=[])
+
+    def fake_apply(dsl_in, patch, score_fn):
+        return RevisionResult(
+            success=True,
+            final_dsl=revised_dsl,
+            final_score=0.72,
+            initial_score=0.40,
+            improved=True,
+            rolled_back=False,
+            violations=[],
+            errors=[],
+            patch_log=[{"ops_applied": 0, "rolled_back": False}],
+        )
+
+    captured: dict = {}
+
+    def spy_accept(selected, new_dsl, reference_path, out_render_path, *, reason, **kwargs):
+        captured["reason"] = reason
+        selected.dsl = new_dsl
+        selected.final_score = 0.72
+        selected.quality_router = {"final_score": 0.72, "next_action": "accept"}
+        selected.reason.append(reason)
+        return new_dsl, selected.compile_glsl, dict(selected.objective_metrics), selected.quality_router
+
+    monkeypatch.setattr(graph_mod, "_build_revision_patch", fake_build_patch)
+    monkeypatch.setattr(graph_mod, "apply_revision_with_rollback", fake_apply)
+    monkeypatch.setattr(scoring_mod, "_accept_improvement", spy_accept)
+
+    result = _run_post_pipeline({
+        "selected_candidate_id": "rule_0",
+        "candidates": [cand],
+        "run_dir": str(tmp_path),
+        "selected_dsl": dsl,
+        "selected_glsl": glsl,
+        "selected_metrics": {"mse": 0.5},
+        "selected_quality": {
+            "final_score": 0.40,
+            "next_action": "revise",
+            "failure_type": "parameter",
+        },
+        "refinement_mode": "off",
+        "max_refinement_iterations": 0,
+        "llm_enabled": False,
+        "glsl_render_enabled": False,
+        "vlm_judge_enabled": False,
+    })
+
+    # The accept branch ran, formatting its reason from RevisionResult.final_score.
+    assert captured["reason"] == "revision improved score 0.4000 -> 0.7200"
+    assert "revision improved score 0.4000 -> 0.7200" in cand.reason
+    assert result["selected_candidate_id"] == "rule_0"
 
 
 def test_dsl_refinement_feeds_history_and_semantic_notes(tmp_path, monkeypatch):

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.dsl.schema import DSL_SCHEMA_VERSION
+from app.services.logging_config import log_event
 from app.utils.glsl_postprocess import (
     build_visual_strategy,
     normalize_shadertoy_glsl,
@@ -31,11 +32,18 @@ from app.utils.glsl_postprocess import (
 from app.utils.color import normalize_color
 
 Implementation = Literal["auto", "png_dsl", "shadertoy_glsl"]
-LlmClient = Callable[[str, str, Optional[list[str]]], Union[str, dict, None]]
+LlmClient = Callable[[str, str, Optional[list[str]]], Union[str, dict, list, None]]
 
 
 class LlmCallError(RuntimeError):
     """Raised when an LLM API call fails before returning usable content."""
+
+
+NO_USABLE_DSL_MESSAGE = (
+    "LLM returned no usable DSL: response content was empty, was not valid JSON, "
+    "or did not contain a 'layers' field. Check provider support for "
+    "response_format=json_object and the raw_response in this iteration's llm_io."
+)
 
 
 def generate_llm_scene_candidate(
@@ -298,21 +306,43 @@ def _build_prompts(
     return system_prompt, user_prompt
 
 
+# Output-token ceiling for all LLM generation/refinement calls. Large enough
+# that a full revised DSL or Shadertoy shader is never truncated mid-JSON
+# (finish_reason="length"), which otherwise surfaces as "LLM returned no usable
+# DSL/GLSL". Only generated tokens are billed, so a high cap costs nothing on
+# short responses.
+LLM_MAX_OUTPUT_TOKENS = 32000
+
+
 def _call_llm(
     system_prompt: str,
     user_prompt: str,
     *,
     image_paths: "list[str | Path] | str | Path | None" = None,
     llm_client: LlmClient | None,
-    max_tokens: int = 4096,
+    max_tokens: int = LLM_MAX_OUTPUT_TOKENS,
     response_format: dict | None = None,
-) -> str | dict | None:
+) -> str | dict | list | None:
     normalized_paths = _normalize_image_paths(image_paths)
 
     if llm_client is not None:
+        log_event(
+            logger,
+            "llm_call_injected_client",
+            prompt_len=len(system_prompt) + len(user_prompt),
+            image_count=len(normalized_paths or []),
+            response_format=response_format,
+            max_tokens=max_tokens,
+        )
         return llm_client(system_prompt, user_prompt, normalized_paths)
 
     if not settings.llm.api_key:
+        log_event(
+            logger,
+            "llm_call_skipped",
+            level=logging.WARNING,
+            reason="missing_api_key",
+        )
         return None
 
     try:
@@ -322,10 +352,16 @@ def _call_llm(
         raise LlmCallError(f"LLM client init failed: {_format_exception(exc)}") from exc
 
     paths = normalized_paths if normalized_paths and settings.llm_supports_image else None
-    logger.info(
-        "LLM call: prompt_len=%d, images=%d",
-        len(system_prompt) + len(user_prompt),
-        len(paths) if paths else 0,
+    log_event(
+        logger,
+        "llm_call_start",
+        prompt_len=len(system_prompt) + len(user_prompt),
+        system_prompt_len=len(system_prompt),
+        user_prompt_len=len(user_prompt),
+        image_count=len(paths) if paths else 0,
+        model=settings.llm.model,
+        max_tokens=max_tokens,
+        response_format=response_format,
     )
     try:
         result = agent.chat(
@@ -334,32 +370,80 @@ def _call_llm(
             image_paths=paths,
             temperature=0.2,
             max_tokens=max_tokens,
+            return_raw=True,
             response_format=response_format,
         )
+        if response_format is not None and not _response_content(result):
+            log_event(
+                logger,
+                "llm_call_empty_json_mode_retry",
+                level=logging.WARNING,
+                model=settings.llm.model,
+                response_format=response_format,
+            )
+            result = agent.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_paths=paths,
+                temperature=0.2,
+                max_tokens=max_tokens,
+                return_raw=True,
+                response_format=None,
+            )
     except Exception as first_exc:
         # Model may not support image input — retry text-only.
         # In normal production config this branch should be rare because
         # image input is gated by GENERATE_SUPPORTS_IMAGE.
         if paths:
             try:
+                log_event(
+                    logger,
+                    "llm_call_text_only_retry",
+                    level=logging.WARNING,
+                    reason="image_call_failed",
+                    error=_format_exception(first_exc),
+                )
                 return agent.chat(
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     image_paths=None,
                     temperature=0.2,
                     max_tokens=max_tokens,
+                    return_raw=True,
                     response_format=response_format,
                 )
             except Exception as retry_exc:
+                log_event(
+                    logger,
+                    "llm_call_failed",
+                    level=logging.ERROR,
+                    image_error=_format_exception(first_exc),
+                    retry_error=_format_exception(retry_exc),
+                )
                 raise LlmCallError(
                     "LLM image call failed: "
                     f"{_format_exception(first_exc)}; text-only retry failed: "
                     f"{_format_exception(retry_exc)}"
                 ) from retry_exc
+        log_event(
+            logger,
+            "llm_call_failed",
+            level=logging.ERROR,
+            error=_format_exception(first_exc),
+        )
         raise LlmCallError(f"LLM call failed: {_format_exception(first_exc)}") from first_exc
 
-    content_preview = str(result)[:120] if result else "None"
-    logger.info("LLM response: len=%d, preview=%s", len(str(result or "")), content_preview)
+    content = _response_content(result)
+    content_preview = content[:120] if content else "None"
+    log_event(
+        logger,
+        "llm_call_done",
+        response_type=type(result).__name__,
+        content_len=len(content),
+        preview=content_preview,
+        finish_reason=result.get("finish_reason") if isinstance(result, dict) else None,
+        usage=result.get("usage") if isinstance(result, dict) else None,
+    )
     return result
 
 
@@ -381,30 +465,84 @@ def _format_exception(exc: Exception) -> str:
     return f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
 
 
-def _response_content(response: str | dict | None) -> str:
+def _response_content(response: str | dict | list | None) -> str:
     if response is None:
         return ""
+    if isinstance(response, list):
+        parts: list[str] = []
+        for block in response:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if isinstance(text, list):
+                    text = _response_content(text)
+                if text:
+                    parts.append(str(text))
+            else:
+                text = getattr(block, "text", None) or getattr(block, "content", None)
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts)
     if isinstance(response, dict):
         if "layers" in response or "schema_version" in response:
             return json.dumps(response, ensure_ascii=False)
+        for key in (
+            "dsl",
+            "revised_dsl",
+            "revisedDSL",
+            "png_dsl",
+            "pngDsl",
+            "shader_dsl",
+            "shaderDsl",
+            "candidate",
+            "result",
+            "output",
+            "scene",
+        ):
+            value = response.get(key)
+            if isinstance(value, dict):
+                return json.dumps(response, ensure_ascii=False)
         if "glsl" in response or "shader" in response or "scene_analysis" in response:
             return json.dumps(response, ensure_ascii=False)
-        value = response.get("content") or response.get("shader") or response.get("glsl") or response.get("dsl")
-        if isinstance(value, dict):
-            return json.dumps(value, ensure_ascii=False)
+        value = (
+            response.get("content")
+            or response.get("text")
+            or response.get("message")
+            or response.get("response")
+            or response.get("output_text")
+            or response.get("answer")
+            or response.get("output")
+            or response.get("shader")
+            or response.get("glsl")
+            or response.get("dsl")
+        )
+        if isinstance(value, (dict, list)):
+            return _response_content(value)
         return str(value or "")
     return str(response)
 
 
 def _parse_dsl_response(text: str, canvas_width: int, canvas_height: int) -> dict | None:
-    data = _extract_json(text)
-    if not isinstance(data, dict):
+    candidates = _extract_json_candidates(text)
+    if not candidates:
         return None
 
-    if "dsl" in data and isinstance(data["dsl"], dict):
-        data = data["dsl"]
+    data: dict | None = None
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            if all(isinstance(item, dict) for item in candidate):
+                data = {"layers": candidate}
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        unwrapped = _unwrap_dsl_payload(candidate)
+        if isinstance(unwrapped, dict) and "layers" in unwrapped:
+            # Prefer the last DSL-shaped object; models often put examples or
+            # the previous DSL before the final revised DSL.
+            data = unwrapped
 
-    if "layers" not in data:
+    if data is None or "layers" not in data:
         return None
 
     _normalize_gradient_fills(data)
@@ -429,6 +567,37 @@ def _parse_dsl_response(text: str, canvas_width: int, canvas_height: int) -> dic
         "implementation": "png_dsl",
     }
     return data
+
+
+def _unwrap_dsl_payload(data: dict) -> dict | None:
+    """Find the DSL object inside common LLM envelope shapes."""
+    if "layers" in data:
+        return data
+
+    wrapper_keys = (
+        "dsl",
+        "revised_dsl",
+        "revisedDSL",
+        "png_dsl",
+        "pngDsl",
+        "shader_dsl",
+        "shaderDsl",
+        "candidate",
+        "result",
+        "output",
+        "scene",
+    )
+    for key in wrapper_keys:
+        value = data.get(key)
+        if isinstance(value, dict):
+            unwrapped = _unwrap_dsl_payload(value)
+            if unwrapped is not None:
+                return unwrapped
+
+    for value in data.values():
+        if isinstance(value, dict) and "layers" in value:
+            return value
+    return None
 
 
 def _normalize_gradient_fills(dsl: dict) -> None:
@@ -655,24 +824,67 @@ def _normalize_uv_vec2(value: Any) -> list[float] | None:
 
 
 def _extract_json(text: str) -> Any:
+    candidates = _extract_json_candidates(text)
+    return candidates[0] if candidates else None
+
+
+def _extract_json_candidates(text: str) -> list[Any]:
     stripped = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL)
+    text_candidates: list[str] = []
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL | re.IGNORECASE)
     if fenced:
-        stripped = fenced.group(1).strip()
+        text_candidates.append(fenced.group(1).strip())
+    text_candidates.append(stripped)
 
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
-
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start >= 0 and end > start:
+    parsed: list[Any] = []
+    seen: set[str] = set()
+    for candidate in text_candidates:
         try:
-            return json.loads(stripped[start:end + 1])
+            parsed.append(json.loads(candidate))
+            continue
         except json.JSONDecodeError:
-            return None
-    return None
+            pass
+
+        for snippet in _iter_json_object_snippets(candidate):
+            if snippet in seen:
+                continue
+            seen.add(snippet)
+            try:
+                parsed.append(json.loads(snippet))
+            except json.JSONDecodeError:
+                continue
+    return parsed
+
+
+def _iter_json_object_snippets(text: str):
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for idx, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+            continue
+        if ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                yield text[start:idx + 1]
+                start = None
 
 
 def _extract_glsl(text: str) -> str:
@@ -905,6 +1117,37 @@ def _build_feedback_issues(metrics: dict, quality_router: dict) -> list[str]:
     return issues
 
 
+def _format_attempt_raw_responses(attempts: list[dict]) -> str:
+    parts: list[str] = []
+    for attempt in attempts:
+        mode = attempt.get("mode", "unknown")
+        parse_success = attempt.get("parse_success")
+        raw = str(attempt.get("raw_response") or "")
+        parts.append(
+            f"[attempt={mode} parse_success={parse_success}]\n"
+            + (raw if raw else "<empty response>")
+        )
+    return "\n\n".join(parts)
+
+
+def _dsl_parse_diagnostics(text: str, dsl: dict | None) -> dict:
+    candidates = _extract_json_candidates(text) if text else []
+    candidate_shapes: list[str] = []
+    for candidate in candidates[:5]:
+        if isinstance(candidate, dict):
+            keys = ",".join(sorted(str(k) for k in candidate.keys())[:6])
+            candidate_shapes.append(f"dict:{keys}")
+        else:
+            candidate_shapes.append(type(candidate).__name__)
+
+    return {
+        "raw_response_len": len(text or ""),
+        "json_candidate_count": len(candidates),
+        "candidate_shapes": candidate_shapes,
+        "parsed_layer_count": len(dsl.get("layers", [])) if isinstance(dsl, dict) else None,
+    }
+
+
 def generate_llm_refinement(
     preprocess: dict,
     current_dsl: dict,
@@ -989,21 +1232,99 @@ def generate_llm_refinement(
         indent=2,
     )
 
+    attempts: list[dict] = []
+
     response = _call_llm(
         system_prompt,
         user_prompt,
         image_paths=image_paths if has_images else None,
         llm_client=llm_client,
-        max_tokens=3072,
+        max_tokens=LLM_MAX_OUTPUT_TOKENS,
         response_format={"type": "json_object"},
     )
     content = _response_content(response)
-    if not content:
-        return None
+    dsl = _parse_dsl_response(content, canvas_width, canvas_height) if content else None
+    diagnostics = _dsl_parse_diagnostics(content, dsl)
+    attempts.append({
+        "mode": "json_object",
+        "raw_response": content,
+        "parse_success": dsl is not None,
+        **diagnostics,
+    })
+    log_event(
+        logger,
+        "llm_refinement_parse_attempt",
+        mode="json_object",
+        parse_success=dsl is not None,
+        **diagnostics,
+    )
 
-    dsl = _parse_dsl_response(content, canvas_width, canvas_height)
     if dsl is None:
-        return None
+        retry_system_prompt = (
+            system_prompt
+            + "\n\nJSON-mode retry: return plain text containing exactly one JSON "
+            "object. The object itself must be the full revised DSL with a top-level "
+            "`layers` array; do not wrap it in prose."
+        )
+        try:
+            retry_response = _call_llm(
+                retry_system_prompt,
+                user_prompt,
+                image_paths=image_paths if has_images else None,
+                llm_client=llm_client,
+                max_tokens=LLM_MAX_OUTPUT_TOKENS,
+                response_format=None,
+            )
+        except Exception:
+            logger.warning("refinement retry without response_format failed", exc_info=True)
+            retry_response = None
+        retry_content = _response_content(retry_response)
+        retry_dsl = _parse_dsl_response(retry_content, canvas_width, canvas_height) if retry_content else None
+        retry_diagnostics = _dsl_parse_diagnostics(retry_content, retry_dsl)
+        attempts.append({
+            "mode": "plain_json_retry",
+            "raw_response": retry_content,
+            "parse_success": retry_dsl is not None,
+            **retry_diagnostics,
+        })
+        log_event(
+            logger,
+            "llm_refinement_parse_attempt",
+            mode="plain_json_retry",
+            parse_success=retry_dsl is not None,
+            **retry_diagnostics,
+        )
+        if retry_dsl is not None:
+            content = retry_content
+            dsl = retry_dsl
+
+    if dsl is None:
+        log_event(
+            logger,
+            "llm_refinement_parse_failed",
+            level=logging.WARNING,
+            attempts=[
+                {
+                    "mode": attempt.get("mode"),
+                    "parse_success": attempt.get("parse_success"),
+                    "raw_response_len": attempt.get("raw_response_len"),
+                    "json_candidate_count": attempt.get("json_candidate_count"),
+                    "candidate_shapes": attempt.get("candidate_shapes"),
+                }
+                for attempt in attempts
+            ],
+        )
+        return {
+            "_parse_error": NO_USABLE_DSL_MESSAGE,
+            "_io": {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "raw_response": _format_attempt_raw_responses(attempts),
+                "mode": "refinement",
+                "image_paths": image_paths if has_images else [],
+                "attempts": attempts,
+            },
+        }
 
     dsl["_io"] = {
         "system_prompt": system_prompt,
@@ -1012,6 +1333,14 @@ def generate_llm_refinement(
         "mode": "refinement",
         "image_paths": image_paths if has_images else [],
     }
+    if len(attempts) > 1:
+        dsl["_io"]["attempts"] = attempts
+    log_event(
+        logger,
+        "llm_refinement_parse_done",
+        layer_count=len(dsl.get("layers", [])),
+        attempts=len(attempts),
+    )
     return dsl
 
 
@@ -1082,7 +1411,7 @@ def generate_llm_glsl_refinement(
         user_prompt,
         image_paths=image_paths if has_images else None,
         llm_client=llm_client,
-        max_tokens=6144,
+        max_tokens=LLM_MAX_OUTPUT_TOKENS,
         response_format={"type": "json_object"},
     )
     content = _response_content(response)

@@ -23,7 +23,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.pipeline.graph import run_png_shader_pipeline
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
 from app.services.langsmith_tracing import trace_context
-from app.services.logging_config import attach_run_log
+from app.services.logging_config import attach_run_log, log_event, logging_context
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,13 @@ def _run_png_shader_background(
 
     run_log_path = Path("artifacts") / run_id / "run.log"
     with attach_run_log(run_id=run_id, log_file=run_log_path):
-        logger.info("worker start: run_id=%s image=%s", run_id, image_path.name)
+        log_event(
+            logger,
+            "pipeline_worker_start",
+            run_id=run_id,
+            image=image_path.name,
+            run_log=str(run_log_path),
+        )
         try:
             with trace_context(
                 "PNG Shader Pipeline",
@@ -123,14 +129,22 @@ def _run_png_shader_background(
                             "refinement": pipeline_result.get("refinement_summary", {}),
                         }
                     )
-                logger.info(
-                    "worker done: run_id=%s selected=%s score=%s",
-                    run_id,
-                    pipeline_result.get("scoreboard", {}).get("selected_id"),
-                    pipeline_result.get("quality_router", {}).get("final_score"),
+                log_event(
+                    logger,
+                    "pipeline_worker_done",
+                    run_id=run_id,
+                    selected_id=pipeline_result.get("scoreboard", {}).get("selected_id"),
+                    score=pipeline_result.get("quality_router", {}).get("final_score"),
                 )
         except Exception as exc:
             logger.exception("worker failed: run_id=%s", run_id)
+            log_event(
+                logger,
+                "pipeline_worker_failed",
+                level=logging.ERROR,
+                run_id=run_id,
+                error=f"{exc.__class__.__name__}: {exc}",
+            )
             with _run_store_lock:
                 stored = _run_store.get(run_id, {})
                 preserved = {
@@ -186,12 +200,18 @@ async def run_png_shader(
         input_spec = overrides
 
     run_id = "run_" + str(uuid4())[:8]
-    logger.info(
-        "request received: POST /png-shader/run run_id=%s filename=%s content_type=%s",
-        run_id,
-        image.filename,
-        image.content_type,
-    )
+    with logging_context(run_id=run_id):
+        log_event(
+            logger,
+            "pipeline_submit_received",
+            method="POST",
+            path="/png-shader/run",
+            run_id=run_id,
+            filename=image.filename,
+            content_type=image.content_type,
+            has_input_spec=input_spec is not None,
+            has_seed_glsl=seed_glsl is not None,
+        )
     upload_dir = Path(tempfile.mkdtemp(prefix=f"png_shader_{run_id}_"))
     try:
         suffix = Path(image.filename or "upload.png").suffix or ".png"
@@ -301,7 +321,13 @@ async def refine_png_shader(
     Returns:
         Updated result dict with refinement applied.
     """
-    logger.info("refine request: run_id=%s feedback_len=%d", run_id, len(feedback or ""))
+    log_event(
+        logger,
+        "human_refine_request",
+        run_id=run_id,
+        feedback_len=len(feedback or ""),
+        has_modified_dsl=bool(modified_dsl_json),
+    )
     with _run_store_lock:
         stored = _run_store.get(run_id)
     if stored is None:
@@ -340,10 +366,25 @@ async def refine_png_shader(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Refinement failed: {exc}") from exc
 
-    if revised is None:
-        raise HTTPException(status_code=502, detail="LLM returned no usable DSL")
-
-    io_record = revised.pop("_io", None)
+    io_record = revised.pop("_io", None) if isinstance(revised, dict) else None
+    parse_error = revised.pop("_parse_error", None) if isinstance(revised, dict) else None
+    if revised is None or parse_error:
+        log_event(
+            logger,
+            "human_refine_llm_parse_failed",
+            level=logging.WARNING,
+            run_id=run_id,
+            error=parse_error or "LLM returned no usable DSL",
+            attempts=len((io_record or {}).get("attempts") or []),
+            raw_response_len=len(str((io_record or {}).get("raw_response") or "")),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": parse_error or "LLM returned no usable DSL",
+                "llm_io": io_record,
+            },
+        )
 
     from app.dsl.compiler import compile_dsl
     from app.dsl.validator import validate_dsl
@@ -365,6 +406,14 @@ async def refine_png_shader(
         "compile_errors": cr.errors,
     }
     _store_run(run_id, result)
+    log_event(
+        logger,
+        "human_refine_done",
+        run_id=run_id,
+        validation_valid=val.valid,
+        compile_success=cr.success,
+        compile_error_count=len(cr.errors or []),
+    )
     return result
 
 
