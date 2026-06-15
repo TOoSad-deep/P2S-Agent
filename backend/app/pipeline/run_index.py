@@ -105,6 +105,10 @@ def _record_to_dict(record: RunLineageRecord) -> dict[str, Any]:
 def _dict_to_record(d: dict[str, Any]) -> RunLineageRecord:
     """Build a RunLineageRecord from a dict, tolerating extra / missing keys."""
     run_id = d.get("run_id", "")
+    # M-1: distinguish None (missing) from an explicit 0; the `or 0.0` idiom
+    # would silently coerce an explicit 0 to 0.0 too, but also masks None.
+    _created = d.get("created_at")
+    created_at = float(_created) if _created is not None else 0.0
     return RunLineageRecord(
         run_id=run_id,
         root_run_id=d.get("root_run_id", run_id),
@@ -116,7 +120,7 @@ def _dict_to_record(d: dict[str, Any]) -> RunLineageRecord:
         title=d.get("title"),
         status=d.get("status", "unknown"),
         run_dir=d.get("run_dir"),
-        created_at=float(d.get("created_at") or 0.0),
+        created_at=created_at,
         completed_at=d.get("completed_at"),
         final_score=d.get("final_score"),
         favorite=bool(d.get("favorite", False)),
@@ -236,10 +240,8 @@ def build_branch_tree(
     the same root-set) attaches directly under the root.
 
     Raises:
-        RunIndexError: if *run_id* is not found in *records*.
-        KeyError: same condition (RunIndexError is a subclass of ValueError,
-            not KeyError, but callers catching KeyError still work because
-            the spec says "KeyError or RunIndexError").
+        RunIndexError: if *run_id* is not found in *records*, or if the
+            root record is missing from the index.
     """
     if run_id not in records:
         raise RunIndexError(f"run_id not found in index: {run_id!r}")
@@ -255,6 +257,8 @@ def build_branch_tree(
         raise RunIndexError(f"root run_id not found in index: {root_run_id!r}")
 
     def _node(rec: RunLineageRecord, children: list[dict[str, Any]]) -> dict[str, Any]:
+        # `run_dir` and `tags` are intentionally omitted — they are not part of
+        # the branch-tree API contract surfaced to callers.
         return {
             "run_id": rec.run_id,
             "root_run_id": rec.root_run_id,
@@ -309,15 +313,6 @@ def build_branch_tree(
 
 _METADATA_ALLOWED = frozenset({"title", "favorite", "tags"})
 
-# Any key that touches lineage or pipeline state is explicitly forbidden.
-_METADATA_FORBIDDEN = frozenset({
-    "run_id", "root_run_id", "parent_run_id",
-    "source_checkpoint_id", "source_checkpoint_label",
-    "mode", "feedback", "status", "run_dir",
-    "created_at", "completed_at", "final_score",
-})
-
-
 def update_run_metadata(
     run_id: str,
     patch: dict[str, Any],
@@ -326,19 +321,24 @@ def update_run_metadata(
 ) -> RunLineageRecord:
     """Patch metadata-only fields (``title``, ``favorite``, ``tags``) for a run.
 
-    Rejects any key outside ``{title, favorite, tags}``, including all
-    lineage fields (``parent_run_id``, ``root_run_id``, ``status``,
-    ``run_dir``, etc.).
+    Any key not in {title, favorite, tags} is rejected, including lineage
+    fields such as parent_run_id, root_run_id, status, run_dir.
 
     Raises:
         ValueError: if *patch* contains a disallowed key.
         RunIndexError: if *run_id* is not found in the index.
 
     Returns the merged RunLineageRecord after writing the update to the file.
+    Empty patches write nothing to disk and simply return the current record.
     """
+    resolved = _resolve_path(path)
+
     if not patch:
-        # No-op patch: still validate run_id existence.
-        pass
+        # I-2: empty patch — validate existence but write nothing to disk.
+        index = load_run_index(path=resolved)
+        if run_id not in index:
+            raise RunIndexError(f"update_run_metadata: unknown run_id: {run_id!r}")
+        return index[run_id]
 
     disallowed = set(patch.keys()) - _METADATA_ALLOWED
     if disallowed:
@@ -347,7 +347,6 @@ def update_run_metadata(
             f"Only {sorted(_METADATA_ALLOWED)} may be patched."
         )
 
-    resolved = _resolve_path(path)
     index = load_run_index(path=resolved)
 
     if run_id not in index:

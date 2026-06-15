@@ -340,6 +340,15 @@ def test_update_run_metadata_rejects_disallowed_mixed_with_allowed(tmp_path):
         update_run_metadata("r12", {"title": "ok", "status": "bad"}, path=idx)
 
 
+def test_update_run_metadata_empty_patch_does_not_write(tmp_path):
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("r-noop"), path=idx)
+    lines_before = idx.read_text().splitlines()
+    result = update_run_metadata("r-noop", {}, path=idx)
+    assert idx.read_text().splitlines() == lines_before
+    assert result.run_id == "r-noop"
+
+
 # ---------------------------------------------------------------------------
 # Thread-safety smoke test (not a real concurrency test — just verifies
 # multiple sequential writes all land in the file)
