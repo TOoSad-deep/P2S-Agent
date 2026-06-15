@@ -740,6 +740,321 @@ def test_run_index_failed_run(tmp_path, monkeypatch):
     assert rec.run_dir is None
 
 
+# ---------------------------------------------------------------------------
+# M3-4: timeline / branches / metadata / artifacts endpoints
+# ---------------------------------------------------------------------------
+
+def _seed_index(idx_path, **fields):
+    """Helper: append a RunLineageRecord to the isolated test index."""
+    from app.pipeline.run_index import RunLineageRecord, append_run_created
+    rec = RunLineageRecord(
+        run_id=fields["run_id"],
+        root_run_id=fields.get("root_run_id", fields["run_id"]),
+        parent_run_id=fields.get("parent_run_id"),
+        source_checkpoint_id=fields.get("source_checkpoint_id"),
+        source_checkpoint_label=fields.get("source_checkpoint_label"),
+        mode=fields.get("mode"),
+        feedback=fields.get("feedback"),
+        title=fields.get("title"),
+        status=fields.get("status", "completed"),
+        run_dir=fields.get("run_dir"),
+        created_at=fields.get("created_at", 1.0),
+        final_score=fields.get("final_score"),
+    )
+    append_run_created(rec, path=idx_path)
+
+
+# --- /timeline ---
+
+def test_timeline_running_from_store(tmp_path):
+    """GET /timeline for a store entry returns timeline with candidate + final entries."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/timeline")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == "run_parent"
+    ids = {e["id"] for e in body["timeline"]}
+    assert "candidate:selected" in ids
+    assert "final:selected" in ids
+
+
+def test_timeline_404_unknown_run(tmp_path, monkeypatch):
+    """GET /timeline for an unknown run_id returns 404."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    client = _client()
+    resp = client.get("/png-shader/runs/run_missing/timeline")
+    assert resp.status_code == 404
+
+
+def test_timeline_from_timeline_json_on_disk(tmp_path, monkeypatch):
+    """GET /timeline for an evicted run reads timeline.json from disk."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    run_dir = tmp_path / "run_ev"
+    run_dir.mkdir()
+    timeline_data = {
+        "run_id": "run_ev",
+        "timeline": [{"id": "final:selected", "kind": "final", "label": "Current best"}],
+    }
+    (run_dir / "timeline.json").write_text(json.dumps(timeline_data))
+    _seed_index(idx, run_id="run_ev", run_dir=str(run_dir))
+
+    client = _client()
+    resp = client.get("/png-shader/runs/run_ev/timeline")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == "run_ev"
+    assert any(e["id"] == "final:selected" for e in body["timeline"])
+
+
+def test_timeline_store_missing_run_dir_none(tmp_path, monkeypatch):
+    """GET /timeline for an index entry with run_dir=None returns empty timeline (no path access)."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    _seed_index(idx, run_id="run_pending", run_dir=None, status="pending")
+
+    client = _client()
+    resp = client.get("/png-shader/runs/run_pending/timeline")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["timeline"] == []
+    assert body["status"] == "pending"
+
+
+# --- /branches ---
+
+def test_branches_child_tree(tmp_path, monkeypatch):
+    """GET /branches for a child run returns tree rooted at root_a."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    _seed_index(idx, run_id="root_a", run_dir=str(tmp_path / "root_a"), created_at=1.0)
+    _seed_index(idx, run_id="child_b", root_run_id="root_a", parent_run_id="root_a",
+                source_checkpoint_id="final:selected", created_at=2.0)
+
+    client = _client()
+    resp = client.get("/png-shader/runs/child_b/branches")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["root_run_id"] == "root_a"
+    assert body["active_run_id"] == "child_b"
+    tree = body["tree"]
+    assert tree["run_id"] == "root_a"
+    child_ids = [c["run_id"] for c in tree["children"]]
+    assert "child_b" in child_ids
+
+
+def test_branches_404_unknown(tmp_path, monkeypatch):
+    """GET /branches for unknown run_id returns 404."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    client = _client()
+    resp = client.get("/png-shader/runs/ghost/branches")
+    assert resp.status_code == 404
+
+
+# --- /metadata ---
+
+def test_metadata_update(tmp_path, monkeypatch):
+    """PATCH /metadata with allowed fields persists them to the index."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    _seed_index(idx, run_id="run_m")
+
+    client = _client()
+    resp = client.patch(
+        "/png-shader/runs/run_m/metadata",
+        json={"title": "my branch", "favorite": True, "tags": ["a"]},
+    )
+    assert resp.status_code == 200
+
+    from app.pipeline.run_index import load_run_index
+    rec = load_run_index(path=idx)["run_m"]
+    assert rec.title == "my branch"
+    assert rec.favorite is True
+    assert "a" in rec.tags
+
+
+def test_metadata_422_disallowed_key(tmp_path, monkeypatch):
+    """PATCH /metadata with a disallowed key returns 422."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    _seed_index(idx, run_id="run_m2")
+
+    client = _client()
+    resp = client.patch("/png-shader/runs/run_m2/metadata", json={"status": "x"})
+    assert resp.status_code == 422
+
+
+def test_metadata_404_unknown(tmp_path, monkeypatch):
+    """PATCH /metadata for unknown run_id returns 404."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    client = _client()
+    resp = client.patch("/png-shader/runs/ghost_run/metadata", json={"title": "x"})
+    assert resp.status_code == 404
+
+
+# --- /artifacts ---
+
+def test_artifacts_selected_shader(tmp_path, monkeypatch):
+    """GET /artifacts/selected_shader returns the file content."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    parent_dir = _seed_parent(tmp_path)
+    shader_text = _BRANCH_GLSL
+    (parent_dir / "selected_shader.glsl").write_text(shader_text)
+
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/artifacts/selected_shader")
+    assert resp.status_code == 200
+    assert shader_text in resp.text
+
+
+def test_artifacts_409_when_run_dir_none(tmp_path, monkeypatch):
+    """GET /artifacts for a run with no run_dir returns 409."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    # A store entry with no run_dir
+    _run_store["run_nodir"] = {
+        "run_id": "run_nodir",
+        "status": "running",
+        "run_dir": None,
+        "selected_glsl": _BRANCH_GLSL,
+        "scoreboard": {},
+        "strategy": {},
+        "stop_requested": False,
+        "strategy_revision": 1,
+    }
+    client = _client()
+    resp = client.get("/png-shader/runs/run_nodir/artifacts/selected_shader")
+    assert resp.status_code == 409
+
+
+def test_artifacts_404_file_missing(tmp_path, monkeypatch):
+    """GET /artifacts for a valid artifact_id but missing file returns 404."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    parent_dir = _seed_parent(tmp_path)
+    # Do NOT write selected_shader.glsl — it should 404.
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/artifacts/selected_shader")
+    assert resp.status_code == 404
+
+
+def test_artifacts_422_unknown_artifact_id(tmp_path, monkeypatch):
+    """GET /artifacts with a completely unknown artifact_id returns 422."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    parent_dir = _seed_parent(tmp_path)
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/artifacts/bogus_artifact")
+    assert resp.status_code == 422
+
+
+def test_artifacts_422_bad_candidate_id_in_scoreboard(tmp_path, monkeypatch):
+    """GET /artifacts with a candidate id not in scoreboard is rejected by
+    resolve_checkpoint_artifact → 422.
+
+    We use a checkpoint: prefix with an id that is syntactically valid but
+    not present in the scoreboard (which has only 'llm_0').
+    """
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    parent_dir = _seed_parent(tmp_path)
+    # candidate:ghost_99 is not in the scoreboard — resolver should reject it.
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/artifacts/checkpoint:candidate:ghost_99:render")
+    assert resp.status_code == 422
+
+
+# NOTE on traversal artifact_id: FastAPI's {artifact_id:path} path parameter
+# normalises URL-encoded slashes, so a literal "../../" or "%2F" traversal via
+# the URL is blocked at the routing layer before reaching our code.
+# The underlying resolve_checkpoint_artifact security check is tested directly
+# in test_checkpoints.py. Here we verify the 422 path for a malformed
+# checkpoint: prefix that doesn't split into two non-empty parts.
+def test_artifacts_422_malformed_checkpoint_prefix(tmp_path, monkeypatch):
+    """GET /artifacts/checkpoint:<id_with_no_trailing_kind> returns 422."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    parent_dir = _seed_parent(tmp_path)
+    client = _client()
+    # "checkpoint:final:selected" only has one colon-separated segment after
+    # stripping "checkpoint:" and rsplitting on ":" → ("final", "selected") → valid.
+    # Use something with no final kind part after the last colon separator.
+    resp = client.get("/png-shader/runs/run_parent/artifacts/checkpoint:onlyone")
+    # rsplit(":", 1) on "onlyone" gives ["onlyone"] — len == 1, not 2 → 422.
+    assert resp.status_code == 422
+
+
+# --- save_timeline wiring ---
+
+def test_save_timeline_written_on_success(tmp_path, monkeypatch):
+    """Worker writes timeline.json to run_dir on successful completion."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    fake_run_dir = tmp_path / "rd_timeline"
+    fake_run_dir.mkdir()
+
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, publish_partial=None, **kwargs):
+        if publish_partial:
+            publish_partial({"run_dir": str(fake_run_dir)})
+        return {
+            "run_id": run_id,
+            "run_dir": str(fake_run_dir),
+            "selected_glsl": _BRANCH_GLSL,
+            "scoreboard": {
+                "selected_id": "llm_0",
+                "candidates": [{"id": "llm_0", "selected": True, "previewable": True,
+                                "compile_glsl": _BRANCH_GLSL, "final_score": 0.8}],
+            },
+            "quality_router": {"final_score": 0.8},
+            "refinement_summary": {},
+            "refinement_history": [],
+        }
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline)
+    client = _client()
+    resp = client.post(
+        "/png-shader/run",
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    run_id = resp.json()["run_id"]
+    _wait_for_completion(client, run_id)
+
+    timeline_file = fake_run_dir / "timeline.json"
+    assert timeline_file.exists(), "save_timeline must write timeline.json to run_dir"
+    data = json.loads(timeline_file.read_text())
+    assert "timeline" in data
+
+
 def test_run_index_completed_run_dir_from_result(tmp_path, monkeypatch):
     """run_dir that arrives only in the pipeline RESULT (not via publish_partial)
     must still be persisted in the index via the final_run_dir fallback path."""

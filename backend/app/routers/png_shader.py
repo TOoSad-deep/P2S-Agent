@@ -22,11 +22,16 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.config import ModelConfig, use_active_model
 from app.llm.model_resolver import ModelResolutionError, resolve_model_config
+from fastapi.responses import FileResponse
+
 from app.pipeline.checkpoints import (
     CheckpointError,
+    build_timeline,
     checkpoint_metadata,
     list_checkpoints,
     resolve_checkpoint,
+    resolve_checkpoint_artifact,
+    save_timeline,
 )
 from app.pipeline.graph import run_png_shader_pipeline
 from app.pipeline.human_feedback import (
@@ -36,7 +41,15 @@ from app.pipeline.human_feedback import (
     validate_feedback,
 )
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
-from app.pipeline.run_index import RunLineageRecord, append_run_created, append_run_updated
+from app.pipeline.run_index import (
+    RunIndexError,
+    RunLineageRecord,
+    append_run_created,
+    append_run_updated,
+    build_branch_tree,
+    load_run_index,
+    update_run_metadata,
+)
 from app.services.langsmith_tracing import trace_context
 from app.services.logging_config import attach_run_log, log_event, logging_context
 
@@ -191,6 +204,11 @@ def _run_png_shader_background(
                     str(pipeline_result.get("run_dir"))
                     if pipeline_result.get("run_dir") else None
                 )
+                if final_run_dir:
+                    try:
+                        save_timeline(final_run_dir, pipeline_result, run_id=run_id)
+                    except Exception:
+                        logger.warning("save_timeline failed", exc_info=True)
                 _index_updated(run_id, {
                     "status": "completed",
                     "final_score": pipeline_result.get("quality_router", {}).get("final_score"),
@@ -877,6 +895,192 @@ async def patch_strategy(run_id: str, payload: dict) -> dict:
             "strategy": merged,
             "strategy_revision": stored["strategy_revision"],
         }
+
+
+@router.get("/runs/{run_id}/timeline")
+async def get_timeline(run_id: str) -> dict:
+    """Return the ordered timeline of checkpoints for a run.
+
+    For runs still in the in-memory store the timeline is built live from
+    the store entry. For evicted/historic runs it falls back to the run
+    index + timeline.json on disk (if present). Never resolves a path
+    when run_dir is None.
+    """
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+    if stored is not None:
+        return {
+            "run_id": run_id,
+            "status": stored.get("status"),
+            "timeline": build_timeline(stored, run_id=run_id),
+        }
+
+    # Not in store — look in the run index.
+    records = load_run_index(path=_RUN_INDEX_PATH)
+    rec = records.get(run_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+    # Try to read a previously written timeline.json from disk.
+    if rec.run_dir:
+        timeline_path = Path(rec.run_dir) / "timeline.json"
+        if timeline_path.exists():
+            try:
+                with timeline_path.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                return {
+                    "run_id": run_id,
+                    "status": rec.status,
+                    "timeline": data.get("timeline", []),
+                }
+            except Exception:
+                pass  # fall through to empty timeline
+
+    # No run_dir, or timeline.json missing/unreadable — return empty.
+    return {"run_id": run_id, "status": rec.status, "timeline": []}
+
+
+@router.get("/runs/{run_id}/branches")
+async def get_branches(run_id: str) -> dict:
+    """Return the full branch tree rooted at the given run's root.
+
+    Tries the run index first; falls back to a synthesised single-node
+    tree for runs that exist only in the in-memory store.
+    """
+    records = load_run_index(path=_RUN_INDEX_PATH)
+    if run_id in records:
+        tree = build_branch_tree(records, run_id)
+        root_run_id = records[run_id].root_run_id
+        return {"root_run_id": root_run_id, "active_run_id": run_id, "tree": tree}
+
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+    if stored is not None:
+        # Synthesise a single-node tree for store-only runs.
+        tree = {
+            "run_id": run_id,
+            "root_run_id": run_id,
+            "parent_run_id": None,
+            "source_checkpoint_id": None,
+            "source_checkpoint_label": None,
+            "title": stored.get("title"),
+            "mode": None,
+            "feedback": None,
+            "status": stored.get("status"),
+            "final_score": (stored.get("quality_router") or {}).get("final_score"),
+            "created_at": stored.get("submitted_at"),
+            "completed_at": None,
+            "favorite": False,
+            "children": [],
+        }
+        return {"root_run_id": run_id, "active_run_id": run_id, "tree": tree}
+
+    raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+
+@router.patch("/runs/{run_id}/metadata")
+async def patch_metadata(run_id: str, payload: dict) -> dict:
+    """Patch metadata-only fields (title, favorite, tags) for a run.
+
+    Mirrors allowed fields into the in-memory store if the run is present,
+    so /status and /checkpoints remain consistent with the index.
+    """
+    import dataclasses
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    try:
+        updated = update_run_metadata(run_id, payload, path=_RUN_INDEX_PATH)
+    except RunIndexError as exc:
+        # RunIndexError is a subclass of ValueError; catch it first for 404.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Mirror allowed fields into the in-memory store (best-effort).
+    _MIRROR_KEYS = {"title", "favorite", "tags"}
+    mirror = {k: v for k, v in payload.items() if k in _MIRROR_KEYS}
+    if mirror:
+        with _run_store_lock:
+            stored = _run_store.get(run_id)
+            if stored is not None:
+                stored.update(mirror)
+
+    return dataclasses.asdict(updated)
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id:path}")
+async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
+    """Serve a checkpoint artifact (shader GLSL, render PNG, llm_io JSON).
+
+    artifact_id forms:
+      - ``selected_shader``          → final:selected shader
+      - ``selected_render``          → candidate:selected render PNG
+      - ``checkpoint:<cp_id>:<kind>`` → arbitrary checkpoint + kind
+    """
+    # 1. Resolve run result + run_dir.
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+
+    if stored is not None:
+        result = stored
+        run_dir = stored.get("run_dir")
+    else:
+        records = load_run_index(path=_RUN_INDEX_PATH)
+        rec = records.get(run_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+        run_dir = rec.run_dir
+        result = {"run_dir": run_dir}
+        # Load scoreboard from disk so candidate ids can be validated.
+        if run_dir:
+            scoreboard_path = Path(run_dir) / "scoreboard.json"
+            if scoreboard_path.exists():
+                try:
+                    with scoreboard_path.open("r", encoding="utf-8") as fh:
+                        result["scoreboard"] = json.load(fh)
+                except Exception:
+                    pass
+
+    if not run_dir:
+        raise HTTPException(status_code=409, detail="run_dir not available")
+
+    # 2. Parse artifact_id → (checkpoint_id, kind).
+    if artifact_id == "selected_shader":
+        checkpoint_id = "final:selected"
+        kind = "shader"
+    elif artifact_id == "selected_render":
+        checkpoint_id = "candidate:selected"
+        kind = "render"
+    elif artifact_id.startswith("checkpoint:"):
+        rest = artifact_id[len("checkpoint:"):]
+        parts = rest.rsplit(":", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"malformed checkpoint artifact_id: {artifact_id!r}",
+            )
+        checkpoint_id, kind = parts
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown artifact id: {artifact_id!r}",
+        )
+
+    # 3. Resolve to a safe file path via the security-checked resolver.
+    try:
+        path = resolve_checkpoint_artifact(result, checkpoint_id, kind, run_dir=run_dir)
+    except CheckpointError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact not found: {path.name}",
+        )
+
+    return FileResponse(path)
 
 
 @router.post("/runs/{run_id}/stop")
