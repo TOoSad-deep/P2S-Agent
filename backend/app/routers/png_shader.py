@@ -36,6 +36,7 @@ from app.pipeline.human_feedback import (
     validate_feedback,
 )
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
+from app.pipeline.run_index import RunLineageRecord, append_run_created, append_run_updated
 from app.services.langsmith_tracing import trace_context
 from app.services.logging_config import attach_run_log, log_event, logging_context
 
@@ -45,11 +46,33 @@ _run_store: dict[str, dict] = {}
 _run_store_lock = threading.Lock()
 _MAX_STORE_SIZE = 100
 
+# Tests override this to isolate from the real backend/test_results/run_index.jsonl.
+_RUN_INDEX_PATH: Optional[str] = None
+
 # Resolved per-run model configs (may hold api_keys). Kept SEPARATE from
 # _run_store so the selected model — and any secret key — is never returned by
 # the client-facing /status endpoint.
 _run_models: dict[str, ModelConfig] = {}
 _run_models_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Best-effort run-index helpers — I/O errors only log; they never 500 a request
+# or kill a worker thread.
+# ---------------------------------------------------------------------------
+
+def _index_created(record: RunLineageRecord) -> None:
+    try:
+        append_run_created(record, path=_RUN_INDEX_PATH)
+    except Exception:
+        logger.warning("run index append_created failed", exc_info=True)
+
+
+def _index_updated(run_id: str, fields: dict) -> None:
+    try:
+        append_run_updated(run_id, fields, path=_RUN_INDEX_PATH)
+    except Exception:
+        logger.warning("run index append_updated failed", exc_info=True)
 
 
 def _store_run_model(run_id: str, model_config: ModelConfig) -> None:
@@ -125,7 +148,15 @@ def _run_png_shader_background(
                 "stop_requested": bool(stored.get("stop_requested")),
             }
 
+    # Track the first run_dir seen in partials so we can write a "running"
+    # index update once and later include it in the terminal update.
+    seen = {"run_dir": None}
+
     def _publish_partial(partial: dict) -> None:
+        rd = partial.get("run_dir")
+        if rd and seen["run_dir"] is None:
+            seen["run_dir"] = str(rd)
+            _index_updated(run_id, {"run_dir": str(rd), "status": "running"})
         _publish_partial_to_store(run_id, partial)
 
     run_log_path = Path("artifacts") / run_id / "run.log"
@@ -156,6 +187,16 @@ def _run_png_shader_background(
                     **(pipeline_extra or {}),
                 )
                 result_with_status = {**pipeline_result, "status": "completed", "current_phase": "done"}
+                final_run_dir = seen["run_dir"] or (
+                    str(pipeline_result.get("run_dir"))
+                    if pipeline_result.get("run_dir") else None
+                )
+                _index_updated(run_id, {
+                    "status": "completed",
+                    "final_score": pipeline_result.get("quality_router", {}).get("final_score"),
+                    "completed_at": time(),
+                    **({"run_dir": final_run_dir} if final_run_dir else {}),
+                })
                 with _run_store_lock:
                     stored = _run_store.get(run_id, {})
                     preserved = {
@@ -189,6 +230,11 @@ def _run_png_shader_background(
                 run_id=run_id,
                 error=f"{exc.__class__.__name__}: {exc}",
             )
+            _index_updated(run_id, {
+                "status": "failed",
+                "completed_at": time(),
+                **({"run_dir": seen["run_dir"]} if seen["run_dir"] else {}),
+            })
             with _run_store_lock:
                 stored = _run_store.get(run_id, {})
                 preserved = {
@@ -354,6 +400,12 @@ async def run_png_shader(
             "strategy_revision": 1,
         }
         _store_run(run_id, initial_result)
+        _index_created(RunLineageRecord(
+            run_id=run_id, root_run_id=run_id, parent_run_id=None,
+            source_checkpoint_id=None, source_checkpoint_label=None,
+            mode=None, feedback=None, title=None,
+            status="pending", run_dir=None, created_at=time(),
+        ))
         _start_pipeline_worker(
             run_id=run_id,
             image_path=image_path,
@@ -539,6 +591,13 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         "strategy_revision": 1,
     }
     _store_run(child_run_id, initial_result)
+    _index_created(RunLineageRecord(
+        run_id=child_run_id, root_run_id=root_run_id, parent_run_id=run_id,
+        source_checkpoint_id=checkpoint_id,
+        source_checkpoint_label=checkpoint.label,
+        mode=mode, feedback=feedback, title=None,
+        status="pending", run_dir=None, created_at=time(),
+    ))
 
     _start_pipeline_worker(
         run_id=child_run_id,

@@ -13,6 +13,20 @@ testclient = pytest.importorskip("fastapi.testclient")
 
 from app.routers.png_shader import _run_store, router
 
+
+# ---------------------------------------------------------------------------
+# Autouse fixture: isolate every test from the real run_index.jsonl
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_run_index(tmp_path, monkeypatch):
+    """Redirect all run-index writes to a per-test temp file so the real
+    backend/test_results/run_index.jsonl is never touched during tests."""
+    monkeypatch.setattr(
+        "app.routers.png_shader._RUN_INDEX_PATH",
+        str(tmp_path / "run_index.jsonl"),
+    )
+
 FastAPI = fastapi.FastAPI
 TestClient = testclient.TestClient
 
@@ -592,3 +606,134 @@ def test_branch_refine_continue_mode_disables_directed_acceptance(tmp_path, monk
     _wait_for_completion(client, resp.json()["run_id"])
     da = captured["directed_acceptance"]
     assert da is None or da.get("enabled") is False
+
+
+# ---------------------------------------------------------------------------
+# M3-3: run index lifecycle tests
+# ---------------------------------------------------------------------------
+
+def test_run_index_root_run_completed(tmp_path, monkeypatch):
+    """POST /run with a fake pipeline that emits a run_dir partial; after completion
+    the folded run-index record should show status=completed with run_dir and
+    root/parent lineage for a root (non-branch) run."""
+    _run_store.clear()
+
+    # Use a deterministic index path so we can read it back.
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    fake_run_dir = str(tmp_path / "rd")
+
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, publish_partial=None, **kwargs):
+        if publish_partial:
+            publish_partial({"run_dir": fake_run_dir})
+        return {
+            "run_id": run_id,
+            "run_dir": fake_run_dir,
+            "selected_glsl": "",
+            "scoreboard": {},
+            "quality_router": {"final_score": 0.85},
+            "refinement_summary": {},
+        }
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/run",
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    _wait_for_completion(client, run_id)
+
+    from app.pipeline.run_index import load_run_index
+    records = load_run_index(path=idx)
+
+    assert run_id in records, f"run_id {run_id!r} not in index; keys={list(records)}"
+    rec = records[run_id]
+    assert rec.status == "completed"
+    assert rec.run_dir == fake_run_dir
+    assert rec.root_run_id == run_id
+    assert rec.parent_run_id is None
+
+
+def test_run_index_branch_run_completed(tmp_path, monkeypatch):
+    """branch-refine child's folded record should carry correct lineage fields."""
+    _run_store.clear()
+
+    idx = str(tmp_path / "ri_branch.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    _seed_parent(tmp_path)
+    captured: dict = {}
+
+    def fake_pipeline_branch(image_path, input_spec=None, run_id=None, *,
+                             seed_glsl=None, publish_partial=None, lineage=None,
+                             human_feedback_notes=None, directed_acceptance=None,
+                             force_first_refinement_iteration=False,
+                             extra_artifacts=None, **kwargs):
+        captured["lineage"] = lineage
+        return {
+            "run_id": run_id,
+            "selected_glsl": seed_glsl or "",
+            "scoreboard": {},
+            "quality_router": {"final_score": 0.72},
+            "refinement_summary": {},
+            "lineage": lineage,
+        }
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline_branch)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "more contrast",
+            "mode": "refine",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    child_id = resp.json()["run_id"]
+    _wait_for_completion(client, child_id)
+
+    from app.pipeline.run_index import load_run_index
+    records = load_run_index(path=idx)
+
+    assert child_id in records, f"child {child_id!r} not in index; keys={list(records)}"
+    rec = records[child_id]
+    assert rec.parent_run_id == "run_parent"
+    assert rec.root_run_id == "run_parent"
+    assert rec.source_checkpoint_id == "final:selected"
+    assert rec.mode == "refine"
+    assert rec.status in ("completed", "failed")  # terminal
+
+
+def test_run_index_failed_run(tmp_path, monkeypatch):
+    """A pipeline that raises should result in status=failed in the index."""
+    _run_store.clear()
+
+    idx = str(tmp_path / "ri_fail.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    def failing_pipeline(image_path, input_spec=None, run_id=None, **kwargs):
+        raise RuntimeError("simulated pipeline crash")
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", failing_pipeline)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/run",
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert resp.status_code == 200
+    run_id = resp.json()["run_id"]
+    _wait_for_completion(client, run_id)
+
+    from app.pipeline.run_index import load_run_index
+    records = load_run_index(path=idx)
+
+    assert run_id in records, f"run_id {run_id!r} not in index; keys={list(records)}"
+    rec = records[run_id]
+    assert rec.status == "failed"
