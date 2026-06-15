@@ -612,6 +612,9 @@ export function usePngShader() {
   }, []);
 
   const switchRun = useCallback(async (id: string): Promise<void> => {
+    // Intentionally keep the previous `result` visible while the target run's
+    // status loads, so consumers can show it as a placeholder. `runId` flips
+    // once the fetch resolves; on error we leave the prior result as a fallback.
     stopPolling();
     setStopPending(false);
     setError(null);
