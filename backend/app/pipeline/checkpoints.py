@@ -93,10 +93,12 @@ def list_checkpoints(result: dict) -> list[dict]:
     checkpoints: list[dict] = []
 
     scoreboard = result.get("scoreboard") or {}
+    selected_cand = _selected_candidate(result)
+    selected_id = selected_cand.get("id") if selected_cand else None
     for cand in scoreboard.get("candidates") or []:
         if not _previewable(cand):
             continue
-        selected = bool(cand.get("selected"))
+        selected = cand.get("id") == selected_id
         checkpoints.append({
             "id": f"candidate:{cand.get('id')}",
             "kind": "candidate",

@@ -110,6 +110,25 @@ def test_list_marks_selected_candidate_as_baseline():
     assert by_id["candidate:cv_0"]["accepted"] is False
 
 
+def test_list_marks_scoreboard_selected_id_as_baseline_without_per_candidate_flag():
+    """Parity with build_timeline: the scoreboard's selected_id designates the
+    baseline even when no candidate backfills the per-candidate `selected` flag."""
+    result = _result()
+    # Scoreboard picks the winner via selected_id, but the per-candidate
+    # `selected` boolean is never backfilled.
+    for cand in result["scoreboard"]["candidates"]:
+        cand["selected"] = False
+    assert result["scoreboard"]["selected_id"] == "llm_0"
+
+    by_id = {cp["id"]: cp for cp in list_checkpoints(result)}
+    baseline = by_id["candidate:llm_0"]
+    assert baseline["label"] == "Selected baseline"
+    assert baseline["accepted"] is True
+    # The non-selected candidate stays a plain candidate.
+    assert by_id["candidate:cv_0"]["label"] == "Candidate cv_0"
+    assert by_id["candidate:cv_0"]["accepted"] is False
+
+
 def test_list_includes_refinement_iterations_with_glsl():
     by_id = {cp["id"]: cp for cp in list_checkpoints(_result())}
     assert by_id["refinement:iter:1"]["kind"] == "refinement_iter"
