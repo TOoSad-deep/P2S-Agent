@@ -115,6 +115,7 @@ def run_dsl_refinement_loop(
     min_improvement: float = 0.01,
     no_improvement_patience: int = 2,
     force_first_iteration: bool = False,
+    initial_extra_feedback: "list[str] | None" = None,
     loop_dir: Path,
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
@@ -182,6 +183,10 @@ def run_dsl_refinement_loop(
     history: list[dict] = []
     stop_reason = "max_iterations"
     no_improvement_count = 0
+    # Persistent human-goal notes: prepended to every LLM call so a directed
+    # branch keeps pursuing the user's intent even after transient feedback
+    # resets on an accepted improvement.
+    persistent_feedback: list[str] = list(initial_extra_feedback or [])
     extra_feedback: list[str] = []
 
     def _record(entry: dict) -> None:
@@ -289,7 +294,8 @@ def run_dsl_refinement_loop(
                 reference_image_path=reference_path,
                 current_render_path=current_render_path,
                 extra_feedback=(
-                    extra_feedback + history_notes + semantic_notes + region_notes
+                    persistent_feedback + extra_feedback + history_notes
+                    + semantic_notes + region_notes
                 ) or None,
             )
         except Exception as exc:

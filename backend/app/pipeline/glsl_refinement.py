@@ -76,6 +76,7 @@ def run_glsl_refinement_loop(
     no_improvement_patience: int = 2,
     max_fresh_restarts: int = 1,
     force_first_iteration: bool = False,
+    initial_extra_feedback: "list[str] | None" = None,
     loop_dir: Path,
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
@@ -99,6 +100,10 @@ def run_glsl_refinement_loop(
     history: list[dict] = []
     stop_reason = "max_iterations"
     no_improvement_count = 0
+    # Persistent human-goal notes: prepended to every LLM call so a directed
+    # branch keeps pursuing the user's intent even after the transient
+    # rollback/compile feedback resets on an accepted improvement.
+    persistent_feedback: list[str] = list(initial_extra_feedback or [])
     extra_feedback: list[str] = []
     fresh_restarts_left = max_fresh_restarts
     pending_fresh_start = False
@@ -223,7 +228,8 @@ def run_glsl_refinement_loop(
                 reference_image_path=reference_path,
                 current_render_path=current_render_path,
                 extra_feedback=(
-                    extra_feedback + history_notes + semantic_notes + region_notes
+                    persistent_feedback + extra_feedback + history_notes
+                    + semantic_notes + region_notes
                 ) or None,
                 fresh_start=was_fresh,
             )

@@ -305,6 +305,73 @@ def test_loop_high_score_stops_without_llm_call(tmp_path, monkeypatch):
     assert result["history"] == []
 
 
+def test_loop_injects_initial_extra_feedback_on_first_call(tmp_path, monkeypatch):
+    calls: list[dict] = []
+
+    def fake_refine(**kwargs):
+        calls.append(kwargs)
+        return {"glsl": VALID_GLSL_B, "_io": {}}
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r,
+        initial_extra_feedback=["[HUMAN GOAL] make the water reflection stronger"],
+        max_iterations=1,
+        threshold=0.80,
+        high_score_stop=0.92,
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert any(
+        "[HUMAN GOAL] make the water reflection stronger" in n
+        for n in calls[0]["extra_feedback"]
+    )
+
+
+def test_initial_extra_feedback_persists_across_iterations(tmp_path, monkeypatch):
+    # Two improving iterations: the transient feedback resets after the first
+    # improvement, but the human goal must keep leading every LLM call.
+    glsls = [VALID_GLSL_A.replace("0.30", v) for v in ("0.40", "0.55")]
+    seq = iter(glsls)
+    calls: list[dict] = []
+
+    def fake_refine(**kwargs):
+        calls.append(kwargs)
+        return {"glsl": next(seq), "_io": {}}
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r,
+        initial_extra_feedback=["[HUMAN GOAL] keep it bright"],
+        max_iterations=2,
+        threshold=0.99,
+        high_score_stop=0.999,
+        min_improvement=0.001,
+        no_improvement_patience=5,
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert len(calls) == 2
+    assert any("[HUMAN GOAL] keep it bright" in n for n in calls[0]["extra_feedback"])
+    assert any("[HUMAN GOAL] keep it bright" in n for n in calls[1]["extra_feedback"])
+
+
 def test_diff_glsl_summary_reports_define_changes():
     summary = _diff_glsl_summary(VALID_GLSL_A, VALID_GLSL_B)
     assert "changed lines" in summary

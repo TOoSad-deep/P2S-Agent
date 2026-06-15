@@ -435,6 +435,10 @@ def _run_post_pipeline(
     if publish_partial is not None:
         try:
             publish_partial({
+                # run_dir + lineage let a human-in-loop branch endpoint locate
+                # reference_input.png and trace parentage while still running.
+                "run_dir": str(run_dir),
+                "lineage": state.get("lineage"),
                 "preprocess": state.get("preprocess", {}),
                 "scoreboard": build_scoreboard(candidates),
                 "selected_candidate_id": selected.id,
@@ -687,7 +691,11 @@ def _run_post_pipeline(
             high_score_stop=refinement_high_score_stop,
             min_improvement=refinement_min_improvement,
             no_improvement_patience=refinement_patience,
-            force_first_iteration=effective_refinement_mode == "on",
+            force_first_iteration=(
+                state.get("force_first_refinement_iteration", False)
+                or effective_refinement_mode == "on"
+            ),
+            initial_extra_feedback=state.get("human_feedback_notes") or None,
             loop_dir=run_dir / "refinement",
             strategy_reader=strategy_reader,
             protected_aspects=protected_aspects,
@@ -768,7 +776,11 @@ def _run_post_pipeline(
                 high_score_stop=refinement_high_score_stop,
                 min_improvement=refinement_min_improvement,
                 no_improvement_patience=refinement_patience,
-                force_first_iteration=effective_refinement_mode == "on",
+                force_first_iteration=(
+                    state.get("force_first_refinement_iteration", False)
+                    or effective_refinement_mode == "on"
+                ),
+                initial_extra_feedback=state.get("human_feedback_notes") or None,
                 loop_dir=run_dir / "glsl_refinement",
                 strategy_reader=strategy_reader,
                 pairwise_judge=(
@@ -989,6 +1001,10 @@ def run_png_shader_pipeline(
     progress_callback: Callable[[str], None] | None = None,
     strategy_reader: Callable[[], dict] | None = None,
     publish_partial: Callable[[dict], None] | None = None,
+    human_feedback_notes: list[str] | None = None,
+    directed_acceptance: dict | None = None,
+    force_first_refinement_iteration: bool = False,
+    lineage: dict | None = None,
 ) -> dict:
     """Run the full PNG-to-Shader pipeline and return structured results.
 
@@ -1039,6 +1055,10 @@ def run_png_shader_pipeline(
         effective_glsl_render_enabled = True
         effective_llm_enabled = True
         input_spec = {**input_spec, "seed_glsl": seed_glsl}
+
+    # Human-in-loop branch lineage travels with the run for artifacts + audit.
+    if lineage is not None:
+        input_spec = {**input_spec, "lineage": lineage}
 
     optimizer_iterations = int(
         strategy_clamp("max_iterations", int(quality_config.get("max_iterations", get_default("max_iterations"))))
@@ -1152,6 +1172,11 @@ def run_png_shader_pipeline(
         "max_added_layers": max_added_layers,
         "vlm_judge_enabled": vlm_judge_enabled,
         "vlm_tie_epsilon": vlm_tie_epsilon,
+        # Human-in-loop branch refinement (V1).
+        "human_feedback_notes": list(human_feedback_notes or []),
+        "directed_acceptance": directed_acceptance,
+        "force_first_refinement_iteration": bool(force_first_refinement_iteration),
+        "lineage": lineage,
     }
 
     # Run the LangGraph pipeline
@@ -1212,4 +1237,5 @@ def run_png_shader_pipeline(
         "refinement_history": state.get("refinement_history", []),
         "candidate_details": state.get("candidate_details", []),
         "vlm_judge": state.get("vlm_judge"),
+        "lineage": state.get("lineage"),
     }

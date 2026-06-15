@@ -1511,3 +1511,129 @@ def test_seed_pipeline_publishes_iterations(tmp_path, monkeypatch):
     assert any("refinement_history" in p for p in seen)
     # Final result converged to the improved shader (not reverted).
     assert "0.50" in (result["selected_glsl"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Human-in-loop branch plumbing (V1)
+# ---------------------------------------------------------------------------
+
+def _glsl_branch_state(tmp_path, **overrides) -> dict:
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    cand = CandidateRecord(
+        id="seed_0",
+        source="seed",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.4,
+        selected=True,
+        objective_metrics={"mse": 0.5},
+        quality_router={"final_score": 0.4, "next_action": "accept"},
+    )
+    state = {
+        "selected_candidate_id": "seed_0",
+        "candidates": [cand],
+        "run_dir": str(tmp_path),
+        "selected_dsl": None,
+        "selected_glsl": glsl,
+        "selected_metrics": {"mse": 0.5},
+        "selected_quality": {"final_score": 0.4, "next_action": "accept"},
+        "refinement_mode": "on",
+        "max_refinement_iterations": 2,
+        "llm_enabled": False,
+        "glsl_render_enabled": True,
+        "vlm_judge_enabled": False,
+    }
+    state.update(overrides)
+    return state, glsl
+
+
+def _noop_glsl_loop(glsl):
+    def fake_loop(*args, **kwargs):
+        return {
+            "best_glsl": glsl,
+            "best_score": 0.4,
+            "best_metrics": {},
+            "best_quality": {"final_score": 0.4},
+            "best_render_path": None,
+            "history": [],
+            "stop_reason": "max_iterations",
+        }
+    return fake_loop
+
+
+def test_glsl_refinement_receives_human_feedback_notes(tmp_path, monkeypatch):
+    state, glsl = _glsl_branch_state(
+        tmp_path,
+        human_feedback_notes=["[HUMAN GOAL] make it brighter", "[LOCK] Preserve layout"],
+        force_first_refinement_iteration=True,
+        lineage={"parent_run_id": "run_p", "source_checkpoint_id": "final:selected"},
+    )
+    captured: dict = {}
+
+    def fake_loop(*args, **kwargs):
+        captured.update(kwargs)
+        return _noop_glsl_loop(glsl)()
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    _run_post_pipeline(state)
+
+    assert captured["initial_extra_feedback"] == [
+        "[HUMAN GOAL] make it brighter",
+        "[LOCK] Preserve layout",
+    ]
+
+
+def test_force_first_refinement_iteration_propagates_to_glsl_loop(tmp_path, monkeypatch):
+    state, glsl = _glsl_branch_state(
+        tmp_path,
+        refinement_mode="auto",
+        refinement_threshold=0.8,
+        llm_enabled=True,
+        force_first_refinement_iteration=True,
+    )
+    captured: dict = {}
+
+    def fake_loop(*args, **kwargs):
+        captured.update(kwargs)
+        return _noop_glsl_loop(glsl)()
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    _run_post_pipeline(state)
+
+    assert captured["force_first_iteration"] is True
+
+
+def test_baseline_partial_includes_run_dir_and_lineage(tmp_path, monkeypatch):
+    lineage = {"parent_run_id": "run_p", "source_checkpoint_id": "final:selected"}
+    state, glsl = _glsl_branch_state(tmp_path, lineage=lineage)
+    monkeypatch.setattr(
+        "app.pipeline.graph.run_glsl_refinement_loop", _noop_glsl_loop(glsl)
+    )
+
+    partials: list[dict] = []
+    _run_post_pipeline(state, publish_partial=lambda p: partials.append(p))
+
+    with_run_dir = [p for p in partials if "run_dir" in p]
+    assert with_run_dir, "expected a baseline partial carrying run_dir"
+    assert with_run_dir[0]["run_dir"] == str(tmp_path)
+    assert with_run_dir[0]["lineage"] == lineage
+
+
+def test_pipeline_result_includes_lineage(tmp_path):
+    png_path = make_solid_png(tmp_path)
+    lineage = {
+        "parent_run_id": "run_parent",
+        "source_checkpoint_id": "final:selected",
+        "mode": "refine",
+    }
+    result = run_png_shader_pipeline(png_path, lineage=lineage)
+    assert result["lineage"]["parent_run_id"] == "run_parent"
+    assert result["lineage"]["source_checkpoint_id"] == "final:selected"
+    assert result["input_spec"]["lineage"]["mode"] == "refine"

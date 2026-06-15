@@ -73,3 +73,9 @@ class P2SPipelineState(TypedDict, total=False):
     max_added_layers: int
     vlm_judge_enabled: bool
     vlm_tie_epsilon: float
+
+    # === Human-in-loop branch refinement (V1) ===
+    human_feedback_notes: list[str]
+    directed_acceptance: Optional[dict]
+    force_first_refinement_iteration: bool
+    lineage: Optional[dict]
