@@ -1,6 +1,6 @@
 // LlmIOPanel.tsx
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Cpu, ChevronDown, ChevronRight, TrendingUp, TrendingDown, Minus, AlertCircle, Maximize2, X } from "lucide-react";
+import { Cpu, ChevronDown, ChevronRight, TrendingUp, TrendingDown, Minus, AlertCircle, Maximize2, X, Target } from "lucide-react";
 import type { LlmIO, RefinementEntry } from "../hooks/usePngShader";
 
 export interface LlmPreviewSelection {
@@ -263,12 +263,23 @@ function RefinementView({
                   ? "border-[var(--accent-primary)] bg-[var(--accent-primary)]/15"
                   : "border-[var(--border-color)] hover:border-[var(--accent-primary)]/50"
               }`}
-              title={entry.error ?? `Iter ${entry.iteration}: ${entry.score_before.toFixed(3)} → ${entry.score_after?.toFixed(3) ?? "—"}`}
+              title={
+                entry.human_goal_override
+                  ? `Iter ${entry.iteration}: goal-accepted despite score ${entry.score_before.toFixed(3)} → ${entry.score_after?.toFixed(3) ?? "—"}`
+                  : entry.error ?? `Iter ${entry.iteration}: ${entry.score_before.toFixed(3)} → ${entry.score_after?.toFixed(3) ?? "—"}`
+              }
             >
-              <span className="text-[var(--text-muted)] text-[9px]">#{entry.iteration}</span>
+              <span className="text-[var(--text-muted)] text-[9px] flex items-center gap-0.5">
+                #{entry.iteration}
+                {entry.human_goal_override && (
+                  <Target className="w-2.5 h-2.5 text-emerald-400" />
+                )}
+              </span>
               <div className="flex items-center gap-0.5">
                 {entry.error ? (
                   <AlertCircle className="w-3 h-3 text-red-400" />
+                ) : entry.human_goal_override ? (
+                  <Target className="w-3 h-3 text-emerald-400" />
                 ) : entry.improved ? (
                   <TrendingUp className="w-3 h-3 text-green-400" />
                 ) : (

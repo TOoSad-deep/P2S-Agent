@@ -120,6 +120,11 @@ export interface RefinementEntry {
   error_type?: string | null;
   /** GLSL compiled from this iteration's revised DSL, if compile succeeded. */
   compile_glsl?: string | null;
+  /** V1.2 directed acceptance: whether this iteration was accepted as best, and
+   *  whether the human-goal VLM judge overrode a small score drop. */
+  accepted?: boolean | null;
+  human_goal_override?: string | null;
+  best_score_after?: number | null;
 }
 
 export interface PngShaderResult {
