@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import png_shader, strategy_config
+from app.routers import models, png_shader, strategy_config
 from app.services.langsmith_tracing import configure_langsmith
 from app.services.logging_config import log_event, logging_context, setup_logging
 
@@ -34,6 +34,7 @@ app.add_middleware(
 
 app.include_router(png_shader.router)
 app.include_router(strategy_config.router)
+app.include_router(models.router)
 
 
 def _run_id_from_path(path: str) -> str | None:

@@ -1,12 +1,14 @@
 // DslLayerPanel.tsx
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Cpu } from "lucide-react";
+import { ChevronDown, ChevronRight, Cpu, Loader, Sliders } from "lucide-react";
 import type { Scoreboard } from "../hooks/usePngShader";
 
 interface Props {
   selectedGlsl: string | null;
   selectedCandidateId: string | null;
   scoreboard: Scoreboard | null;
+  onParameterize?: () => void;
+  parameterizing?: boolean;
 }
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -19,7 +21,7 @@ const SOURCE_COLORS: Record<string, string> = {
 
 const PREVIEW_LINES = 30;
 
-export default function DslLayerPanel({ selectedGlsl, selectedCandidateId, scoreboard }: Props) {
+export default function DslLayerPanel({ selectedGlsl, selectedCandidateId, scoreboard, onParameterize, parameterizing }: Props) {
   const [expanded, setExpanded] = useState(false);
 
   const selectedCandidate = scoreboard?.candidates.find((c) => c.id === selectedCandidateId) ?? null;
@@ -35,11 +37,24 @@ export default function DslLayerPanel({ selectedGlsl, selectedCandidateId, score
           已选候选
           <span className="block text-[10px] font-normal text-[var(--text-muted)] mt-0.5">Selected Candidate</span>
         </h3>
-        {selectedCandidate?.source === "llm" && (
-          <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-yellow-500/15 text-yellow-400 border border-yellow-500/30">
-            <Cpu className="w-2.5 h-2.5" /> AI 生成
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {selectedCandidate?.source === "llm" && (
+            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-yellow-500/15 text-yellow-400 border border-yellow-500/30">
+              <Cpu className="w-2.5 h-2.5" /> AI 生成
+            </span>
+          )}
+          {onParameterize && (
+            <button
+              onClick={onParameterize}
+              disabled={!selectedGlsl || parameterizing}
+              title="用模型把硬编码常量提升为可调 #define 参数"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] border border-[var(--border-color)] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {parameterizing ? <Loader className="w-3 h-3 animate-spin" /> : <Sliders className="w-3 h-3" />}
+              补全可调参数
+            </button>
+          )}
+        </div>
       </div>
 
       {!selectedGlsl ? (

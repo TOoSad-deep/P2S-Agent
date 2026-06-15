@@ -26,6 +26,7 @@ from app.dsl.schema import DSL_SCHEMA_VERSION
 from app.services.logging_config import log_event
 from app.utils.glsl_postprocess import (
     build_visual_strategy,
+    extract_tunable_parameters,
     normalize_shadertoy_glsl,
     parse_glsl_response_payload,
 )
@@ -111,7 +112,7 @@ def generate_llm_scene_candidate(
         "mode": mode,
         "image_paths": (
             image_paths_for_io
-            if image_paths_for_io and (llm_client is not None or settings.llm_supports_image)
+            if image_paths_for_io and (llm_client is not None or settings.llm.supports_image)
             else []
         ),
     }
@@ -351,7 +352,7 @@ def _call_llm(
     except Exception as exc:
         raise LlmCallError(f"LLM client init failed: {_format_exception(exc)}") from exc
 
-    paths = normalized_paths if normalized_paths and settings.llm_supports_image else None
+    paths = normalized_paths if normalized_paths and settings.llm.supports_image else None
     log_event(
         logger,
         "llm_call_start",
@@ -1179,7 +1180,7 @@ def generate_llm_refinement(
         issues = list(extra_feedback) + issues
     protected = quality_router.get("protected_aspects", [])
     image_paths = _normalize_image_paths([reference_image_path, current_render_path])
-    has_images = bool(image_paths) and settings.llm_supports_image
+    has_images = bool(image_paths) and settings.llm.supports_image
 
     system_prompt = (
         "You are a 2D shader DSL expert. "
@@ -1360,7 +1361,7 @@ def generate_llm_glsl_refinement(
     if extra_feedback:
         issues = list(extra_feedback) + issues
     image_paths = _normalize_image_paths([reference_image_path, current_render_path])
-    has_images = bool(image_paths) and settings.llm_supports_image
+    has_images = bool(image_paths) and settings.llm.supports_image
 
     restart_clause = (
         "The previous incremental approach has stalled. Write a completely new "
@@ -1439,5 +1440,92 @@ def generate_llm_glsl_refinement(
             "mode": "glsl_refinement",
             "fresh_start": fresh_start,
             "image_paths": image_paths if has_images else [],
+        },
+    }
+
+
+def parameterize_glsl(
+    current_glsl: str,
+    *,
+    llm_client: LlmClient | None = None,
+) -> dict | None:
+    """Lift hardcoded visual constants in a Shadertoy shader to ``#define`` tunables.
+
+    Pure code transform (no image): the LLM finds inline literals in the shader
+    body that control the look (colors, positions, radii, intensities, falloff,
+    counts, angles, thresholds, speeds) and hoists each into a ``#define NAME
+    value`` at the top — keeping the rendered output numerically identical — so
+    the frontend param panel can detect and tune them.
+
+    Returns a dict with the parameterized GLSL plus before/after tunable counts,
+    or ``None`` when the LLM produced no usable shader.
+    """
+    system_prompt = (
+        "You are a Shadertoy GLSL expert performing a refactor, NOT a redesign. "
+        "Examine the shader and find numeric/color literals in the BODY that "
+        "control the visual look (colors, center/position, radius/size, "
+        "intensity/brightness, falloff/power, counts, angles, thresholds, "
+        "speeds). Hoist each into a descriptive ALL_CAPS `#define NAME value` "
+        "line placed at the TOP, before `void mainImage`, and replace the inline "
+        "literal in the body with that NAME. "
+        "CRITICAL: keep the rendered output numerically identical — reuse the "
+        "exact same values, do not tweak them. "
+        "Rules: keep a valid `void mainImage(out vec4 fragColor, in vec2 "
+        "fragCoord)` entry point. Prefer `#define COLOR_NAME vec3(r, g, b)` for "
+        "colors (or keep COLOR_NAME_R/_G/_B adjacent). Every float literal must "
+        "contain a decimal point (write 2.0, never 2). Loop bounds that must stay "
+        "integer counters may remain int. Do NOT declare iTime/iResolution/"
+        "iMouse/iFrame uniforms (they are auto-injected). Do NOT use discard. "
+        "Return ONLY a JSON object {\"glsl\": \"<the full shader>\"} with no "
+        "markdown or prose outside the JSON."
+    )
+
+    user_prompt = json.dumps(
+        {
+            "current_glsl": current_glsl,
+            "instruction": (
+                "Expose all hardcoded visual constants as #define parameters at "
+                "the top; keep the visual output identical."
+            ),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    response = _call_llm(
+        system_prompt,
+        user_prompt,
+        image_paths=None,
+        llm_client=llm_client,
+        max_tokens=LLM_MAX_OUTPUT_TOKENS,
+        response_format={"type": "json_object"},
+    )
+    content = _response_content(response)
+    if not content:
+        return None
+
+    payload = parse_glsl_response_payload(content)
+    glsl = _extract_glsl(str(payload.get("glsl") or ""))
+    if not glsl:
+        glsl = _extract_glsl(content)
+    if not glsl:
+        return None
+
+    normalized = normalize_shadertoy_glsl(glsl)
+    if "void mainImage" not in normalized.glsl:
+        return None
+
+    return {
+        "glsl": normalized.glsl,
+        "tunable_parameters": normalized.tunable_parameters,
+        "postprocess_warnings": list(normalized.warnings),
+        "param_count_before": len(extract_tunable_parameters(current_glsl)),
+        "param_count_after": len(normalized.tunable_parameters),
+        "_io": {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "raw_response": content,
+            "mode": "glsl_parameterize",
+            "image_paths": [],
         },
     }

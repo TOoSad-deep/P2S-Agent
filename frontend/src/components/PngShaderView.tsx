@@ -11,6 +11,8 @@ import LlmIOPanel, { type LlmPreviewSelection } from "./LlmIOPanel";
 import PngShaderParamPanel from "./PngShaderParamPanel";
 import type { PngShaderResult } from "../hooks/usePngShader";
 import StrategyControlPanel from "./StrategyControlPanel";
+import ModelSelectorPanel from "./ModelSelectorPanel";
+import type { ModelControls } from "../hooks/useModels";
 import type { StrategyConfig, StrategyMode } from "../lib/strategy-presets";
 import { useStrategyConfig } from "../hooks/useStrategyConfig";
 
@@ -28,11 +30,13 @@ interface Props {
   inputImageUrl: string | null;
   llmMode: LlmMode;
   onLlmModeChange: (mode: LlmMode) => void;
+  modelControls: ModelControls;
   strategy: StrategyConfig;
   onStrategyPartial: (partial: Partial<StrategyConfig>) => void;
   onApplyPreset: (mode: Exclude<StrategyMode, "custom">) => void;
   onStop: () => void;
   stopPending?: boolean;
+  parameterizeGlsl: (glsl: string) => Promise<{ glsl: string; param_count_before: number; param_count_after: number }>;
 }
 
 function candidatePreviewGlsl(candidate: CandidateEntry | null, result: PngShaderResult | null): string | null {
@@ -58,13 +62,16 @@ export default function PngShaderView({
   inputImageUrl,
   llmMode,
   onLlmModeChange,
+  modelControls,
   strategy,
   onStrategyPartial,
   onApplyPreset,
   onStop,
   stopPending,
+  parameterizeGlsl,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
+  const [parameterizing, setParameterizing] = useState(false);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [seedEnabled, setSeedEnabled] = useState(false);
@@ -116,11 +123,15 @@ export default function PngShaderView({
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
 
-  const [editedGlsl, setEditedGlsl] = useState<string | null>(null);
+  // Per-result working GLSL: param-slider edits and "补全可调参数" results are
+  // stored keyed by the active result (candidate id / llm iteration / selected
+  // output) so switching between results and back preserves each one's edits.
+  const [workingGlslByKey, setWorkingGlslByKey] = useState<Record<string, string>>({});
   const [llmPreview, setLlmPreview] = useState<LlmPreviewSelection>({ glsl: null, label: null, key: null });
+  const activeKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setEditedGlsl(null);
+    setWorkingGlslByKey({});
     setPreviewCandidateId(null);
     setLlmPreview({ glsl: null, label: null, key: null });
   }, [result?.run_id]);
@@ -130,12 +141,13 @@ export default function PngShaderView({
   // would keep overriding because it has higher priority than candidatePreview).
   const handleCandidateClick = useCallback((id: string) => {
     setPreviewCandidateId(prev => prev === id ? null : id);
-    setEditedGlsl(null);
     setLlmPreview({ glsl: null, label: null, key: null });
   }, []);
 
   const handleParamGlslChange = useCallback((glsl: string) => {
-    setEditedGlsl(glsl);
+    const key = activeKeyRef.current;
+    if (!key) return;
+    setWorkingGlslByKey(prev => ({ ...prev, [key]: glsl }));
   }, []);
 
   // Clicking the Initial Call tab or an iteration card overrides the candidate
@@ -152,22 +164,47 @@ export default function PngShaderView({
   const candidatePreview = candidatePreviewGlsl(previewCandidate, result);
   const llmPreviewGlsl = llmPreview.glsl?.trim() ? llmPreview.glsl : null;
 
-  // Preview priority (highest first):
-  // 1. editedGlsl — user moved a param slider
-  // 2. llmPreview  — Initial Call tab or a refinement iteration card
-  // 3. candidatePreview — candidate row in the scoreboard
-  // 4. result.selected_glsl — pipeline's chosen output
   const previewGlsl = llmPreviewGlsl ?? candidatePreview;
   const previewLabel = llmPreviewGlsl ? llmPreview.label : previewCandidate?.id ?? null;
   const displayCandidateId = llmPreviewGlsl
     ? null
     : previewCandidate?.id ?? result?.selected_candidate_id ?? null;
 
-  const activeGlsl = editedGlsl ?? previewGlsl ?? result?.selected_glsl ?? null;
+  // Identity of the currently shown result; keys the per-result working GLSL.
+  const activeKey = llmPreviewGlsl
+    ? `llm:${llmPreview.key ?? "initial"}`
+    : previewCandidate?.id ?? result?.selected_candidate_id ?? (result ? "__selected__" : null);
+  activeKeyRef.current = activeKey;
+  const workingGlsl = activeKey ? workingGlslByKey[activeKey] ?? null : null;
+
+  // Preview priority (highest first):
+  // 1. workingGlsl — this result's param-slider edits / parameterization (keyed)
+  // 2. llmPreview  — Initial Call tab or a refinement iteration card
+  // 3. candidatePreview — candidate row in the scoreboard
+  // 4. result.selected_glsl — pipeline's chosen output
+  const activeGlsl = workingGlsl ?? previewGlsl ?? result?.selected_glsl ?? null;
   const activeQualityRouter = previewCandidate?.quality_router ?? result?.quality_router ?? null;
 
   const llmCandidate = candidates.find(c => c.source === "llm");
   const llmIO = llmCandidate?.llm_io ?? null;
+
+  const [paramError, setParamError] = useState<string | null>(null);
+  const handleParameterize = useCallback(async () => {
+    if (!activeGlsl || parameterizing) return;
+    setParameterizing(true);
+    setParamError(null);
+    try {
+      const res = await parameterizeGlsl(activeGlsl);
+      if (res?.glsl) {
+        const key = activeKeyRef.current;
+        if (key) setWorkingGlslByKey(prev => ({ ...prev, [key]: res.glsl }));
+      }
+    } catch (err) {
+      setParamError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setParameterizing(false);
+    }
+  }, [activeGlsl, parameterizing, parameterizeGlsl]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -297,6 +334,9 @@ export default function PngShaderView({
             </div>
           </div>
 
+          {/* Model selector */}
+          <ModelSelectorPanel controls={modelControls} loading={loading} />
+
           <StrategyControlPanel
             strategy={strategy}
             loading={loading}
@@ -311,6 +351,11 @@ export default function PngShaderView({
         {error && (
           <div className="mt-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
             <p className="text-xs text-red-400">{error}</p>
+          </div>
+        )}
+        {paramError && (
+          <div className="mt-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
+            <p className="text-xs text-red-400">补全可调参数失败：{paramError}</p>
           </div>
         )}
       </div>
@@ -341,8 +386,8 @@ export default function PngShaderView({
           <ImageDiffPanel
             inputImageUrl={inputImageUrl}
             selectedGlsl={result?.selected_glsl ?? null}
-            previewGlsl={editedGlsl ?? previewGlsl}
-            previewLabel={editedGlsl ? "edited" : previewLabel}
+            previewGlsl={workingGlsl ?? previewGlsl}
+            previewLabel={workingGlsl ? "edited" : previewLabel}
           />
         </div>
         <div className="min-w-0 overflow-hidden">
@@ -356,6 +401,8 @@ export default function PngShaderView({
             selectedGlsl={activeGlsl}
             selectedCandidateId={displayCandidateId}
             scoreboard={result?.scoreboard ?? null}
+            onParameterize={handleParameterize}
+            parameterizing={parameterizing}
           />
         </div>
         <div className="min-w-0 overflow-hidden">

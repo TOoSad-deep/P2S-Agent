@@ -30,6 +30,7 @@ import {
   type StrategyMode,
 } from "../lib/strategy-presets";
 import { logFrontendEvent, makeRequestId } from "../lib/logger";
+import type { ModelSelection } from "../lib/models";
 
 export interface LlmIO {
   system_prompt: string;
@@ -149,6 +150,14 @@ export interface PngShaderResult {
 
 export type LlmMode = "off" | "auto" | "on";
 
+export interface ParameterizeResult {
+  glsl: string;
+  tunable_parameters: { name: string; value: unknown; raw: string; role: string }[];
+  param_count_before: number;
+  param_count_after: number;
+  warnings: string[];
+}
+
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 const LLM_MODE_SPEC: Record<LlmMode, object> = {
@@ -262,7 +271,11 @@ export function usePngShader() {
     }
   }, [stopPolling]);
 
-  const runPngShader = useCallback(async (file: File, seedGlsl?: string): Promise<void> => {
+  const runPngShader = useCallback(async (
+    file: File,
+    seedGlsl?: string,
+    modelSelection?: ModelSelection | null,
+  ): Promise<void> => {
     stopPolling();
     setStopPending(false);
     setLoading(true);
@@ -276,7 +289,11 @@ export function usePngShader() {
       formData.append(
         "input_spec_json",
         JSON.stringify(
-          mergeInputSpecs(LLM_MODE_SPEC[llmMode], { quality: toQualityOverrides(strategy) })
+          mergeInputSpecs(
+            LLM_MODE_SPEC[llmMode],
+            { quality: toQualityOverrides(strategy) },
+            modelSelection ? { model: modelSelection } : {},
+          )
         )
       );
       if (seedGlsl && seedGlsl.trim()) {
@@ -417,6 +434,32 @@ export function usePngShader() {
     });
   }, []);
 
+  const parameterizeGlsl = useCallback(async (glsl: string): Promise<ParameterizeResult> => {
+    const id = activeRunRef.current ?? runId ?? "none";
+    const requestId = makeRequestId("parameterize");
+    const formData = new FormData();
+    formData.append("glsl", glsl);
+    logFrontendEvent("api_parameterize_submit", { request_id: requestId, run_id: id, glsl_len: glsl.length });
+    const response = await fetch(`${API_BASE}/png-shader/parameterize/${id}`, {
+      method: "POST",
+      headers: { "x-request-id": requestId, "x-run-id": id },
+      body: formData,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_parameterize_failed", { request_id: requestId, run_id: id, status: response.status }, "warn");
+      throw new Error(`Parameterize failed (${response.status}): ${text}`);
+    }
+    const data: ParameterizeResult = await response.json();
+    logFrontendEvent("api_parameterize_done", {
+      request_id: requestId,
+      run_id: id,
+      param_count_before: data.param_count_before,
+      param_count_after: data.param_count_after,
+    });
+    return data;
+  }, [runId]);
+
   const clearResult = useCallback(() => {
     stopPolling();
     activeRunRef.current = null;
@@ -435,6 +478,7 @@ export function usePngShader() {
     loading,
     error,
     runPngShader,
+    parameterizeGlsl,
     clearResult,
     llmMode,
     setLlmMode,

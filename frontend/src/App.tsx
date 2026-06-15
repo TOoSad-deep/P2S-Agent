@@ -1,4 +1,5 @@
 import { usePngShader, type LlmMode } from './hooks/usePngShader'
+import { useModels } from './hooks/useModels'
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sparkles, Zap } from 'lucide-react'
 import PngShaderView from './components/PngShaderView'
@@ -10,6 +11,7 @@ export default function App() {
     loading,
     error,
     runPngShader,
+    parameterizeGlsl,
     llmMode,
     setLlmMode,
     strategy,
@@ -18,6 +20,8 @@ export default function App() {
     stopRun,
     stopPending,
   } = usePngShader()
+
+  const models = useModels()
 
   const [inputImageUrl, setInputImageUrl] = useState<string | null>(null)
   const inputImageUrlRef = useRef<string | null>(null)
@@ -36,8 +40,8 @@ export default function App() {
     }
     inputImageUrlRef.current = url
     setInputImageUrl(url)
-    runPngShader(file, seedGlsl)
-  }, [runPngShader])
+    runPngShader(file, seedGlsl, models.selection)
+  }, [runPngShader, models.selection])
 
   const handleLlmModeChange = useCallback((mode: LlmMode) => {
     setLlmMode(mode)
@@ -147,11 +151,13 @@ export default function App() {
           inputImageUrl={inputImageUrl}
           llmMode={llmMode}
           onLlmModeChange={handleLlmModeChange}
+          modelControls={models}
           strategy={strategy}
           onStrategyPartial={handleStrategyPartial}
           onApplyPreset={applyPreset}
           onStop={stopRun}
           stopPending={stopPending}
+          parameterizeGlsl={parameterizeGlsl}
         />
       </main>
 

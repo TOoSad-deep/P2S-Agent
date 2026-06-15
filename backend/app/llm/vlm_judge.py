@@ -82,7 +82,7 @@ def _default_client(system_prompt: str, user_prompt: str, image_paths: "Optional
     from app.llm.client import BaseAgent
 
     agent = BaseAgent(settings.llm)
-    paths = image_paths if image_paths and settings.llm_supports_image else None
+    paths = image_paths if image_paths and settings.llm.supports_image else None
     return agent.chat(
         system_prompt=system_prompt,
         user_prompt=user_prompt,

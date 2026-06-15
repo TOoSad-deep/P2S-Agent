@@ -20,6 +20,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
+from app.config import ModelConfig, use_active_model
+from app.llm.model_resolver import ModelResolutionError, resolve_model_config
 from app.pipeline.graph import run_png_shader_pipeline
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
 from app.services.langsmith_tracing import trace_context
@@ -30,6 +32,24 @@ logger = logging.getLogger(__name__)
 _run_store: dict[str, dict] = {}
 _run_store_lock = threading.Lock()
 _MAX_STORE_SIZE = 100
+
+# Resolved per-run model configs (may hold api_keys). Kept SEPARATE from
+# _run_store so the selected model — and any secret key — is never returned by
+# the client-facing /status endpoint.
+_run_models: dict[str, ModelConfig] = {}
+_run_models_lock = threading.Lock()
+
+
+def _store_run_model(run_id: str, model_config: ModelConfig) -> None:
+    with _run_models_lock:
+        if run_id not in _run_models and len(_run_models) >= _MAX_STORE_SIZE:
+            del _run_models[next(iter(_run_models))]
+        _run_models[run_id] = model_config
+
+
+def _get_run_model(run_id: str) -> Optional[ModelConfig]:
+    with _run_models_lock:
+        return _run_models.get(run_id)
 
 router = APIRouter(prefix="/png-shader", tags=["png-shader"])
 
@@ -65,6 +85,7 @@ def _run_png_shader_background(
     upload_dir: Path,
     pipeline_input_spec: Optional[dict],
     seed_glsl: Optional[str],
+    model_config: Optional[ModelConfig],
     trace_input: dict,
     trace_metadata: dict,
 ) -> None:
@@ -94,6 +115,7 @@ def _run_png_shader_background(
             run_id=run_id,
             image=image_path.name,
             run_log=str(run_log_path),
+            model=model_config.model if model_config else None,
         )
         try:
             with trace_context(
@@ -101,7 +123,7 @@ def _run_png_shader_background(
                 inputs=trace_input,
                 metadata=trace_metadata,
                 tags=["png-shader", run_id],
-            ) as run_tree:
+            ) as run_tree, use_active_model(model_config):
                 pipeline_result = run_png_shader_pipeline(
                     image_path,
                     pipeline_input_spec,
@@ -186,6 +208,14 @@ async def run_png_shader(
             detail="input_spec_json must decode to an object",
         )
 
+    # Resolve the selected model (preset or custom). `model` is consumed here and
+    # not part of the pipeline input-spec schema, so remove it before building.
+    model_selection = input_spec.pop("model", None) if input_spec is not None else None
+    try:
+        model_config = resolve_model_config(model_selection)
+    except ModelResolutionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     if seed_glsl is not None:
         if not seed_glsl.strip():
             raise HTTPException(
@@ -266,6 +296,7 @@ async def run_png_shader(
             "strategy_revision": 1,
         }
         _store_run(run_id, initial_result)
+        _store_run_model(run_id, model_config)
         threading.Thread(
             target=_run_png_shader_background,
             kwargs={
@@ -274,6 +305,7 @@ async def run_png_shader(
                 "upload_dir": upload_dir,
                 "pipeline_input_spec": pipeline_input_spec,
                 "seed_glsl": seed_glsl,
+                "model_config": model_config,
                 "trace_input": trace_input,
                 "trace_metadata": trace_metadata,
             },
@@ -354,15 +386,16 @@ async def refine_png_shader(
     try:
         from app.candidates.llm_scene import generate_llm_refinement
 
-        revised = generate_llm_refinement(
-            preprocess=preprocess,
-            current_dsl=current_dsl,
-            metrics=current_metrics,
-            quality_router=current_quality,
-            canvas_width=canvas_width,
-            canvas_height=canvas_height,
-            extra_feedback=[f"[HUMAN FEEDBACK] {feedback}"],
-        )
+        with use_active_model(_get_run_model(run_id)):
+            revised = generate_llm_refinement(
+                preprocess=preprocess,
+                current_dsl=current_dsl,
+                metrics=current_metrics,
+                quality_router=current_quality,
+                canvas_width=canvas_width,
+                canvas_height=canvas_height,
+                extra_feedback=[f"[HUMAN FEEDBACK] {feedback}"],
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Refinement failed: {exc}") from exc
 
@@ -415,6 +448,91 @@ async def refine_png_shader(
         compile_error_count=len(cr.errors or []),
     )
     return result
+
+
+@router.post("/parameterize/{run_id}")
+async def parameterize_png_shader(
+    run_id: str,
+    glsl: str = Form(...),
+) -> dict:
+    """Lift hardcoded constants in a candidate's GLSL into tunable ``#define``s.
+
+    Stateless w.r.t. the run store: operates on the GLSL sent in the request
+    body (the currently-previewed candidate) and returns the parameterized
+    shader. Uses the run's selected model when known, else the default model.
+
+    Args:
+        run_id: The run_id the candidate came from (used only to pick the model).
+        glsl: The shader source to parameterize.
+
+    Returns:
+        Dict with the parameterized GLSL, extracted tunables, and before/after
+        parameter counts.
+    """
+    if not glsl or not glsl.strip():
+        raise HTTPException(status_code=422, detail="glsl must be a non-empty string")
+
+    log_event(
+        logger,
+        "glsl_parameterize_request",
+        run_id=run_id,
+        glsl_len=len(glsl),
+    )
+
+    try:
+        from app.candidates.llm_scene import parameterize_glsl
+
+        with use_active_model(_get_run_model(run_id)):
+            result = parameterize_glsl(glsl)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Parameterization failed: {exc}") from exc
+
+    io_record = result.pop("_io", None) if isinstance(result, dict) else None
+    if not result or not result.get("glsl"):
+        log_event(
+            logger,
+            "glsl_parameterize_llm_failed",
+            level=logging.WARNING,
+            run_id=run_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "LLM returned no usable GLSL",
+                "llm_io": io_record,
+            },
+        )
+
+    from app.services.shader_validator import validate_shader_static
+
+    val = validate_shader_static(result["glsl"])
+    if not val.get("valid", False):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "validation_errors": val.get("errors", []),
+                "glsl": result["glsl"],
+                "llm_io": io_record,
+            },
+        )
+
+    log_event(
+        logger,
+        "glsl_parameterize_done",
+        run_id=run_id,
+        param_count_before=result.get("param_count_before"),
+        param_count_after=result.get("param_count_after"),
+        warnings=result.get("postprocess_warnings"),
+    )
+    return {
+        "glsl": result["glsl"],
+        "tunable_parameters": result.get("tunable_parameters", []),
+        "param_count_before": result.get("param_count_before"),
+        "param_count_after": result.get("param_count_after"),
+        "warnings": result.get("postprocess_warnings", []),
+        "validation_warnings": val.get("warnings", []),
+        "llm_io": io_record,
+    }
 
 
 @router.patch("/runs/{run_id}/strategy")
