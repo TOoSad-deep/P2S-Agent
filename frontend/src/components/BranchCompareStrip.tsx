@@ -1,32 +1,13 @@
 // BranchCompareStrip.tsx — side-by-side render thumbnails for the active run and its parent (V2).
 import { useState } from "react";
 import type { BranchTreeNode } from "../hooks/usePngShader";
+import { findNode, findParent } from "../lib/branchTree";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 interface Props {
   activeRunId: string | null;
   tree: BranchTreeNode | null;
-}
-
-/** Recursively search the tree for a node by run_id. */
-function findNode(node: BranchTreeNode, runId: string): BranchTreeNode | null {
-  if (node.run_id === runId) return node;
-  for (const child of node.children) {
-    const found = findNode(child, runId);
-    if (found) return found;
-  }
-  return null;
-}
-
-/** Recursively find the parent of a node with the given run_id. */
-function findParent(node: BranchTreeNode, runId: string): BranchTreeNode | null {
-  for (const child of node.children) {
-    if (child.run_id === runId) return node;
-    const found = findParent(child, runId);
-    if (found) return found;
-  }
-  return null;
 }
 
 interface TileProps {
@@ -73,15 +54,17 @@ export default function BranchCompareStrip({ activeRunId, tree }: Props) {
   if (!activeNode) return null;
 
   return (
-    <div className="flex flex-col gap-2 px-3 py-2.5 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg">
+    // M-4: borderless layout — card chrome lives in BranchWorkspacePanel only.
+    <div className="flex flex-col gap-2 px-1 py-1">
       <p className="text-xs font-medium text-[var(--text-primary)] leading-tight">
         对比
         <span className="ml-2 text-[var(--text-muted)] font-normal">Compare</span>
       </p>
       <div className="flex items-start gap-4">
-        <Tile runId={activeRunId} label="当前 / Current" />
+        {/* I-1: key resets errored state when the run changes */}
+        <Tile key={activeRunId} runId={activeRunId} label="当前 / Current" />
         {parentNode && (
-          <Tile runId={parentNode.run_id} label="父级 / Parent" />
+          <Tile key={parentNode.run_id} runId={parentNode.run_id} label="父级 / Parent" />
         )}
       </div>
     </div>

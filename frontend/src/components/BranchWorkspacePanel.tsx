@@ -1,14 +1,14 @@
 // BranchWorkspacePanel.tsx — orchestrates CheckpointTimeline + BranchTree + BranchCompareStrip (V2).
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { LayoutDashboard, Star } from "lucide-react";
 import type {
   PngShaderResult,
   CheckpointTimelineEntry,
   BranchTreeResponse,
-  BranchTreeNode,
   RunMetadataPatch,
   RunMetadataRecord,
 } from "../hooks/usePngShader";
+import { findNode } from "../lib/branchTree";
 import CheckpointTimeline from "./CheckpointTimeline";
 import BranchTree from "./BranchTree";
 import BranchCompareStrip from "./BranchCompareStrip";
@@ -23,16 +23,6 @@ interface Props {
   fetchBranches: (id: string) => Promise<BranchTreeResponse>;
   updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<RunMetadataRecord>;
   disabled?: boolean;
-}
-
-/** Recursively find a node in the tree by run_id. */
-function findNode(node: BranchTreeNode, runId: string): BranchTreeNode | null {
-  if (node.run_id === runId) return node;
-  for (const child of node.children) {
-    const found = findNode(child, runId);
-    if (found) return found;
-  }
-  return null;
 }
 
 export default function BranchWorkspacePanel({
@@ -52,6 +42,11 @@ export default function BranchWorkspacePanel({
   // Local metadata edit state — seeded from the active node when branchInfo loads.
   const [localFavorite, setLocalFavorite] = useState(false);
   const [localTitle, setLocalTitle] = useState("");
+
+  // M-1: track input focus so a refetch doesn't clobber an in-progress title edit.
+  const titleFocusedRef = useRef(false);
+  // M-2: track the last-seeded/committed title so we skip no-op PATCHes.
+  const seededTitleRef = useRef("");
 
   // Fetch timeline when run or its iteration count/status changes.
   useEffect(() => {
@@ -80,13 +75,15 @@ export default function BranchWorkspacePanel({
   }, [runId, result?.status, fetchBranches]);
 
   // Seed local metadata state from the active node whenever branchInfo updates.
+  // M-1: skip seeding localTitle while the input is focused to avoid clobbering.
   useEffect(() => {
     if (!branchInfo) return;
     const activeId = branchInfo.active_run_id ?? runId;
     const node = activeId ? findNode(branchInfo.tree, activeId) : null;
-    if (node) {
+    if (node && !titleFocusedRef.current) {
       setLocalFavorite(node.favorite ?? false);
       setLocalTitle(node.title ?? "");
+      seededTitleRef.current = node.title ?? "";  // M-2
     }
   }, [branchInfo, runId]);
 
@@ -100,24 +97,26 @@ export default function BranchWorkspacePanel({
       .catch(() => {});
   }, [runId, localFavorite, updateRunMetadata, fetchBranches]);
 
+  // M-2: skip PATCH when the title is unchanged from the last seeded/committed value.
   const commitTitle = useCallback(() => {
     if (!runId) return;
     const trimmed = localTitle.trim();
+    if (trimmed === seededTitleRef.current) return;  // no change, skip PATCH
     updateRunMetadata(runId, { title: trimmed })
       .then(() => fetchBranches(runId))
-      .then((b) => setBranchInfo(b))
+      .then((b) => {
+        setBranchInfo(b);
+        seededTitleRef.current = trimmed;  // update so second blur doesn't re-send
+      })
       .catch(() => {});
   }, [runId, localTitle, updateRunMetadata, fetchBranches]);
 
-  const handleTitleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === "Enter") {
-        e.currentTarget.blur();
-        commitTitle();
-      }
-    },
-    [commitTitle]
-  );
+  // I-2: blur triggers onBlur → commitTitle, so don't call commitTitle directly here.
+  const handleTitleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.currentTarget.blur();   // onBlur fires commitTitle — one call only
+    }
+  }, []);
 
   const controlsDisabled = disabled || !runId;
 
@@ -151,7 +150,8 @@ export default function BranchWorkspacePanel({
           type="text"
           value={localTitle}
           onChange={(e) => setLocalTitle(e.target.value)}
-          onBlur={commitTitle}
+          onFocus={() => { titleFocusedRef.current = true; }}   // M-1
+          onBlur={() => { titleFocusedRef.current = false; commitTitle(); }}  // M-1 + existing
           onKeyDown={handleTitleKeyDown}
           disabled={controlsDisabled}
           placeholder="分支标题 / Branch title"
