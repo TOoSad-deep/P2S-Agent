@@ -483,3 +483,30 @@ def test_resolve_artifact_path_stays_inside_run_dir(tmp_path):
     p = resolve_checkpoint_artifact(_result(), "candidate:cv_0", "render", run_dir=run_dir)
     # Must not raise and must be inside run_dir
     p.relative_to(run_dir.resolve())  # raises ValueError if not inside
+
+
+# ---------------------------------------------------------------------------
+# Important 1: build_timeline selected candidate must be first among candidates
+# ---------------------------------------------------------------------------
+
+
+def test_build_timeline_selected_candidate_is_first_entry():
+    result = _result_v2()
+    cands = result["scoreboard"]["candidates"]
+    cands.append(cands.pop(0))  # move the selected candidate (llm_0) to the end of the list
+    tl = build_timeline(result)
+    assert tl[0]["id"] == "candidate:selected"
+
+
+# ---------------------------------------------------------------------------
+# Important 2: resolve_checkpoint_artifact accepts RunDir-like object in result
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_artifact_rundir_from_result(tmp_path):
+    from types import SimpleNamespace
+    run_dir = _make_run_dir(tmp_path)
+    result = _result()
+    result["run_dir"] = SimpleNamespace(path=str(run_dir))
+    p = resolve_checkpoint_artifact(result, "final:selected", "shader")
+    assert p.name == "selected_shader.glsl"

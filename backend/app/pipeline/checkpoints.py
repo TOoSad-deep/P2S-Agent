@@ -268,7 +268,7 @@ def _resolve_iteration(result: dict, checkpoint_id: str) -> PipelineCheckpoint:
 # V2.1 — Timeline, save_timeline, resolve_checkpoint_artifact
 # ---------------------------------------------------------------------------
 
-_CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SUFFIX_ALLOWLIST = {".png", ".json", ".glsl", ".txt"}
 _VALID_ARTIFACT_KINDS = {"shader", "render", "llm_io"}
 
@@ -324,12 +324,14 @@ def build_timeline(result: dict, *, run_id: str | None = None) -> list[dict]:
     selected_cand = _selected_candidate(result)
     selected_id = selected_cand.get("id") if selected_cand else None
 
+    selected_entry = None
+    other_entries = []
     for cand in scoreboard.get("candidates") or []:
         if not _previewable(cand):
             continue
         cid = cand.get("id")
         if cid == selected_id:
-            timeline.append(_entry(
+            e = _entry(
                 id="candidate:selected",
                 kind="candidate",
                 label="Selected baseline",
@@ -339,9 +341,11 @@ def build_timeline(result: dict, *, run_id: str | None = None) -> list[dict]:
                     "shader": "checkpoint:candidate:selected:shader",
                     "render": "checkpoint:candidate:selected:render",
                 },
-            ))
+            )
+            e["has_glsl"] = _has_glsl(cand.get("compile_glsl"))
+            selected_entry = e
         else:
-            timeline.append(_entry(
+            e = _entry(
                 id=f"candidate:{cid}",
                 kind="candidate",
                 label=f"Candidate {cid}",
@@ -351,7 +355,12 @@ def build_timeline(result: dict, *, run_id: str | None = None) -> list[dict]:
                     "render": f"checkpoint:candidate:{cid}:render",
                     "llm_io": f"checkpoint:candidate:{cid}:llm_io",
                 },
-            ))
+            )
+            e["has_glsl"] = _has_glsl(cand.get("compile_glsl"))
+            other_entries.append(e)
+    if selected_entry is not None:
+        timeline.append(selected_entry)
+    timeline.extend(other_entries)
 
     for entry in result.get("refinement_history") or []:
         if not _has_glsl(entry.get("compile_glsl")):
@@ -454,7 +463,10 @@ def resolve_checkpoint_artifact(
     if not effective_run_dir:
         raise CheckpointError("run_dir is required to resolve a checkpoint artifact")
 
-    base = Path(effective_run_dir).resolve()
+    if hasattr(effective_run_dir, "path"):
+        base = Path(effective_run_dir.path).resolve()
+    else:
+        base = Path(effective_run_dir).resolve()
 
     # Determine relative path based on checkpoint_id + kind
     if checkpoint_id in ("final:selected", "candidate:selected"):
