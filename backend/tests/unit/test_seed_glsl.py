@@ -45,6 +45,19 @@ def test_unwrappable_falls_back_to_llm_port():
     assert "void mainImage" in result.glsl
 
 
+def test_multi_render_target_fragdata_falls_back_to_llm_port():
+    def fake_client(system_prompt, user_prompt, image_paths=None):
+        return json.dumps({"glsl": VALID_SHADERTOY})
+
+    result = adapt_seed_glsl(
+        "void main() { gl_FragData[1] = vec4(1.0); }",
+        llm_client=fake_client,
+    )
+    assert result.valid is True
+    assert result.adapted_by == "llm_ported"
+    assert "gl_FragData" not in result.glsl
+
+
 def test_invalid_when_all_stages_fail():
     def empty_client(system_prompt, user_prompt, image_paths=None):
         return ""

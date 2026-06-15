@@ -46,9 +46,8 @@ def _wrap_legacy_main(glsl: str) -> str | None:
     LLM port stage.  ``gl_FragCoord`` is rewritten to ``vec4(fragCoord, 0.0,
     1.0)``, so ``.xy`` stays correct but ``.z``/``.w`` become hardcoded ``0.0``/
     ``1.0`` (depth/clip channels are lost); such shaders still compile, so this
-    is not caught by re-validation.  Only ``gl_FragData[0]`` is rewritten; MRT
-    indices (``gl_FragData[1]``+) are left as-is, which fails re-validation and
-    correctly falls through to the LLM port stage.
+    is not caught by re-validation. Only ``gl_FragData[0]`` is rewritten; MRT
+    indices (``gl_FragData[1]``+) force fallback to the LLM port stage.
     """
     if "void mainImage" in glsl:
         return None
@@ -61,6 +60,8 @@ def _wrap_legacy_main(glsl: str) -> str | None:
     )
     wrapped = re.sub(r"\bgl_FragColor\b", "fragColor", wrapped)
     wrapped = re.sub(r"\bgl_FragData\s*\[\s*0\s*\]", "fragColor", wrapped)
+    if re.search(r"\bgl_FragData\s*\[", wrapped):
+        return None
     # gl_FragCoord (vec4) -> vec4(fragCoord, 0.0, 1.0); a trailing `.xy` swizzle
     # on the vec4 literal stays valid GLSL.
     wrapped = re.sub(r"\bgl_FragCoord\b", "vec4(fragCoord, 0.0, 1.0)", wrapped)
