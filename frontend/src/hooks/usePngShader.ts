@@ -178,6 +178,60 @@ export interface PipelineCheckpointMeta {
   has_glsl: boolean;
 }
 
+export interface CheckpointTimelineEntry {
+  id: string;
+  run_id?: string | null;
+  kind: "candidate" | "refinement_iter" | "final";
+  label: string;
+  iteration?: number | null;
+  score?: number | null;
+  score_before?: number | null;
+  delta?: number | null;
+  accepted?: boolean | null;
+  human_goal_override?: string | null;
+  changes_summary?: string | null;
+  has_glsl: boolean;
+  artifact_ids?: { render?: string; shader?: string; llm_io?: string };
+}
+
+export interface BranchTreeNode {
+  run_id: string;
+  root_run_id: string;
+  parent_run_id?: string | null;
+  source_checkpoint_id?: string | null;
+  source_checkpoint_label?: string | null;
+  title?: string | null;
+  mode?: string | null;
+  feedback?: string | null;
+  status: string;
+  final_score?: number | null;
+  created_at?: number | null;
+  completed_at?: number | null;
+  favorite?: boolean;
+  children: BranchTreeNode[];
+}
+
+export interface BranchTreeResponse {
+  root_run_id: string;
+  active_run_id: string;
+  tree: BranchTreeNode;
+}
+
+export interface RunMetadataPatch {
+  title?: string;
+  favorite?: boolean;
+  tags?: string[];
+}
+
+export interface RunMetadataRecord {
+  run_id: string;
+  title?: string | null;
+  favorite?: boolean;
+  tags?: string[];
+  // backend returns the full RunLineageRecord as a dict; keep it permissive
+  [key: string]: unknown;
+}
+
 export interface BranchRefineRequest {
   checkpoint_id: string;
   feedback: string;
@@ -513,6 +567,85 @@ export function usePngShader() {
     return (data.checkpoints ?? []) as PipelineCheckpointMeta[];
   }, []);
 
+  const fetchTimeline = useCallback(async (id: string): Promise<CheckpointTimelineEntry[]> => {
+    const requestId = makeRequestId("timeline");
+    const response = await fetch(`${API_BASE}/png-shader/runs/${id}/timeline`, {
+      headers: { "x-request-id": requestId, "x-run-id": id },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_timeline_failed", { request_id: requestId, run_id: id, status: response.status }, "warn");
+      throw new Error(`Timeline failed (${response.status}): ${text}`);
+    }
+    const data = await response.json();
+    return (data.timeline ?? []) as CheckpointTimelineEntry[];
+  }, []);
+
+  const fetchBranches = useCallback(async (id: string): Promise<BranchTreeResponse> => {
+    const requestId = makeRequestId("branches");
+    const response = await fetch(`${API_BASE}/png-shader/runs/${id}/branches`, {
+      headers: { "x-request-id": requestId, "x-run-id": id },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_branches_failed", { request_id: requestId, run_id: id, status: response.status }, "warn");
+      throw new Error(`Branches failed (${response.status}): ${text}`);
+    }
+    const data = await response.json();
+    return data as BranchTreeResponse;
+  }, []);
+
+  const updateRunMetadata = useCallback(async (id: string, patch: RunMetadataPatch): Promise<RunMetadataRecord> => {
+    const requestId = makeRequestId("metadata");
+    const response = await fetch(`${API_BASE}/png-shader/runs/${id}/metadata`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-request-id": requestId, "x-run-id": id },
+      body: JSON.stringify(patch),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_metadata_failed", { request_id: requestId, run_id: id, status: response.status }, "warn");
+      throw new Error(`Metadata failed (${response.status}): ${text}`);
+    }
+    const data = await response.json();
+    return data as RunMetadataRecord;
+  }, []);
+
+  const switchRun = useCallback(async (id: string): Promise<void> => {
+    stopPolling();
+    setStopPending(false);
+    setError(null);
+    setLoading(true);
+    activeRunRef.current = null;
+    try {
+      const requestId = makeRequestId("switch-run");
+      const response = await fetch(`${API_BASE}/png-shader/status/${id}`, {
+        headers: { "x-request-id": requestId, "x-run-id": id },
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_switch_run_failed", { request_id: requestId, run_id: id, status: response.status }, "warn");
+        throw new Error(`Switch run failed (${response.status}): ${text}`);
+      }
+      const data: PngShaderResult = await response.json();
+      setRunId(data.run_id ?? id);
+      setResult(data);
+      activeRunRef.current = data.run_id ?? id;
+      if (data.status === "running") {
+        pollingRef.current = setTimeout(() => pollStatus(data.run_id ?? id), 1000);
+      } else {
+        activeRunRef.current = null;
+        setLoading(false);
+        if (data.status === "failed") setError(data.error || "Run failed");
+      }
+    } catch (err) {
+      activeRunRef.current = null;
+      setLoading(false);
+      logFrontendEvent("api_switch_run_error", { run_id: id, error: err instanceof Error ? err.message : String(err) }, "error");
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, [pollStatus, stopPolling]);
+
   // Create a directed-refinement child run from a parent checkpoint and switch
   // the active run to it, reusing the existing polling loop.
   const branchRefine = useCallback(async (
@@ -594,6 +727,10 @@ export function usePngShader() {
     stopRun,
     stopPending,
     fetchCheckpoints,
+    fetchTimeline,
+    fetchBranches,
+    updateRunMetadata,
+    switchRun,
     branchRefine,
   };
 }
