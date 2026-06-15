@@ -61,10 +61,9 @@ interface BranchNodeProps {
   activeRunId: string | null;
   onSelectRun: (runId: string) => void;
   disabled?: boolean;
-  depth: number;
 }
 
-function BranchNode({ node, activeRunId, onSelectRun, disabled, depth }: BranchNodeProps) {
+function BranchNode({ node, activeRunId, onSelectRun, disabled }: BranchNodeProps) {
   const isActive = node.run_id === activeRunId;
   const label = nodeLabel(node);
 
@@ -77,7 +76,7 @@ function BranchNode({ node, activeRunId, onSelectRun, disabled, depth }: BranchN
           `run_id: ${node.run_id}`,
           node.feedback ? `feedback: ${node.feedback}` : null,
           `status: ${node.status}`,
-          typeof node.final_score === "number" ? `score: ${node.final_score.toFixed(3)}` : null,
+          typeof node.final_score === "number" ? `score: ${fmtScore(node.final_score)}` : null,
         ]
           .filter(Boolean)
           .join("\n")}
@@ -100,9 +99,9 @@ function BranchNode({ node, activeRunId, onSelectRun, disabled, depth }: BranchN
         {/* Status indicator */}
         <span className="flex-shrink-0">
           {isActive && node.status === "running" ? (
-            <Loader className="w-3 h-3 animate-spin text-white/80" />
+            <Loader className="w-3 h-3 animate-spin text-white/80 flex-shrink-0" />
           ) : isActive ? (
-            <StatusIndicator status={node.status} />
+            <span className="w-2 h-2 rounded-full bg-white/80 flex-shrink-0" title={node.status} />
           ) : (
             <StatusIndicator status={node.status} />
           )}
@@ -134,7 +133,6 @@ function BranchNode({ node, activeRunId, onSelectRun, disabled, depth }: BranchN
               activeRunId={activeRunId}
               onSelectRun={onSelectRun}
               disabled={disabled}
-              depth={depth + 1}
             />
           ))}
         </div>
@@ -172,7 +170,6 @@ export default function BranchTree({
             activeRunId={activeRunId}
             onSelectRun={onSelectRun}
             disabled={disabled}
-            depth={0}
           />
         </div>
       )}

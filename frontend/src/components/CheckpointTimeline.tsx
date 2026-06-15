@@ -55,7 +55,7 @@ export default function CheckpointTimeline({
                 ]
                   .filter(Boolean)
                   .join("\n")}
-                className={`relative flex flex-col items-start px-2 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 ${
+                className={`flex flex-col items-start px-2 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 ${
                   isActive
                     ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
                     : isRejected
@@ -80,9 +80,11 @@ export default function CheckpointTimeline({
 
                   {/* Rejected marker */}
                   {isRejected && (
-                    <X
-                      className={`w-3 h-3 flex-shrink-0 ${isActive ? "text-white/70" : "text-[var(--text-muted)]"}`}
-                    />
+                    <span title="rejected" className="flex-shrink-0">
+                      <X
+                        className={`w-3 h-3 ${isActive ? "text-white/70" : "text-[var(--text-muted)]"}`}
+                      />
+                    </span>
                   )}
                 </span>
 
