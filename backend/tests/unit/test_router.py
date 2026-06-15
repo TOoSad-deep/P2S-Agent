@@ -707,7 +707,7 @@ def test_run_index_branch_run_completed(tmp_path, monkeypatch):
     assert rec.root_run_id == "run_parent"
     assert rec.source_checkpoint_id == "final:selected"
     assert rec.mode == "refine"
-    assert rec.status in ("completed", "failed")  # terminal
+    assert rec.status == "completed"
 
 
 def test_run_index_failed_run(tmp_path, monkeypatch):
@@ -737,3 +737,29 @@ def test_run_index_failed_run(tmp_path, monkeypatch):
     assert run_id in records, f"run_id {run_id!r} not in index; keys={list(records)}"
     rec = records[run_id]
     assert rec.status == "failed"
+    assert rec.run_dir is None
+
+
+def test_run_index_completed_run_dir_from_result(tmp_path, monkeypatch):
+    """run_dir that arrives only in the pipeline RESULT (not via publish_partial)
+    must still be persisted in the index via the final_run_dir fallback path."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    rd = str(tmp_path / "rd_from_result")
+
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, seed_glsl=None, **kwargs):
+        # NOTE: deliberately does NOT call publish_partial — run_dir only in the result
+        return {"run_id": run_id, "selected_glsl": "x", "scoreboard": {},
+                "quality_router": {"final_score": 0.5}, "refinement_summary": {}, "run_dir": rd}
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline)
+    client = _client()
+    resp = client.post("/png-shader/run", files={"image": ("input.png", _png_bytes(tmp_path), "image/png")})
+    run_id = resp.json()["run_id"]
+    _wait_for_completion(client, run_id)
+    from app.pipeline.run_index import load_run_index
+    rec = load_run_index(path=idx)[run_id]
+    assert rec.status == "completed"
+    assert rec.run_dir == rd
+    assert rec.final_score == 0.5

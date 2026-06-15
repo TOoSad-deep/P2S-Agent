@@ -148,8 +148,8 @@ def _run_png_shader_background(
                 "stop_requested": bool(stored.get("stop_requested")),
             }
 
-    # Track the first run_dir seen in partials so we can write a "running"
-    # index update once and later include it in the terminal update.
+    # Mutable cell: a closure can't rebind a bare outer name in Python 3.9; this
+    # remembers the first run_dir a partial reveals so terminal updates can reuse it.
     seen = {"run_dir": None}
 
     def _publish_partial(partial: dict) -> None:
