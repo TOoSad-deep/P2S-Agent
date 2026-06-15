@@ -8,6 +8,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import shutil
@@ -19,10 +20,10 @@ from typing import Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from app.config import ModelConfig, use_active_model
 from app.llm.model_resolver import ModelResolutionError, resolve_model_config
-from fastapi.responses import FileResponse
 
 from app.pipeline.checkpoints import (
     CheckpointError,
@@ -67,6 +68,9 @@ _RUN_INDEX_PATH: Optional[str] = None
 # the client-facing /status endpoint.
 _run_models: dict[str, ModelConfig] = {}
 _run_models_lock = threading.Lock()
+
+# Metadata fields that are allowed to be patched and mirrored into the in-memory store.
+_METADATA_MIRROR_KEYS: frozenset[str] = frozenset({"title", "favorite", "tags"})
 
 
 # ---------------------------------------------------------------------------
@@ -934,7 +938,7 @@ async def get_timeline(run_id: str) -> dict:
                     "timeline": data.get("timeline", []),
                 }
             except Exception:
-                pass  # fall through to empty timeline
+                logger.warning("timeline.json unreadable for run_id=%s", run_id, exc_info=True)
 
     # No run_dir, or timeline.json missing/unreadable — return empty.
     return {"run_id": run_id, "status": rec.status, "timeline": []}
@@ -949,7 +953,10 @@ async def get_branches(run_id: str) -> dict:
     """
     records = load_run_index(path=_RUN_INDEX_PATH)
     if run_id in records:
-        tree = build_branch_tree(records, run_id)
+        try:
+            tree = build_branch_tree(records, run_id)
+        except RunIndexError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         root_run_id = records[run_id].root_run_id
         return {"root_run_id": root_run_id, "active_run_id": run_id, "tree": tree}
 
@@ -985,11 +992,6 @@ async def patch_metadata(run_id: str, payload: dict) -> dict:
     Mirrors allowed fields into the in-memory store if the run is present,
     so /status and /checkpoints remain consistent with the index.
     """
-    import dataclasses
-
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="payload must be a JSON object")
-
     try:
         updated = update_run_metadata(run_id, payload, path=_RUN_INDEX_PATH)
     except RunIndexError as exc:
@@ -999,8 +1001,7 @@ async def patch_metadata(run_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Mirror allowed fields into the in-memory store (best-effort).
-    _MIRROR_KEYS = {"title", "favorite", "tags"}
-    mirror = {k: v for k, v in payload.items() if k in _MIRROR_KEYS}
+    mirror = {k: v for k, v in payload.items() if k in _METADATA_MIRROR_KEYS}
     if mirror:
         with _run_store_lock:
             stored = _run_store.get(run_id)
@@ -1069,6 +1070,11 @@ async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
         )
 
     # 3. Resolve to a safe file path via the security-checked resolver.
+    # Traversal note: Starlette's {artifact_id:path} converter decodes %2e%2e%2f to "../"
+    # but does NOT collapse it — the decoded string reaches this handler. Traversal is blocked
+    # at the APPLICATION layer: artifact_id must begin with "selected_shader"/"selected_render"/
+    # "checkpoint:", and resolve_checkpoint_artifact enforces a candidate-id regex + path
+    # containment + suffix allowlist (unit-tested in test_checkpoints.py).
     try:
         path = resolve_checkpoint_artifact(result, checkpoint_id, kind, run_dir=run_dir)
     except CheckpointError as exc:

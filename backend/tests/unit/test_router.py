@@ -862,6 +862,32 @@ def test_branches_404_unknown(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_branches_404_when_root_missing(tmp_path, monkeypatch):
+    """GET /branches for a child whose root_run_id points to a non-existent root
+    must return 404 (not 500) — build_branch_tree raises RunIndexError in this case."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    _seed_index(idx, run_id="orphan", root_run_id="ghost_root", parent_run_id="ghost_root")
+    client = _client()
+    assert client.get("/png-shader/runs/orphan/branches").status_code == 404
+
+
+def test_branches_store_only_single_node(tmp_path, monkeypatch):
+    """GET /branches for a run that exists only in _run_store returns a synthesised
+    single-node tree with no children."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    _run_store["run_solo"] = {"run_id": "run_solo", "status": "completed", "run_dir": None}
+    client = _client()
+    body = client.get("/png-shader/runs/run_solo/branches").json()
+    assert body["root_run_id"] == "run_solo"
+    assert body["active_run_id"] == "run_solo"
+    assert body["tree"]["run_id"] == "run_solo"
+    assert body["tree"]["children"] == []
+
+
 # --- /metadata ---
 
 def test_metadata_update(tmp_path, monkeypatch):
@@ -990,12 +1016,13 @@ def test_artifacts_422_bad_candidate_id_in_scoreboard(tmp_path, monkeypatch):
     assert resp.status_code == 422
 
 
-# NOTE on traversal artifact_id: FastAPI's {artifact_id:path} path parameter
-# normalises URL-encoded slashes, so a literal "../../" or "%2F" traversal via
-# the URL is blocked at the routing layer before reaching our code.
-# The underlying resolve_checkpoint_artifact security check is tested directly
-# in test_checkpoints.py. Here we verify the 422 path for a malformed
-# checkpoint: prefix that doesn't split into two non-empty parts.
+# Traversal note: Starlette's {artifact_id:path} converter decodes %2e%2e%2f to "../"
+# but does NOT collapse it — the decoded string reaches this handler. Traversal is blocked
+# at the APPLICATION layer: artifact_id must begin with "selected_shader"/"selected_render"/
+# "checkpoint:", and resolve_checkpoint_artifact enforces a candidate-id regex + path
+# containment + suffix allowlist (unit-tested in test_checkpoints.py).
+# Here we verify the 422 path for a malformed checkpoint: prefix that doesn't split into
+# two non-empty parts.
 def test_artifacts_422_malformed_checkpoint_prefix(tmp_path, monkeypatch):
     """GET /artifacts/checkpoint:<id_with_no_trailing_kind> returns 422."""
     _run_store.clear()
@@ -1004,9 +1031,11 @@ def test_artifacts_422_malformed_checkpoint_prefix(tmp_path, monkeypatch):
 
     parent_dir = _seed_parent(tmp_path)
     client = _client()
-    # "checkpoint:final:selected" only has one colon-separated segment after
-    # stripping "checkpoint:" and rsplitting on ":" → ("final", "selected") → valid.
-    # Use something with no final kind part after the last colon separator.
+    # Note: "checkpoint:final:selected" is NOT a valid full artifact id — it parses to
+    # checkpoint_id="final", kind="selected", but the resolver rejects it (the valid final-shader
+    # artifact id is "checkpoint:final:selected:shader"). We test a structurally malformed case:
+    # "checkpoint:onlyone" has no colon after "checkpoint:", so rsplit(":", 1) on "onlyone"
+    # gives a single-element list → len == 1, not 2 → 422.
     resp = client.get("/png-shader/runs/run_parent/artifacts/checkpoint:onlyone")
     # rsplit(":", 1) on "onlyone" gives ["onlyone"] — len == 1, not 2 → 422.
     assert resp.status_code == 422
