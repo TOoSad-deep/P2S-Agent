@@ -408,7 +408,7 @@ def _run_post_pipeline(
         hist = list(snapshot.get("history") or [])
         best = snapshot.get("best_score")
         try:
-            publish_partial({
+            partial = {
                 "refinement_history": hist,
                 "refinement_summary": {
                     **refinement_summary,
@@ -417,10 +417,16 @@ def _run_post_pipeline(
                     "final_score": best if best is not None
                     else refinement_summary.get("final_score"),
                 },
-                "selected_glsl": snapshot.get("best_glsl") or None,
                 "objective_metrics": dict(snapshot.get("best_metrics") or {}),
                 "quality_router": dict(snapshot.get("best_quality") or {}),
-            })
+            }
+            # Only refresh the previewed shader when this iteration has one; a
+            # DSL recompile can yield empty GLSL, and publishing None would blank
+            # the baseline-published preview until the next improving iteration.
+            best_glsl = snapshot.get("best_glsl")
+            if best_glsl:
+                partial["selected_glsl"] = best_glsl
+            publish_partial(partial)
         except Exception:
             logger.warning("publish_partial (iteration) failed", exc_info=True)
 
