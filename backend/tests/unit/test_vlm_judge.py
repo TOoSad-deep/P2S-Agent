@@ -85,3 +85,37 @@ def test_pairwise_result_is_cached(tmp_path):
     second = judge_pairwise(ref, a, b, work_dir=tmp_path, judge_client=fake)
     assert first == second == "A"
     assert len(calls) == 2, "second call must hit the cache"
+
+
+def test_directed_pairwise_consistent_winner_b(tmp_path):
+    ref = _img(tmp_path, "ref.png", (255, 0, 0))
+    cur = _img(tmp_path, "cur.png", (0, 0, 255))
+    cand = _img(tmp_path, "cand.png", (250, 0, 0))
+    calls = []
+
+    def fake(system_prompt, user_prompt, image_paths):
+        calls.append(system_prompt)
+        # fwd (A=cur, B=cand): candidate wins -> "B"
+        # rev (A=cand, B=cur): candidate is now A -> "A"
+        return '{"winner": "B"}' if len(calls) == 1 else '{"winner": "A"}'
+
+    out = vj.judge_directed_pairwise(
+        ref, cur, cand,
+        user_feedback="make the water reflection brighter",
+        work_dir=tmp_path,
+        judge_client=fake,
+    )
+    assert out == "B"
+    assert len(calls) == 2
+    assert any("make the water reflection brighter" in s for s in calls)
+
+
+def test_directed_pairwise_none_on_failure(tmp_path):
+    ref = _img(tmp_path, "ref.png", (255, 0, 0))
+    cur = _img(tmp_path, "cur.png", (0, 0, 255))
+    cand = _img(tmp_path, "cand.png", (250, 0, 0))
+    out = vj.judge_directed_pairwise(
+        ref, cur, cand, user_feedback="x", work_dir=tmp_path,
+        judge_client=lambda s, u, i: None,
+    )
+    assert out is None

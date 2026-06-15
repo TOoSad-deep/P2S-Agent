@@ -477,6 +477,24 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     quality["max_refinement_iterations"] = max(
         int(quality.get("max_refinement_iterations", 0) or 0), 1
     )
+
+    # Directed acceptance (V1.2): goal-driven modes may accept a small score drop
+    # when the VLM judge prefers the candidate for the human goal. JSON-only
+    # config — the callable is built in the pipeline from run context.
+    directed_enabled = mode in ("refine", "polish")
+    directed_acceptance = {
+        "enabled": directed_enabled,
+        "feedback": feedback,
+        "mode": mode,
+        # polish keeps structure stable: no score regression tolerated.
+        "score_drop_tolerance": 0.0 if mode == "polish" else 0.03,
+        "require_vlm_for_score_drop": True,
+    }
+    if directed_enabled:
+        # Enable the VLM judge so directed acceptance can arbitrate a small drop;
+        # degrades to metric-only acceptance if the VLM is unavailable.
+        quality["vlm_judge_enabled"] = 1
+
     child_input_spec = build_input_spec(str(reference_path), quality=quality)
     errors = validate_input_spec(child_input_spec)
     if errors:
@@ -496,6 +514,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         "source_checkpoint.json": checkpoint_metadata(checkpoint),
         "source_checkpoint.glsl": checkpoint.glsl,
         "human_feedback.txt": feedback,
+        "directed_acceptance.json": directed_acceptance,
     }
 
     log_event(
@@ -540,6 +559,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         },
         pipeline_extra={
             "human_feedback_notes": notes,
+            "directed_acceptance": directed_acceptance,
             "force_first_refinement_iteration": True,
             "lineage": lineage,
             "extra_artifacts": extra_artifacts,

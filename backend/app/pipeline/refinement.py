@@ -116,6 +116,8 @@ def run_dsl_refinement_loop(
     no_improvement_patience: int = 2,
     force_first_iteration: bool = False,
     initial_extra_feedback: "list[str] | None" = None,
+    directed_acceptance: "dict | None" = None,
+    directed_pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
     loop_dir: Path,
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
@@ -233,7 +235,7 @@ def run_dsl_refinement_loop(
                     stop_reason = "user_lowered_cap"
                     break
 
-        if best_score >= high_score_stop:
+        if best_score >= high_score_stop and not (force_first_iteration and not history):
             stop_reason = "high_score_stop"
             break
         if best_score >= threshold and not (force_first_iteration and not history):
@@ -433,7 +435,25 @@ def run_dsl_refinement_loop(
                 delta = 0.0
                 entry["improved"] = False
 
-        if delta > 0.0:
+        accept = delta > 0.0
+
+        # Directed acceptance (human-in-loop): allow a small score drop when the
+        # goal-aware VLM judge prefers the candidate (B) for the user's goal.
+        directed = directed_acceptance or {}
+        score_drop_tolerance = float(directed.get("score_drop_tolerance", 0.0))
+        if (
+            not accept
+            and directed_pairwise_judge is not None
+            and current_render_path is not None
+            and render_path.exists()
+            and -score_drop_tolerance <= delta <= 0.0
+        ):
+            verdict = directed_pairwise_judge(current_render_path, render_path)
+            if verdict == "B":
+                accept = True
+                entry["human_goal_override"] = "accepted_score_drop"
+
+        if accept:
             best_dsl = revised
             best_score = new_score
             best_metrics = new_metrics
@@ -451,7 +471,12 @@ def run_dsl_refinement_loop(
             )
             extra_feedback = [rollback_note]
 
+        entry["accepted"] = bool(accept)
+        entry["best_score_after"] = round(best_score, 4)
+
         if delta >= min_improvement:
+            no_improvement_count = 0
+        elif entry.get("human_goal_override"):
             no_improvement_count = 0
         else:
             no_improvement_count += 1
@@ -495,8 +520,14 @@ def _should_run_refinement(
     *,
     threshold: float,
     high_score_stop: float,
+    force_first: bool = False,
 ) -> tuple[bool, str]:
-    """Decide whether to enter the LLM refinement loop (DSL or GLSL)."""
+    """Decide whether to enter the LLM refinement loop (DSL or GLSL).
+
+    ``force_first`` (human-in-loop directed branch) forces at least one
+    iteration even when the checkpoint already scores above the early-stop
+    thresholds.
+    """
     if refinement_mode == "off":
         return False, "refinement_mode_off"
     if selected is None:
@@ -517,10 +548,12 @@ def _should_run_refinement(
     if refinement_mode == "auto":
         if score < threshold:
             return True, "auto_below_threshold"
+        if force_first:
+            return True, "human_forced_first_iteration"
         return False, "auto_threshold_reached"
 
     if refinement_mode == "on":
-        if score >= high_score_stop:
+        if score >= high_score_stop and not force_first:
             return False, "force_high_score_stop"
         return True, "force_enabled"
 

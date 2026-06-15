@@ -77,6 +77,8 @@ def run_glsl_refinement_loop(
     max_fresh_restarts: int = 1,
     force_first_iteration: bool = False,
     initial_extra_feedback: "list[str] | None" = None,
+    directed_acceptance: "dict | None" = None,
+    directed_pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
     loop_dir: Path,
     strategy_reader: "Callable[[], dict] | None" = None,
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
@@ -161,7 +163,7 @@ def run_glsl_refinement_loop(
                     stop_reason = "user_lowered_cap"
                     break
 
-        if best_score >= high_score_stop:
+        if best_score >= high_score_stop and not (force_first_iteration and not history):
             stop_reason = "high_score_stop"
             break
         if best_score >= threshold and not (force_first_iteration and not history):
@@ -316,7 +318,25 @@ def run_glsl_refinement_loop(
                 delta = 0.0
                 entry["improved"] = False
 
-        if delta > 0.0:
+        accept = delta > 0.0
+
+        # Directed acceptance (human-in-loop): allow a small score drop when the
+        # goal-aware VLM judge prefers the candidate (B) for the user's goal.
+        directed = directed_acceptance or {}
+        score_drop_tolerance = float(directed.get("score_drop_tolerance", 0.0))
+        if (
+            not accept
+            and directed_pairwise_judge is not None
+            and actual_render is not None
+            and current_render_path is not None
+            and -score_drop_tolerance <= delta <= 0.0
+        ):
+            verdict = directed_pairwise_judge(current_render_path, actual_render)
+            if verdict == "B":
+                accept = True
+                entry["human_goal_override"] = "accepted_score_drop"
+
+        if accept:
             best_glsl = revised_glsl
             best_score = new_score
             best_metrics = new_metrics
@@ -333,7 +353,13 @@ def run_glsl_refinement_loop(
                 f"Do NOT repeat the same approach. Try a different strategy."
             ]
 
+        entry["accepted"] = bool(accept)
+        entry["best_score_after"] = round(best_score, 4)
+
         if delta >= min_improvement:
+            no_improvement_count = 0
+        elif entry.get("human_goal_override"):
+            # A directed accept is goal progress; don't count it against patience.
             no_improvement_count = 0
         else:
             no_improvement_count += 1

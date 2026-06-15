@@ -1651,3 +1651,55 @@ def test_pipeline_writes_extra_artifacts(tmp_path):
     run_dir = Path(result["run_dir"])
     assert json.loads((run_dir / "lineage.json").read_text())["parent_run_id"] == "run_p"
     assert (run_dir / "source_checkpoint.glsl").read_text() == "void mainImage(){}"
+
+
+def test_should_run_refinement_force_first_overrides_high_score_stop():
+    cand = _make_refinement_candidate(score=0.99, has_dsl=False)
+    should, reason = _should_run_refinement(
+        "on", cand, {"final_score": 0.99},
+        threshold=0.8, high_score_stop=0.92, force_first=True,
+    )
+    assert should is True
+
+
+def test_should_run_refinement_high_score_without_force_first_skips():
+    cand = _make_refinement_candidate(score=0.99, has_dsl=False)
+    should, reason = _should_run_refinement(
+        "on", cand, {"final_score": 0.99}, threshold=0.8, high_score_stop=0.92,
+    )
+    assert should is False
+
+
+def test_directed_acceptance_judge_passed_to_glsl_loop(tmp_path, monkeypatch):
+    state, glsl = _glsl_branch_state(
+        tmp_path,
+        vlm_judge_enabled=True,
+        directed_acceptance={"enabled": True, "feedback": "brighter", "score_drop_tolerance": 0.03},
+    )
+    captured: dict = {}
+
+    def fake_loop(*args, **kwargs):
+        captured.update(kwargs)
+        return _noop_glsl_loop(glsl)()
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    _run_post_pipeline(state)
+
+    assert captured["directed_acceptance"] == {
+        "enabled": True, "feedback": "brighter", "score_drop_tolerance": 0.03,
+    }
+    assert callable(captured["directed_pairwise_judge"])
+
+
+def test_directed_judge_none_when_disabled(tmp_path, monkeypatch):
+    state, glsl = _glsl_branch_state(tmp_path)  # no directed_acceptance, vlm off
+    captured: dict = {}
+
+    def fake_loop(*args, **kwargs):
+        captured.update(kwargs)
+        return _noop_glsl_loop(glsl)()
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    _run_post_pipeline(state)
+
+    assert captured["directed_pairwise_judge"] is None

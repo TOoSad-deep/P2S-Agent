@@ -391,6 +391,8 @@ def _fake_branch_pipeline(captured):
         captured["human_feedback_notes"] = human_feedback_notes
         captured["force_first"] = force_first_refinement_iteration
         captured["lineage"] = lineage
+        captured["directed_acceptance"] = directed_acceptance
+        captured["extra_artifacts"] = extra_artifacts
         captured["image_path"] = str(image_path)
         return {
             "run_id": run_id,
@@ -531,3 +533,62 @@ def test_branch_refine_stop_parent_sets_flag(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200, resp.text
     assert _run_store["run_parent"]["stop_requested"] is True
+
+
+def test_branch_refine_refine_mode_enables_directed_acceptance(tmp_path, monkeypatch):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "brighter water", "mode": "refine"},
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+    da = captured["directed_acceptance"]
+    assert da["enabled"] is True
+    assert da["feedback"] == "brighter water"
+    assert da["score_drop_tolerance"] > 0.0
+    # directed_acceptance must be JSON-serialisable (no callables)
+    import json as _json
+    _json.dumps(da)
+
+
+def test_branch_refine_polish_mode_zero_tolerance(tmp_path, monkeypatch):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "cleaner edges", "mode": "polish"},
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+    assert captured["directed_acceptance"]["enabled"] is True
+    assert captured["directed_acceptance"]["score_drop_tolerance"] == 0.0
+
+
+def test_branch_refine_continue_mode_disables_directed_acceptance(tmp_path, monkeypatch):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "", "mode": "continue"},
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+    da = captured["directed_acceptance"]
+    assert da is None or da.get("enabled") is False

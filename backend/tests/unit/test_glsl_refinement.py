@@ -372,6 +372,138 @@ def test_initial_extra_feedback_persists_across_iterations(tmp_path, monkeypatch
     assert any("[HUMAN GOAL] keep it bright" in n for n in calls[1]["extra_feedback"])
 
 
+def _evaluate_by_r_with_render(glsl: str, render_path: Path):
+    """Like _evaluate_by_r but writes a render file so actual_render is non-None
+    (directed acceptance requires a candidate render to judge)."""
+    render_path.parent.mkdir(parents=True, exist_ok=True)
+    render_path.write_bytes(b"\x89PNG\r\n")
+    for line in glsl.splitlines():
+        if line.startswith("#define R"):
+            score = float(line.split()[-1])
+            return {"mse": 1.0 - score}, {"final_score": score}, score, render_path
+    return {}, {}, 0.0, render_path
+
+
+def test_directed_acceptance_accepts_small_drop_when_judge_picks_b(tmp_path, monkeypatch):
+    lower = VALID_GLSL_A.replace("0.30", "0.28")  # delta -0.02, within tolerance
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": lower, "_io": {}},
+    )
+    current = tmp_path / "current.png"
+    current.write_bytes(b"\x89PNG\r\n")
+
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r_with_render,
+        initial_render_path=current,
+        max_iterations=1,
+        threshold=0.80,
+        high_score_stop=0.92,
+        directed_acceptance={"score_drop_tolerance": 0.03},
+        directed_pairwise_judge=lambda _cur, _cand: "B",
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert result["best_glsl"] == lower
+    assert result["best_score"] == pytest.approx(0.28)
+    assert result["history"][0]["human_goal_override"] == "accepted_score_drop"
+    assert result["history"][0]["accepted"] is True
+
+
+def test_directed_acceptance_rejects_drop_beyond_tolerance(tmp_path, monkeypatch):
+    lower = VALID_GLSL_A.replace("0.30", "0.24")  # delta -0.06, beyond tolerance
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": lower, "_io": {}},
+    )
+    current = tmp_path / "current.png"
+    current.write_bytes(b"\x89PNG\r\n")
+
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r_with_render,
+        initial_render_path=current,
+        max_iterations=1,
+        threshold=0.80,
+        high_score_stop=0.92,
+        directed_acceptance={"score_drop_tolerance": 0.02},
+        directed_pairwise_judge=lambda _cur, _cand: "B",  # judge would pick B, but drop too big
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert result["best_glsl"] == VALID_GLSL_A
+    assert result["history"][0].get("human_goal_override") is None
+    assert result["history"][0]["accepted"] is False
+
+
+def test_directed_acceptance_metric_only_without_judge(tmp_path, monkeypatch):
+    lower = VALID_GLSL_A.replace("0.30", "0.28")
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": lower, "_io": {}},
+    )
+    current = tmp_path / "current.png"
+    current.write_bytes(b"\x89PNG\r\n")
+
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r_with_render,
+        initial_render_path=current,
+        max_iterations=1,
+        threshold=0.80,
+        high_score_stop=0.92,
+        directed_acceptance={"score_drop_tolerance": 0.03},
+        directed_pairwise_judge=None,  # VLM unavailable -> metric-only
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert result["best_glsl"] == VALID_GLSL_A  # score drop rejected without a judge
+
+
+def test_force_first_overrides_high_score_stop(tmp_path, monkeypatch):
+    calls: list[dict] = []
+
+    def fake_refine(**kwargs):
+        calls.append(kwargs)
+        return {"glsl": VALID_GLSL_B, "_io": {}}
+
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+    )
+
+    # initial score (0.95) is already above high_score_stop (0.92); force_first
+    # must still run exactly one directed iteration.
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.95,
+        {},
+        {"final_score": 0.95},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r,
+        max_iterations=3,
+        threshold=0.80,
+        high_score_stop=0.92,
+        force_first_iteration=True,
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert len(calls) == 1
+    assert result["stop_reason"] == "high_score_stop"
+
+
 def test_diff_glsl_summary_reports_define_changes():
     summary = _diff_glsl_summary(VALID_GLSL_A, VALID_GLSL_B)
     assert "changed lines" in summary

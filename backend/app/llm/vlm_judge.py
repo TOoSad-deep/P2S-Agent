@@ -185,3 +185,66 @@ def judge_pairwise(
     except Exception:
         logger.warning("VLM pairwise judge failed", exc_info=True)
         return None
+
+
+def judge_directed_pairwise(
+    reference_path,
+    current_render_path,
+    candidate_render_path,
+    *,
+    user_feedback: str,
+    work_dir,
+    judge_client: "Optional[JudgeClient]" = None,
+) -> "Optional[str]":
+    """Goal-aware pairwise judge for human-in-loop directed acceptance.
+
+    A is the current best; B is a new candidate. Returns "B" only when B better
+    satisfies ``user_feedback`` *without* clearly breaking fidelity to the
+    reference; otherwise "A"/"tie". Order-debiased; None on any failure so the
+    caller degrades to metric-only acceptance.
+    """
+    try:
+        goal = (user_feedback or "").strip()
+        cache_key = (
+            "directed:"
+            + hashlib.sha1(goal.encode("utf-8")).hexdigest()[:10]
+            + ":"
+            + _file_digest(reference_path, current_render_path, candidate_render_path)
+        )
+        if cache_key in _CACHE:
+            return _CACHE[cache_key]  # type: ignore[return-value]
+        system_prompt = (
+            "You compare two shader renders (A and B) against a reference image, "
+            "given a user's goal.\n"
+            "The image shows three labeled panels: REFERENCE, A, B.\n"
+            "A is the current best result; B is a new candidate.\n"
+            f"User goal: {goal!r}.\n"
+            "Choose B only if B better satisfies the user goal than A WITHOUT "
+            "clearly breaking overall fidelity to the REFERENCE.\n"
+            "If B overfits the goal while damaging the main visual, prefer A or tie.\n"
+            'Respond ONLY with JSON: {"winner": "A" | "B" | "tie", "reason": "one sentence"}'
+        )
+        client = judge_client or _default_client
+        verdicts: list[str] = []
+        for tag, first, second in (
+            ("fwd", current_render_path, candidate_render_path),
+            ("rev", candidate_render_path, current_render_path),
+        ):
+            panel = _compose_panel(
+                [("REFERENCE", Path(reference_path)), ("A", Path(first)), ("B", Path(second))],
+                Path(work_dir) / f"directed_panel_{tag}.png",
+            )
+            data = _parse_json(
+                client(system_prompt, "Which render better satisfies the user goal without breaking fidelity?", [str(panel)])
+            )
+            if data is None:
+                return None
+            verdicts.append(str(data.get("winner", "tie")).strip().upper())
+        fwd, rev = verdicts
+        rev_mapped = {"A": "B", "B": "A"}.get(rev, "tie")  # rev call had panels swapped
+        result = fwd if fwd == rev_mapped and fwd in ("A", "B") else "tie"
+        _CACHE[cache_key] = result
+        return result
+    except Exception:
+        logger.warning("VLM directed pairwise judge failed", exc_info=True)
+        return None

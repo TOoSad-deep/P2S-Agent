@@ -44,7 +44,7 @@ from app.pipeline.refinement import (
 )
 from app.pipeline.revision import apply_revision_with_rollback, build_revision_log_entry
 from app.pipeline.residual_layers import add_residual_layers
-from app.llm.vlm_judge import judge_pairwise, judge_rubric
+from app.llm.vlm_judge import judge_directed_pairwise, judge_pairwise, judge_rubric
 from app.metrics.quality_router import compute_final_score
 from app.pipeline.scoring import (
     _accept_improvement,
@@ -643,6 +643,24 @@ def _run_post_pipeline(
     refinement_high_score_stop = state.get("refinement_high_score_stop", 0.95)
     refinement_min_improvement = state.get("refinement_min_improvement", 0.01)
     refinement_patience = state.get("refinement_patience", 2)
+    force_first_refinement = bool(state.get("force_first_refinement_iteration", False))
+
+    # Human-in-loop directed acceptance: build a goal-aware pairwise judge from
+    # the run's directed_acceptance config when enabled and VLM is available.
+    # Falls back to None (metric-only acceptance) otherwise.
+    directed_acceptance_cfg = state.get("directed_acceptance") or None
+    directed_pairwise_judge = None
+    if (
+        directed_acceptance_cfg
+        and directed_acceptance_cfg.get("enabled")
+        and state.get("vlm_judge_enabled")
+    ):
+        _directed_goal = directed_acceptance_cfg.get("feedback") or ""
+
+        def directed_pairwise_judge(cur, new, _goal=_directed_goal):
+            return judge_directed_pairwise(
+                reference_path, cur, new, user_feedback=_goal, work_dir=run_dir / "judge"
+            )
 
     # Baseline #2: reflect optimizer / revision / residual gains before refinement.
     if publish_partial is not None:
@@ -662,6 +680,7 @@ def _run_post_pipeline(
         selected_quality,
         threshold=refinement_threshold,
         high_score_stop=refinement_high_score_stop,
+        force_first=force_first_refinement,
     )
     if max_refinement_iterations <= 0:
         should_refine = False
@@ -696,6 +715,8 @@ def _run_post_pipeline(
                 or effective_refinement_mode == "on"
             ),
             initial_extra_feedback=state.get("human_feedback_notes") or None,
+            directed_acceptance=directed_acceptance_cfg,
+            directed_pairwise_judge=directed_pairwise_judge,
             loop_dir=run_dir / "refinement",
             strategy_reader=strategy_reader,
             protected_aspects=protected_aspects,
@@ -781,6 +802,8 @@ def _run_post_pipeline(
                     or effective_refinement_mode == "on"
                 ),
                 initial_extra_feedback=state.get("human_feedback_notes") or None,
+                directed_acceptance=directed_acceptance_cfg,
+                directed_pairwise_judge=directed_pairwise_judge,
                 loop_dir=run_dir / "glsl_refinement",
                 strategy_reader=strategy_reader,
                 pairwise_judge=(
