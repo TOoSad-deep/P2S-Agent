@@ -1,9 +1,14 @@
-"""Checkpoint resolver for human-in-loop branch refinement (V1).
+"""Checkpoint resolver for human-in-loop branch refinement (V1 + V2.1).
 
 A *checkpoint* is a branchable point inside a run: a candidate, a refinement
 iteration proposal, or the final selected shader. ``list_checkpoints`` produces
 lightweight metadata for the UI; ``resolve_checkpoint`` maps a checkpoint id to
 the GLSL that should seed a new branch run.
+
+V2.1 additions:
+    - ``build_timeline`` — rich timeline entries with artifact_ids and deltas.
+    - ``save_timeline`` — write timeline.json into a run directory.
+    - ``resolve_checkpoint_artifact`` — safely map checkpoint+kind to a file Path.
 
 The functions operate on either a completed pipeline ``result`` dict or a
 running ``_run_store`` entry — both expose ``scoreboard`` / ``refinement_history``
@@ -12,7 +17,9 @@ running ``_run_store`` entry — both expose ``scoreboard`` / ``refinement_histo
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 CheckpointKind = Literal["candidate", "refinement_iter", "final"]
@@ -255,3 +262,262 @@ def _resolve_iteration(result: dict, checkpoint_id: str) -> PipelineCheckpoint:
             source="refinement_history",
         )
     raise CheckpointError(f"unknown refinement iteration: {iteration}")
+
+
+# ---------------------------------------------------------------------------
+# V2.1 — Timeline, save_timeline, resolve_checkpoint_artifact
+# ---------------------------------------------------------------------------
+
+_CANDIDATE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SUFFIX_ALLOWLIST = {".png", ".json", ".glsl", ".txt"}
+_VALID_ARTIFACT_KINDS = {"shader", "render", "llm_io"}
+
+
+def build_timeline(result: dict, *, run_id: str | None = None) -> list[dict]:
+    """Build a rich ordered list of CheckpointTimelineEntry dicts.
+
+    Each entry carries the full timeline interface — all fields present,
+    unused ones set to None. Entries are ordered: selected baseline,
+    other previewable candidates, refinement iterations (including
+    rejected), then final.
+
+    Args:
+        result: Pipeline result or run-store dict.
+        run_id: Override for the run_id field; falls back to
+            ``result.get("run_id")``.
+    """
+    effective_run_id: str | None = run_id if run_id is not None else result.get("run_id")
+
+    def _entry(
+        *,
+        id: str,
+        kind: str,
+        label: str,
+        iteration: int | None = None,
+        score: float | None = None,
+        score_before: float | None = None,
+        delta: float | None = None,
+        accepted: bool | None = None,
+        human_goal_override: str | None = None,
+        changes_summary: str | None = None,
+        artifact_ids: dict | None = None,
+    ) -> dict:
+        return {
+            "id": id,
+            "run_id": effective_run_id,
+            "kind": kind,
+            "label": label,
+            "iteration": iteration,
+            "score": score,
+            "score_before": score_before,
+            "delta": delta,
+            "accepted": accepted,
+            "human_goal_override": human_goal_override,
+            "changes_summary": changes_summary,
+            "has_glsl": True,
+            "artifact_ids": artifact_ids if artifact_ids is not None else {},
+        }
+
+    timeline: list[dict] = []
+
+    scoreboard = result.get("scoreboard") or {}
+    selected_cand = _selected_candidate(result)
+    selected_id = selected_cand.get("id") if selected_cand else None
+
+    for cand in scoreboard.get("candidates") or []:
+        if not _previewable(cand):
+            continue
+        cid = cand.get("id")
+        if cid == selected_id:
+            timeline.append(_entry(
+                id="candidate:selected",
+                kind="candidate",
+                label="Selected baseline",
+                score=cand.get("final_score"),
+                accepted=True,
+                artifact_ids={
+                    "shader": "checkpoint:candidate:selected:shader",
+                    "render": "checkpoint:candidate:selected:render",
+                },
+            ))
+        else:
+            timeline.append(_entry(
+                id=f"candidate:{cid}",
+                kind="candidate",
+                label=f"Candidate {cid}",
+                score=cand.get("final_score"),
+                accepted=False,
+                artifact_ids={
+                    "render": f"checkpoint:candidate:{cid}:render",
+                    "llm_io": f"checkpoint:candidate:{cid}:llm_io",
+                },
+            ))
+
+    for entry in result.get("refinement_history") or []:
+        if not _has_glsl(entry.get("compile_glsl")):
+            continue
+        iteration = entry.get("iteration")
+        score_after = entry.get("score_after")
+        score_before = entry.get("score_before")
+        if isinstance(score_after, (int, float)) and isinstance(score_before, (int, float)):
+            delta: float | None = score_after - score_before
+        else:
+            delta = None
+        accepted = entry.get("accepted")
+        if accepted is None:
+            accepted = entry.get("improved")
+        timeline.append(_entry(
+            id=f"refinement:iter:{iteration}",
+            kind="refinement_iter",
+            label=f"Iteration {iteration} proposal",
+            iteration=iteration,
+            score=score_after,
+            score_before=score_before,
+            delta=delta,
+            accepted=accepted,
+            human_goal_override=entry.get("human_goal_override"),
+            changes_summary=entry.get("changes_summary"),
+            artifact_ids={},
+        ))
+
+    if _has_glsl(result.get("selected_glsl")):
+        timeline.append(_entry(
+            id="final:selected",
+            kind="final",
+            label="Current best",
+            score=_final_score(result),
+            accepted=True,
+            artifact_ids={"shader": "checkpoint:final:selected:shader"},
+        ))
+
+    return timeline
+
+
+def save_timeline(run_dir, result: dict, *, run_id: str | None = None) -> Path:
+    """Write ``timeline.json`` into *run_dir* and return the written path.
+
+    Args:
+        run_dir: Destination directory. Accepts ``RunDir`` (has ``.path``),
+            ``Path``, or ``str``.
+        result: Pipeline result dict.
+        run_id: Optional run_id override; falls back to ``result.get("run_id")``.
+    """
+    from app.pipeline.artifacts import save_json  # local import avoids circular dep
+
+    # Accept RunDir (has .path), Path, or str
+    if hasattr(run_dir, "path"):
+        dest = Path(run_dir.path)
+    else:
+        dest = Path(run_dir)
+
+    effective_run_id: str | None = run_id if run_id is not None else result.get("run_id")
+    data = {
+        "run_id": effective_run_id,
+        "timeline": build_timeline(result, run_id=effective_run_id),
+    }
+    return save_json(dest / "timeline.json", data)
+
+
+def resolve_checkpoint_artifact(
+    result: dict,
+    checkpoint_id: str,
+    kind: str,
+    *,
+    run_dir=None,
+) -> Path:
+    """Resolve a checkpoint + artifact kind to a safe absolute file path.
+
+    This function is SECURITY-CRITICAL. It validates the kind, candidate id
+    format, candidate existence in the scoreboard, path containment inside
+    run_dir, and suffix allowlist before returning the path. The file need
+    not exist — existence checking is the caller's responsibility.
+
+    Args:
+        result: Pipeline result dict (provides scoreboard for id validation).
+        checkpoint_id: Checkpoint identifier (e.g. ``"final:selected"``).
+        kind: Artifact kind — ``"shader"``, ``"render"``, or ``"llm_io"``.
+        run_dir: Base directory for the run. Falls back to
+            ``result.get("run_dir")``. **Must not be None.**
+
+    Returns:
+        Resolved, containment-checked, allowlisted absolute Path.
+
+    Raises:
+        CheckpointError: On any validation failure (kind, id, traversal, etc.).
+    """
+    if kind not in _VALID_ARTIFACT_KINDS:
+        raise CheckpointError(
+            f"unknown artifact kind {kind!r}; must be one of {sorted(_VALID_ARTIFACT_KINDS)}"
+        )
+
+    effective_run_dir = run_dir if run_dir is not None else result.get("run_dir")
+    if not effective_run_dir:
+        raise CheckpointError("run_dir is required to resolve a checkpoint artifact")
+
+    base = Path(effective_run_dir).resolve()
+
+    # Determine relative path based on checkpoint_id + kind
+    if checkpoint_id in ("final:selected", "candidate:selected"):
+        if kind == "shader":
+            relative = Path("selected_shader.glsl")
+        elif kind == "render":
+            selected = _selected_candidate(result)
+            if selected is None:
+                raise CheckpointError(
+                    f"{checkpoint_id}+render: no selected candidate found in scoreboard"
+                )
+            sid = selected.get("id")
+            relative = Path("candidates") / f"{sid}_render.png"
+        else:  # llm_io
+            raise CheckpointError(
+                f"{checkpoint_id}+{kind}: no llm_io file for selected candidate"
+            )
+
+    elif checkpoint_id.startswith("candidate:"):
+        candidate_id = checkpoint_id[len("candidate:"):]
+        # Validate id format first (catches traversal patterns)
+        if not _CANDIDATE_ID_RE.match(candidate_id):
+            raise CheckpointError(
+                f"candidate id {candidate_id!r} contains disallowed characters"
+            )
+        # Validate id is known in the scoreboard
+        scoreboard = result.get("scoreboard") or {}
+        known_ids = {c.get("id") for c in scoreboard.get("candidates") or []}
+        if candidate_id not in known_ids:
+            raise CheckpointError(
+                f"unknown candidate id {candidate_id!r} (not in scoreboard)"
+            )
+        if kind == "render":
+            relative = Path("candidates") / f"{candidate_id}_render.png"
+        elif kind == "llm_io":
+            relative = Path("candidates") / f"{candidate_id}.json"
+        else:  # shader — candidate GLSL is inline, no file
+            raise CheckpointError(
+                f"candidate:{candidate_id}+shader: candidate GLSL is inline, no file artifact"
+            )
+
+    elif checkpoint_id.startswith("refinement:iter:"):
+        raise CheckpointError(
+            "no file artifact for refinement iterations (GLSL is inline)"
+        )
+
+    else:
+        raise CheckpointError(f"unknown checkpoint id {checkpoint_id!r}")
+
+    # Build and contain the path
+    candidate_path = (base / relative).resolve()
+    try:
+        candidate_path.relative_to(base)
+    except ValueError:
+        raise CheckpointError(
+            f"resolved path {candidate_path} escapes run_dir {base}"
+        )
+
+    # Suffix allowlist
+    if candidate_path.suffix not in _SUFFIX_ALLOWLIST:
+        raise CheckpointError(
+            f"disallowed file suffix {candidate_path.suffix!r}; "
+            f"allowed: {sorted(_SUFFIX_ALLOWLIST)}"
+        )
+
+    return candidate_path
