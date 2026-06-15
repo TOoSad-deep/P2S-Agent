@@ -146,6 +146,40 @@ export interface PngShaderResult {
   strategy?: Partial<StrategyConfig> | null;
   stop_requested?: boolean;
   strategy_revision?: number;
+  // Human-in-loop branch refinement (V1).
+  lineage?: BranchLineage | null;
+  parent_run_id?: string | null;
+  source_checkpoint_id?: string | null;
+}
+
+export type BranchMode = "continue" | "refine" | "polish";
+
+export interface BranchLineage {
+  parent_run_id?: string;
+  root_run_id?: string;
+  source_checkpoint_id?: string;
+  source_checkpoint_label?: string;
+  mode?: string;
+  feedback?: string;
+}
+
+export interface PipelineCheckpointMeta {
+  id: string;
+  kind: "candidate" | "refinement_iter" | "final";
+  label: string;
+  score?: number | null;
+  iteration?: number | null;
+  accepted?: boolean | null;
+  has_glsl: boolean;
+}
+
+export interface BranchRefineRequest {
+  checkpoint_id: string;
+  feedback: string;
+  mode: BranchMode;
+  locks?: Record<string, boolean>;
+  stop_parent?: boolean;
+  quality?: Partial<StrategyConfig>;
 }
 
 export type LlmMode = "off" | "auto" | "on";
@@ -460,6 +494,72 @@ export function usePngShader() {
     return data;
   }, [runId]);
 
+  const fetchCheckpoints = useCallback(async (id: string): Promise<PipelineCheckpointMeta[]> => {
+    const requestId = makeRequestId("checkpoints");
+    const response = await fetch(`${API_BASE}/png-shader/runs/${id}/checkpoints`, {
+      headers: { "x-request-id": requestId, "x-run-id": id },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_checkpoints_failed", { request_id: requestId, run_id: id, status: response.status }, "warn");
+      throw new Error(`Checkpoints failed (${response.status}): ${text}`);
+    }
+    const data = await response.json();
+    return (data.checkpoints ?? []) as PipelineCheckpointMeta[];
+  }, []);
+
+  // Create a directed-refinement child run from a parent checkpoint and switch
+  // the active run to it, reusing the existing polling loop.
+  const branchRefine = useCallback(async (
+    parentRunId: string,
+    request: BranchRefineRequest,
+  ): Promise<string | null> => {
+    stopPolling();
+    setStopPending(false);
+    setLoading(true);
+    setError(null);
+    activeRunRef.current = null;
+    try {
+      const requestId = makeRequestId("branch-refine");
+      logFrontendEvent("api_branch_refine_submit", {
+        request_id: requestId,
+        parent_run_id: parentRunId,
+        checkpoint_id: request.checkpoint_id,
+        mode: request.mode,
+        feedback_len: request.feedback.length,
+      });
+      const response = await fetch(`${API_BASE}/png-shader/runs/${parentRunId}/branch-refine`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId, "x-run-id": parentRunId },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_branch_refine_failed", { request_id: requestId, parent_run_id: parentRunId, status: response.status }, "warn");
+        throw new Error(`Branch refine failed (${response.status}): ${text}`);
+      }
+      const data: PngShaderResult = await response.json();
+      logFrontendEvent("api_branch_refine_accepted", { request_id: requestId, run_id: data.run_id, parent_run_id: parentRunId });
+      setRunId(data.run_id);
+      setResult(data);
+      activeRunRef.current = data.run_id;
+      if (data.status === "running") {
+        pollingRef.current = setTimeout(() => pollStatus(data.run_id), 1000);
+      } else {
+        activeRunRef.current = null;
+        setLoading(false);
+        if (data.status === "failed") setError(data.error || "Branch refine failed");
+      }
+      return data.run_id;
+    } catch (err) {
+      activeRunRef.current = null;
+      setLoading(false);
+      logFrontendEvent("api_branch_refine_error", { error: err instanceof Error ? err.message : String(err) }, "error");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, [pollStatus, stopPolling]);
+
   const clearResult = useCallback(() => {
     stopPolling();
     activeRunRef.current = null;
@@ -488,6 +588,8 @@ export function usePngShader() {
     updateStrategyLive,
     stopRun,
     stopPending,
+    fetchCheckpoints,
+    branchRefine,
   };
 }
 

@@ -1,4 +1,4 @@
-import { usePngShader, type LlmMode } from './hooks/usePngShader'
+import { usePngShader, type LlmMode, type BranchRefineRequest } from './hooks/usePngShader'
 import { useModels } from './hooks/useModels'
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sparkles, Zap } from 'lucide-react'
@@ -7,6 +7,7 @@ import type { StrategyConfig } from './lib/strategy-presets'
 
 export default function App() {
   const {
+    runId,
     result,
     loading,
     error,
@@ -19,6 +20,7 @@ export default function App() {
     applyPreset,
     stopRun,
     stopPending,
+    branchRefine,
   } = usePngShader()
 
   const models = useModels()
@@ -50,6 +52,10 @@ export default function App() {
   const handleStrategyPartial = useCallback((partial: Partial<StrategyConfig>) => {
     setStrategyPartial(partial)
   }, [setStrategyPartial])
+
+  const handleBranchRefine = useCallback((request: BranchRefineRequest) => {
+    if (runId) branchRefine(runId, request)
+  }, [runId, branchRefine])
 
   useEffect(() => {
     return () => {
@@ -158,6 +164,7 @@ export default function App() {
           onStop={stopRun}
           stopPending={stopPending}
           parameterizeGlsl={parameterizeGlsl}
+          onBranchRefine={handleBranchRefine}
         />
       </main>
 
