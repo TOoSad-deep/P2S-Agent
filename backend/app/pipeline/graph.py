@@ -1005,6 +1005,7 @@ def run_png_shader_pipeline(
     directed_acceptance: dict | None = None,
     force_first_refinement_iteration: bool = False,
     lineage: dict | None = None,
+    extra_artifacts: dict | None = None,
 ) -> dict:
     """Run the full PNG-to-Shader pipeline and return structured results.
 
@@ -1145,6 +1146,16 @@ def run_png_shader_pipeline(
     )
     copy_artifact(image_path, run_dir_obj.path / "reference_input.png")
     save_json(run_dir_obj.path / "input_spec.json", input_spec)
+
+    # Caller-supplied artifacts (e.g. human-in-loop branch_request / lineage /
+    # source checkpoint). dicts/lists are saved as JSON; everything else as text.
+    if extra_artifacts:
+        for name, content in extra_artifacts.items():
+            dest = run_dir_obj.path / name
+            if isinstance(content, (dict, list)):
+                save_json(dest, content)
+            else:
+                dest.write_text(str(content), encoding="utf-8")
 
     # Build initial state
     initial_state: P2SPipelineState = {

@@ -1637,3 +1637,17 @@ def test_pipeline_result_includes_lineage(tmp_path):
     assert result["lineage"]["parent_run_id"] == "run_parent"
     assert result["lineage"]["source_checkpoint_id"] == "final:selected"
     assert result["input_spec"]["lineage"]["mode"] == "refine"
+
+
+def test_pipeline_writes_extra_artifacts(tmp_path):
+    png_path = make_solid_png(tmp_path)
+    result = run_png_shader_pipeline(
+        png_path,
+        extra_artifacts={
+            "lineage.json": {"parent_run_id": "run_p", "mode": "refine"},
+            "source_checkpoint.glsl": "void mainImage(){}",
+        },
+    )
+    run_dir = Path(result["run_dir"])
+    assert json.loads((run_dir / "lineage.json").read_text())["parent_run_id"] == "run_p"
+    assert (run_dir / "source_checkpoint.glsl").read_text() == "void mainImage(){}"

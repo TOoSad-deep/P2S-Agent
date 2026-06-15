@@ -321,3 +321,213 @@ def test_publish_partial_noop_when_missing():
     _run_store.clear()
     _publish_partial_to_store("ghost", {"scoreboard": {}})
     assert "ghost" not in _run_store
+
+
+# ---------------------------------------------------------------------------
+# Human-in-loop: checkpoints + branch-refine (V1.1)
+# ---------------------------------------------------------------------------
+
+_BRANCH_GLSL = (
+    "#version 300 es\nprecision highp float;\n"
+    "void mainImage(out vec4 c, in vec2 p){ c = vec4(0.7); }"
+)
+
+
+def _seed_parent(tmp_path, run_id="run_parent", status="completed", with_reference=True):
+    parent_dir = tmp_path / run_id
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    if with_reference:
+        Image.new("RGBA", (32, 32), (180, 80, 40, 255)).save(parent_dir / "reference_input.png")
+    _run_store[run_id] = {
+        "run_id": run_id,
+        "status": status,
+        "run_dir": str(parent_dir),
+        "selected_glsl": _BRANCH_GLSL,
+        "quality_router": {"final_score": 0.7},
+        "scoreboard": {
+            "selected_id": "llm_0",
+            "candidates": [{
+                "id": "llm_0",
+                "source": "llm",
+                "selected": True,
+                "previewable": True,
+                "compile_glsl": _BRANCH_GLSL,
+                "final_score": 0.7,
+            }],
+        },
+        "refinement_history": [],
+        "strategy": {"refinement_threshold": 0.8},
+        "stop_requested": False,
+        "strategy_revision": 1,
+    }
+    return parent_dir
+
+
+def test_checkpoints_lists_branchable_points(tmp_path):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/checkpoints")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == "run_parent"
+    ids = {cp["id"] for cp in body["checkpoints"]}
+    assert "candidate:llm_0" in ids
+    assert "final:selected" in ids
+
+
+def test_checkpoints_404_for_unknown_run():
+    _run_store.clear()
+    client = _client()
+    assert client.get("/png-shader/runs/ghost/checkpoints").status_code == 404
+
+
+def _fake_branch_pipeline(captured):
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, seed_glsl=None,
+                      human_feedback_notes=None, directed_acceptance=None,
+                      force_first_refinement_iteration=False, lineage=None,
+                      extra_artifacts=None, **kwargs):
+        captured["seed_glsl"] = seed_glsl
+        captured["human_feedback_notes"] = human_feedback_notes
+        captured["force_first"] = force_first_refinement_iteration
+        captured["lineage"] = lineage
+        captured["image_path"] = str(image_path)
+        return {
+            "run_id": run_id,
+            "selected_glsl": seed_glsl or "",
+            "scoreboard": {},
+            "quality_router": {},
+            "refinement_summary": {},
+            "lineage": lineage,
+        }
+    return fake_pipeline
+
+
+def test_branch_refine_creates_child_run(tmp_path, monkeypatch):
+    _run_store.clear()
+    parent_dir = _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the reflection stronger",
+            "mode": "refine",
+            "locks": {"preserve_layout": True},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    child_id = body["run_id"]
+    assert child_id != "run_parent"
+    assert body["status"] == "running"
+    assert body["parent_run_id"] == "run_parent"
+    assert body["lineage"]["source_checkpoint_id"] == "final:selected"
+
+    _wait_for_completion(client, child_id)
+    assert captured["seed_glsl"] == _BRANCH_GLSL
+    assert any("[HUMAN GOAL] make the reflection stronger" in n
+               for n in captured["human_feedback_notes"])
+    assert any("[LOCK] Preserve layout" in n for n in captured["human_feedback_notes"])
+    assert captured["force_first"] is True
+    assert captured["lineage"]["parent_run_id"] == "run_parent"
+    # branch worker must NOT delete the parent reference image
+    assert (parent_dir / "reference_input.png").exists()
+
+
+def test_branch_refine_404_for_unknown_parent():
+    _run_store.clear()
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/ghost/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "x", "mode": "refine"},
+    )
+    assert resp.status_code == 404
+
+
+def test_branch_refine_422_for_unknown_checkpoint(tmp_path):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "refinement:iter:99", "feedback": "x", "mode": "refine"},
+    )
+    assert resp.status_code == 422
+
+
+def test_branch_refine_422_for_empty_feedback_in_refine(tmp_path):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "   ", "mode": "refine"},
+    )
+    assert resp.status_code == 422
+
+
+def test_branch_refine_409_when_parent_has_no_run_dir():
+    _run_store.clear()
+    _run_store["run_norun"] = {
+        "run_id": "run_norun", "status": "completed", "selected_glsl": _BRANCH_GLSL,
+        "scoreboard": {"selected_id": "llm_0", "candidates": [
+            {"id": "llm_0", "selected": True, "previewable": True, "compile_glsl": _BRANCH_GLSL, "final_score": 0.7}]},
+        "refinement_history": [], "quality_router": {"final_score": 0.7},
+    }
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_norun/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "x", "mode": "refine"},
+    )
+    assert resp.status_code == 409
+
+
+def test_branch_refine_409_when_reference_missing(tmp_path):
+    _run_store.clear()
+    _seed_parent(tmp_path, with_reference=False)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "x", "mode": "refine"},
+    )
+    assert resp.status_code == 409
+
+
+def test_branch_refine_continue_mode_allows_empty_feedback(tmp_path, monkeypatch):
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "", "mode": "continue"},
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+    assert any("[MODE] Continue" in n for n in captured["human_feedback_notes"])
+
+
+def test_branch_refine_stop_parent_sets_flag(tmp_path, monkeypatch):
+    _run_store.clear()
+    _seed_parent(tmp_path, status="running")
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "brighter",
+              "mode": "refine", "stop_parent": True},
+    )
+    assert resp.status_code == 200, resp.text
+    assert _run_store["run_parent"]["stop_requested"] is True

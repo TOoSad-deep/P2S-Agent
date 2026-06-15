@@ -22,7 +22,19 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.config import ModelConfig, use_active_model
 from app.llm.model_resolver import ModelResolutionError, resolve_model_config
+from app.pipeline.checkpoints import (
+    CheckpointError,
+    checkpoint_metadata,
+    list_checkpoints,
+    resolve_checkpoint,
+)
 from app.pipeline.graph import run_png_shader_pipeline
+from app.pipeline.human_feedback import (
+    MODES,
+    FeedbackValidationError,
+    build_human_feedback_notes,
+    validate_feedback,
+)
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
 from app.services.langsmith_tracing import trace_context
 from app.services.logging_config import attach_run_log, log_event, logging_context
@@ -82,14 +94,23 @@ def _run_png_shader_background(
     *,
     run_id: str,
     image_path: Path,
-    upload_dir: Path,
+    upload_dir: Optional[Path],
     pipeline_input_spec: Optional[dict],
     seed_glsl: Optional[str],
     model_config: Optional[ModelConfig],
     trace_input: dict,
     trace_metadata: dict,
+    pipeline_extra: Optional[dict] = None,
 ) -> None:
-    """Run the PNG shader pipeline after the submit request has returned."""
+    """Run the PNG shader pipeline after the submit request has returned.
+
+    ``upload_dir`` is the temp dir of an uploaded image and is removed on
+    completion. Branch runs reuse the parent's reference image and pass
+    ``upload_dir=None`` so the parent's ``run_dir`` is never deleted.
+    ``pipeline_extra`` carries human-in-loop kwargs (human_feedback_notes,
+    directed_acceptance, force_first_refinement_iteration, lineage,
+    extra_artifacts) forwarded to ``run_png_shader_pipeline``.
+    """
     def _progress(phase: str) -> None:
         with _run_store_lock:
             stored = _run_store.get(run_id)
@@ -132,6 +153,7 @@ def _run_png_shader_background(
                     progress_callback=_progress,
                     strategy_reader=_strategy_reader,
                     publish_partial=_publish_partial,
+                    **(pipeline_extra or {}),
                 )
                 result_with_status = {**pipeline_result, "status": "completed", "current_phase": "done"}
                 with _run_store_lock:
@@ -182,7 +204,43 @@ def _run_png_shader_background(
                     **preserved,
                 }
         finally:
-            shutil.rmtree(upload_dir, ignore_errors=True)
+            if upload_dir is not None:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+
+
+def _start_pipeline_worker(
+    *,
+    run_id: str,
+    image_path: Path,
+    upload_dir: Optional[Path],
+    pipeline_input_spec: Optional[dict],
+    seed_glsl: Optional[str],
+    model_config: Optional[ModelConfig],
+    trace_input: dict,
+    trace_metadata: dict,
+    pipeline_extra: Optional[dict] = None,
+) -> None:
+    """Register the run's model and launch the background pipeline thread.
+
+    Shared by ``/run`` (uploaded image, ``upload_dir`` set) and
+    ``/branch-refine`` (parent reference image, ``upload_dir=None``).
+    """
+    _store_run_model(run_id, model_config)
+    threading.Thread(
+        target=_run_png_shader_background,
+        kwargs={
+            "run_id": run_id,
+            "image_path": image_path,
+            "upload_dir": upload_dir,
+            "pipeline_input_spec": pipeline_input_spec,
+            "seed_glsl": seed_glsl,
+            "model_config": model_config,
+            "trace_input": trace_input,
+            "trace_metadata": trace_metadata,
+            "pipeline_extra": pipeline_extra,
+        },
+        daemon=True,
+    ).start()
 
 
 @router.post("/run")
@@ -296,21 +354,16 @@ async def run_png_shader(
             "strategy_revision": 1,
         }
         _store_run(run_id, initial_result)
-        _store_run_model(run_id, model_config)
-        threading.Thread(
-            target=_run_png_shader_background,
-            kwargs={
-                "run_id": run_id,
-                "image_path": image_path,
-                "upload_dir": upload_dir,
-                "pipeline_input_spec": pipeline_input_spec,
-                "seed_glsl": seed_glsl,
-                "model_config": model_config,
-                "trace_input": trace_input,
-                "trace_metadata": trace_metadata,
-            },
-            daemon=True,
-        ).start()
+        _start_pipeline_worker(
+            run_id=run_id,
+            image_path=image_path,
+            upload_dir=upload_dir,
+            pipeline_input_spec=pipeline_input_spec,
+            seed_glsl=seed_glsl,
+            model_config=model_config,
+            trace_input=trace_input,
+            trace_metadata=trace_metadata,
+        )
         return initial_result
     except HTTPException:
         raise
@@ -333,6 +386,173 @@ async def get_status(run_id: str) -> dict:
             detail=f"run_id '{run_id}' not found",
         )
     return result
+
+
+@router.get("/runs/{run_id}/checkpoints")
+async def get_checkpoints(run_id: str) -> dict:
+    """List the branchable checkpoints (candidates / iterations / final) of a run.
+
+    Works for both running and completed runs; GLSL payloads are omitted and
+    re-resolved on demand by ``/branch-refine``.
+    """
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+    return {
+        "run_id": run_id,
+        "status": stored.get("status"),
+        "checkpoints": list_checkpoints(stored),
+    }
+
+
+@router.post("/runs/{run_id}/branch-refine")
+async def branch_refine(run_id: str, payload: dict) -> dict:
+    """Create a directed-refinement child run seeded from a parent checkpoint.
+
+    The child is an independent run (own run_id / run_dir / lifecycle) seeded
+    with the checkpoint's GLSL and the user's feedback. The parent is never
+    overwritten and its reference image is never deleted.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    with _run_store_lock:
+        parent = _run_store.get(run_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+    checkpoint_id = str(payload.get("checkpoint_id") or "final:selected")
+    mode = str(payload.get("mode") or "refine")
+    feedback = str(payload.get("feedback") or "")
+    locks = payload.get("locks") or {}
+    stop_parent = bool(payload.get("stop_parent"))
+    quality_overrides = payload.get("quality") or {}
+    if not isinstance(locks, dict) or not isinstance(quality_overrides, dict):
+        raise HTTPException(status_code=422, detail="locks and quality must be objects")
+    if mode not in MODES:
+        raise HTTPException(status_code=422, detail=f"mode must be one of {list(MODES)}")
+    try:
+        validate_feedback(feedback, mode)
+    except FeedbackValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Parent must have produced at least one branchable checkpoint.
+    if not list_checkpoints(parent):
+        raise HTTPException(
+            status_code=409, detail="parent run has no branchable checkpoint yet"
+        )
+    try:
+        checkpoint = resolve_checkpoint(parent, checkpoint_id)
+    except CheckpointError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    parent_run_dir = parent.get("run_dir")
+    if not parent_run_dir:
+        raise HTTPException(status_code=409, detail="parent run_dir is not available yet")
+    reference_path = Path(parent_run_dir) / "reference_input.png"
+    if not reference_path.exists():
+        raise HTTPException(
+            status_code=409, detail="parent reference image is not available"
+        )
+
+    child_run_id = "run_" + uuid4().hex[:8]
+    notes = build_human_feedback_notes(
+        feedback=feedback, mode=mode, locks=locks, checkpoint=checkpoint
+    )
+    parent_lineage = parent.get("lineage") or {}
+    root_run_id = parent_lineage.get("root_run_id") or run_id
+    lineage = {
+        "parent_run_id": run_id,
+        "root_run_id": root_run_id,
+        "source_checkpoint_id": checkpoint_id,
+        "source_checkpoint_label": checkpoint.label,
+        "mode": mode,
+        "feedback": feedback,
+    }
+
+    # Child quality: force the directed closed loop on, at least one iteration.
+    quality = dict(quality_overrides)
+    quality["refinement_mode"] = "on"
+    quality["max_refinement_iterations"] = max(
+        int(quality.get("max_refinement_iterations", 0) or 0), 1
+    )
+    child_input_spec = build_input_spec(str(reference_path), quality=quality)
+    errors = validate_input_spec(child_input_spec)
+    if errors:
+        raise HTTPException(status_code=422, detail={"input_spec_errors": errors})
+
+    branch_request = {
+        "checkpoint_id": checkpoint_id,
+        "feedback": feedback,
+        "mode": mode,
+        "locks": locks,
+        "stop_parent": stop_parent,
+        "quality": quality,
+    }
+    extra_artifacts = {
+        "branch_request.json": branch_request,
+        "lineage.json": lineage,
+        "source_checkpoint.json": checkpoint_metadata(checkpoint),
+        "source_checkpoint.glsl": checkpoint.glsl,
+        "human_feedback.txt": feedback,
+    }
+
+    log_event(
+        logger,
+        "branch_refine_request",
+        run_id=run_id,
+        child_run_id=child_run_id,
+        checkpoint_id=checkpoint_id,
+        mode=mode,
+        feedback_len=len(feedback),
+    )
+
+    initial_result = {
+        "run_id": child_run_id,
+        "status": "running",
+        "parent_run_id": run_id,
+        "source_checkpoint_id": checkpoint_id,
+        "lineage": lineage,
+        "submitted_at": time(),
+        "strategy": dict(child_input_spec.get("quality") or quality),
+        "stop_requested": False,
+        "strategy_revision": 1,
+    }
+    _store_run(child_run_id, initial_result)
+
+    _start_pipeline_worker(
+        run_id=child_run_id,
+        image_path=reference_path,
+        upload_dir=None,  # reuse parent reference; never delete the parent run_dir
+        pipeline_input_spec=child_input_spec,
+        seed_glsl=checkpoint.glsl,
+        model_config=_get_run_model(run_id),
+        trace_input={
+            "run_id": child_run_id,
+            "parent_run_id": run_id,
+            "checkpoint_id": checkpoint_id,
+        },
+        trace_metadata={
+            "run_id": child_run_id,
+            "pipeline": "png-shader-branch",
+            "parent_run_id": run_id,
+        },
+        pipeline_extra={
+            "human_feedback_notes": notes,
+            "force_first_refinement_iteration": True,
+            "lineage": lineage,
+            "extra_artifacts": extra_artifacts,
+        },
+    )
+
+    if stop_parent:
+        with _run_store_lock:
+            stored_parent = _run_store.get(run_id)
+            if stored_parent is not None and stored_parent.get("status") == "running":
+                stored_parent["stop_requested"] = True
+
+    return initial_result
 
 
 @router.post("/refine/{run_id}")
