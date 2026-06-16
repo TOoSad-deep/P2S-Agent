@@ -2766,3 +2766,123 @@ def test_draw_session_create_with_constraints_children_carry_notes(tmp_path, mon
         assert artifacts["constraints.json"]["locks"] == {"preserve_layout": True}
         da = cap["directed_acceptance"]
         assert "constraints" in da, "directed_acceptance missing 'constraints'"
+
+
+# ---------------------------------------------------------------------------
+# V4.2 region-mask endpoint tests
+# ---------------------------------------------------------------------------
+
+_VALID_REGION_BODY = {
+    "region_id": "region_water",
+    "geometry_type": "rect",
+    "geometry": {"x": 0.05, "y": 0.58, "w": 0.90, "h": 0.34},
+    "label": "water",
+    "mode": "modify",
+    "instruction": "make reflection clearer",
+    "strength": 0.45,
+}
+
+
+def test_region_mask_valid_rect_200(tmp_path):
+    """Valid rect → 200, correct response shape, geometry JSON persisted."""
+    _run_store.clear()
+    parent_dir = _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/region-mask",
+        json=_VALID_REGION_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["region_id"] == "region_water"
+    assert body["mask_artifact_id"] == "mask:region_water"
+    assert body["mask_url"] == "/png-shader/runs/run_parent/artifacts/mask:region_water"
+    assert body["geometry"] == {"x": 0.05, "y": 0.58, "w": 0.90, "h": 0.34}
+
+    # geometry JSON must be persisted under run_dir/region_masks/
+    mask_file = parent_dir / "region_masks" / "region_water.json"
+    assert mask_file.exists(), f"mask file not written: {mask_file}"
+    import json as _json
+    data = _json.loads(mask_file.read_text())
+    assert data["id"] == "region_water"
+    assert data["geometry"] == {"x": 0.05, "y": 0.58, "w": 0.90, "h": 0.34}
+
+
+def test_region_mask_out_of_bounds_rect_422(tmp_path):
+    """Out-of-bounds rect (x+w > 1) → 422 with region_errors mentioning region_id."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    bad_body = dict(_VALID_REGION_BODY)
+    bad_body["geometry"] = {"x": 0.8, "y": 0.0, "w": 0.5, "h": 0.5}  # x+w = 1.3 > 1
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/region-mask",
+        json=bad_body,
+    )
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert "region_errors" in detail
+    errors = detail["region_errors"]
+    assert any("region_water" in e for e in errors), f"region_id missing from errors: {errors}"
+
+
+def test_region_mask_unknown_run_404(tmp_path):
+    """Unknown run_id → 404."""
+    _run_store.clear()
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/ghost_run/region-mask",
+        json=_VALID_REGION_BODY,
+    )
+    assert resp.status_code == 404, resp.text
+
+
+def test_region_mask_with_render_computes_metrics(tmp_path):
+    """With reference + render PNG present → metrics["regions"] contains region_id,
+    and region_metrics/<id>.json is persisted."""
+    _run_store.clear()
+    parent_dir = _seed_parent(tmp_path)
+
+    # Write the render PNG that resolve_checkpoint_artifact expects:
+    # selected_id = "llm_0" → <run_dir>/candidates/llm_0_render.png
+    cands_dir = parent_dir / "candidates"
+    cands_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (32, 32), (80, 180, 40, 255)).save(cands_dir / "llm_0_render.png")
+
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/region-mask",
+        json=_VALID_REGION_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["metrics"] is not None, "metrics should not be null when render present"
+    assert "region_water" in body["metrics"]["regions"], (
+        f"region_water missing from metrics regions: {body['metrics']['regions']}"
+    )
+
+    # region_metrics JSON must be persisted
+    metrics_file = parent_dir / "region_metrics" / "region_water.json"
+    assert metrics_file.exists(), f"metrics file not written: {metrics_file}"
+
+
+def test_region_mask_without_render_metrics_null(tmp_path):
+    """No render PNG → metrics is null and request still 200."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    # Do NOT write any render PNG — candidates/ dir does not exist.
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/region-mask",
+        json=_VALID_REGION_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["metrics"] is None, f"expected metrics=null when render absent, got {body['metrics']}"

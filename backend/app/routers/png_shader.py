@@ -60,11 +60,14 @@ from app.pipeline.human_feedback import (
 )
 from app.pipeline.human_constraints import (
     HumanConstraintSpec,
+    RegionConstraint,
     build_constraint_notes,
     parse_constraint_spec,
     spec_to_dict,
     validate_constraint_spec,
 )
+from app.pipeline.region_metrics import compute_region_metrics
+from app.pipeline.artifacts import save_json
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
 from app.pipeline.run_index import (
     RunIndexError,
@@ -2397,3 +2400,114 @@ async def rate_variant(group_id: str, payload: dict) -> dict:
     log_event(logger, "variant_rated", group_id=group_id, run_id=run_id, rating=rating)
 
     return {"group_id": group_id, "run_id": run_id, "rating": rating}
+
+
+# ---------------------------------------------------------------------------
+# V4.2 region-mask endpoint
+# ---------------------------------------------------------------------------
+
+@router.post("/runs/{run_id}/region-mask")
+async def region_mask(run_id: str, payload: dict) -> dict:
+    """Validate, persist, and compute metrics for a normalized region rect.
+
+    Body: { region_id, geometry_type?, geometry, label?, mode?, instruction?, strength? }
+    Returns: { region_id, mask_artifact_id, mask_url, geometry, metrics }
+    """
+    # 1. Payload must be a dict (FastAPI handles JSON body; guard against non-dict).
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    # 2. Look up run.
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+    # 3. Build RegionConstraint — region_id is required.
+    region_id = payload.get("region_id")
+    if not region_id or not str(region_id).strip():
+        raise HTTPException(status_code=422, detail="region_id is required and must be non-blank")
+    region_id = str(region_id).strip()
+
+    region = RegionConstraint(
+        id=region_id,
+        label=str(payload.get("label") or region_id),
+        mode=str(payload.get("mode") or "modify"),
+        instruction=str(payload.get("instruction") or ""),
+        geometry_type=str(payload.get("geometry_type") or "rect"),
+        geometry=payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {},
+        strength=float(payload["strength"]) if "strength" in payload else 0.5,
+    )
+
+    # 4. Validate via HumanConstraintSpec wrapper.
+    spec = HumanConstraintSpec(regions=[region])
+    errors = validate_constraint_spec(spec)
+    if errors:
+        raise HTTPException(status_code=422, detail={"region_errors": errors})
+
+    run_dir = stored.get("run_dir")
+
+    # 5. Persist geometry best-effort.
+    region_dict = {
+        "id": region.id,
+        "label": region.label,
+        "mode": region.mode,
+        "instruction": region.instruction,
+        "geometry_type": region.geometry_type,
+        "geometry": region.geometry,
+        "strength": region.strength,
+    }
+    if run_dir:
+        try:
+            mask_path = Path(run_dir) / "region_masks" / f"{region_id}.json"
+            save_json(mask_path, region_dict)
+        except Exception:
+            logger.warning(
+                "region_mask: failed to persist geometry for region_id=%s run_id=%s",
+                region_id, run_id, exc_info=True,
+            )
+
+    # 6. Compute region metrics if both reference and selected render are available.
+    metrics: dict | None = None
+    if run_dir:
+        try:
+            reference_path = Path(run_dir) / "reference_input.png"
+            # Resolve selected render: reuse the same logic as GET /artifacts/selected_render.
+            # That maps to candidate:selected + kind=render → <run_dir>/candidates/<selected_id>_render.png
+            from app.pipeline.checkpoints import _selected_candidate
+            selected_cand = _selected_candidate(stored)
+            render_path: Path | None = None
+            if selected_cand is not None:
+                sid = selected_cand.get("id")
+                if sid:
+                    render_path = Path(run_dir) / "candidates" / f"{sid}_render.png"
+
+            if (
+                reference_path.exists()
+                and render_path is not None
+                and render_path.exists()
+            ):
+                metrics = compute_region_metrics(reference_path, render_path, [region])
+                # Persist region metrics best-effort.
+                try:
+                    metrics_path = Path(run_dir) / "region_metrics" / f"{region_id}.json"
+                    save_json(metrics_path, metrics)
+                except Exception:
+                    logger.warning(
+                        "region_mask: failed to persist metrics for region_id=%s run_id=%s",
+                        region_id, run_id, exc_info=True,
+                    )
+        except Exception:
+            logger.warning(
+                "region_mask: metrics computation failed for region_id=%s run_id=%s",
+                region_id, run_id, exc_info=True,
+            )
+            metrics = None
+
+    return {
+        "region_id": region_id,
+        "mask_artifact_id": f"mask:{region_id}",
+        "mask_url": f"/png-shader/runs/{run_id}/artifacts/mask:{region_id}",
+        "geometry": region.geometry,
+        "metrics": metrics,
+    }
