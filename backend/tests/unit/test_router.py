@@ -2886,3 +2886,62 @@ def test_region_mask_without_render_metrics_null(tmp_path):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["metrics"] is None, f"expected metrics=null when render absent, got {body['metrics']}"
+
+
+# ---------------------------------------------------------------------------
+# V4.2 security + robustness fixes
+# ---------------------------------------------------------------------------
+
+def test_region_mask_traversal_region_id_422(tmp_path):
+    """region_id values containing path-traversal characters → 422, no file written outside run_dir."""
+    _run_store.clear()
+    parent_dir = _seed_parent(tmp_path)
+    client = _client()
+
+    bad_ids = ["../../etc/shadow", "foo/bar", "../x", ".."]
+    for bad_id in bad_ids:
+        body = dict(_VALID_REGION_BODY)
+        body["region_id"] = bad_id
+        resp = client.post("/png-shader/runs/run_parent/region-mask", json=body)
+        assert resp.status_code == 422, (
+            f"Expected 422 for region_id={bad_id!r}, got {resp.status_code}: {resp.text}"
+        )
+
+    # No stray .json files must have been written outside run_dir's parent.
+    parent_of_run_dir = parent_dir.parent
+    stray = list(parent_of_run_dir.glob("*.json"))
+    assert not stray, f"stray .json files written outside run_dir: {stray}"
+
+
+def test_region_mask_blank_region_id_422(tmp_path):
+    """Missing or whitespace-only region_id → 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    # Empty body (no region_id key)
+    resp = client.post("/png-shader/runs/run_parent/region-mask", json={})
+    assert resp.status_code == 422, f"Expected 422 for missing region_id, got {resp.status_code}"
+
+    # Whitespace-only region_id
+    resp2 = client.post(
+        "/png-shader/runs/run_parent/region-mask",
+        json={"region_id": "  "},
+    )
+    assert resp2.status_code == 422, (
+        f"Expected 422 for whitespace region_id, got {resp2.status_code}"
+    )
+
+
+def test_region_mask_bad_strength_422(tmp_path):
+    """Non-numeric strength value → 422, not 500."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    body = dict(_VALID_REGION_BODY)
+    body["strength"] = "abc"
+    resp = client.post("/png-shader/runs/run_parent/region-mask", json=body)
+    assert resp.status_code == 422, (
+        f"Expected 422 for non-numeric strength, got {resp.status_code}: {resp.text}"
+    )

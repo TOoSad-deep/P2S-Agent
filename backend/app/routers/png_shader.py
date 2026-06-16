@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
 import shutil
 import tempfile
 import threading
@@ -27,6 +28,7 @@ from app.llm.model_resolver import ModelResolutionError, resolve_model_config
 
 from app.pipeline.checkpoints import (
     CheckpointError,
+    _selected_candidate,
     build_timeline,
     checkpoint_metadata,
     list_checkpoints,
@@ -110,6 +112,10 @@ _DRAW_SESSIONS_ROOT: Optional[str] = None  # tests override to isolate
 _DRAW_CARD_EVENT_TYPES: frozenset[str] = frozenset({
     "favorite", "eliminate", "tag", "note", "use_as_fusion_base", "use_as_region_source",
 })
+
+# V4.2: allowlist regex for region_id — mirrors _CANDIDATE_ID_RE in checkpoints.py.
+# Rejects path-traversal characters (/, ..) and leading dots.
+_REGION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 
 # ---------------------------------------------------------------------------
@@ -2423,11 +2429,24 @@ async def region_mask(run_id: str, payload: dict) -> dict:
     if stored is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
-    # 3. Build RegionConstraint — region_id is required.
+    # 3. Build RegionConstraint — region_id is required and must pass the allowlist.
     region_id = payload.get("region_id")
     if not region_id or not str(region_id).strip():
         raise HTTPException(status_code=422, detail="region_id is required and must be non-blank")
     region_id = str(region_id).strip()
+    if not _REGION_ID_RE.match(region_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f"region_id {region_id!r} contains disallowed characters",
+        )
+
+    if "strength" in payload:
+        try:
+            strength = float(payload["strength"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="strength must be a number")
+    else:
+        strength = 0.5
 
     region = RegionConstraint(
         id=region_id,
@@ -2436,7 +2455,7 @@ async def region_mask(run_id: str, payload: dict) -> dict:
         instruction=str(payload.get("instruction") or ""),
         geometry_type=str(payload.get("geometry_type") or "rect"),
         geometry=payload.get("geometry") if isinstance(payload.get("geometry"), dict) else {},
-        strength=float(payload["strength"]) if "strength" in payload else 0.5,
+        strength=strength,
     )
 
     # 4. Validate via HumanConstraintSpec wrapper.
@@ -2474,7 +2493,6 @@ async def region_mask(run_id: str, payload: dict) -> dict:
             reference_path = Path(run_dir) / "reference_input.png"
             # Resolve selected render: reuse the same logic as GET /artifacts/selected_render.
             # That maps to candidate:selected + kind=render → <run_dir>/candidates/<selected_id>_render.png
-            from app.pipeline.checkpoints import _selected_candidate
             selected_cand = _selected_candidate(stored)
             render_path: Path | None = None
             if selected_cand is not None:
