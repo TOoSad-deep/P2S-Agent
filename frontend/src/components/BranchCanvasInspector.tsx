@@ -1,10 +1,10 @@
 // BranchCanvasInspector.tsx — right-side inspector for the Branch Canvas Workspace (V2.1-5).
-// Switches content by selected node type: null / input / run / checkpoint / branch_action / reserved.
+// Switches content by selected node type: null / input / run / checkpoint / branch_action / variant_group / variant_run / reserved.
 // Presentational + callbacks only; branch-draft form owns local state. No data fetching.
 import { useState, useEffect } from "react";
-import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge } from "lucide-react";
+import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
-import type { BranchMode, BranchRefineRequest, ExploreVariantsRequest, VariantGroupStatus } from "../hooks/usePngShader";
+import type { BranchMode, BranchRefineRequest, ExploreVariantsRequest, VariantGroupStatus, VariantStatusEntry } from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
 
 // ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
@@ -483,6 +483,361 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, onExploreVaria
   );
 }
 
+// ─── Variant helpers ──────────────────────────────────────────────────────────
+
+const TERMINAL_STATUSES = new Set(["completed", "failed", "partial_failed", "cancelled"]);
+
+function statusDot(status: string): React.ReactElement {
+  const color =
+    status === "completed"
+      ? "bg-emerald-500"
+      : status === "running" || status === "queued"
+      ? "bg-yellow-400 animate-pulse"
+      : status === "failed"
+      ? "bg-red-500"
+      : status === "partial_failed"
+      ? "bg-orange-400"
+      : status === "cancelled"
+      ? "bg-[var(--text-muted)]"
+      : "bg-[var(--text-muted)]";
+  return <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${color}`} />;
+}
+
+// ─── Per-variant action row ────────────────────────────────────────────────
+
+interface VariantActionsProps {
+  v: VariantStatusEntry;
+  groupId: string;
+  winnerRunId?: string | null;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+  onRefineFromCheckpoint?: (runId: string, checkpointId: string) => void;
+  onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
+  onRateVariant?: (groupId: string, runId: string, rating: number) => void;
+  disabled?: boolean;
+}
+
+function VariantActions({
+  v,
+  groupId,
+  winnerRunId,
+  activeRunId,
+  onSwitchRun,
+  onRefineFromCheckpoint,
+  onSelectWinner,
+  onRateVariant,
+  disabled,
+}: VariantActionsProps) {
+  const isActive = v.run_id === activeRunId;
+  const isWinner = v.run_id === winnerRunId;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1 pt-1">
+      {/* Preview */}
+      <button
+        onClick={() => onSwitchRun(v.run_id)}
+        disabled={disabled || isActive}
+        title="预览此变体 Preview this variant"
+        className="px-2 py-0.5 text-[11px] rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+      >
+        预览 Preview
+      </button>
+
+      {/* Select winner */}
+      <button
+        onClick={() => onSelectWinner?.(groupId, v.run_id)}
+        disabled={disabled || isWinner || !onSelectWinner}
+        title="设为胜出 Select as winner"
+        className="px-2 py-0.5 text-[11px] rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+      >
+        设为胜出 Winner
+      </button>
+
+      {/* Continue (only for completed variants) */}
+      {v.status === "completed" && onRefineFromCheckpoint && (
+        <button
+          onClick={() => onRefineFromCheckpoint(v.run_id, "final:selected")}
+          disabled={disabled}
+          title="从此变体的最终结果继续 Continue from final"
+          className="px-2 py-0.5 text-[11px] rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          继续 Continue
+        </button>
+      )}
+
+      {/* Rate */}
+      <button
+        onClick={() => onRateVariant?.(groupId, v.run_id, 1)}
+        disabled={disabled || !onRateVariant}
+        title="好评 Thumbs up"
+        className="p-1 rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed text-[var(--text-muted)] hover:text-emerald-400"
+      >
+        <ThumbsUp className="w-3 h-3" />
+      </button>
+      <button
+        onClick={() => onRateVariant?.(groupId, v.run_id, -1)}
+        disabled={disabled || !onRateVariant}
+        title="差评 Thumbs down"
+        className="p-1 rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed text-[var(--text-muted)] hover:text-red-400"
+      >
+        <ThumbsDown className="w-3 h-3" />
+      </button>
+    </div>
+  );
+}
+
+// ─── Single variant card ──────────────────────────────────────────────────────
+
+interface VariantCardProps {
+  v: VariantStatusEntry;
+  groupId: string;
+  winnerRunId?: string | null;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+  onRefineFromCheckpoint?: (runId: string, checkpointId: string) => void;
+  onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
+  onRateVariant?: (groupId: string, runId: string, rating: number) => void;
+  disabled?: boolean;
+}
+
+function VariantCard({
+  v,
+  groupId,
+  winnerRunId,
+  activeRunId,
+  onSwitchRun,
+  onRefineFromCheckpoint,
+  onSelectWinner,
+  onRateVariant,
+  disabled,
+}: VariantCardProps) {
+  const isWinner = v.run_id === winnerRunId;
+
+  return (
+    <div
+      className={`flex flex-col gap-1 px-2 py-1.5 rounded-md border ${
+        isWinner
+          ? "border-emerald-500/40 bg-emerald-500/5"
+          : "border-[var(--border-color)] bg-[var(--bg-tertiary)]"
+      }`}
+    >
+      {/* Header row: index badge, label, status dot, score, winner star */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[10px] font-mono px-1 py-0.5 rounded bg-[var(--bg-secondary)] text-[var(--text-muted)]">
+          #{v.variant_index}
+        </span>
+        {statusDot(v.status)}
+        <span className="text-[11px] font-medium text-[var(--text-primary)] truncate flex-1 min-w-0">
+          {v.label}
+        </span>
+        <span className="text-[11px] font-mono text-[var(--text-muted)] shrink-0">
+          {fmtScore(v.final_score ?? v.current_score)}
+        </span>
+        {isWinner && (
+          <span title="胜出 Winner" className="shrink-0">
+            <Star className="w-3.5 h-3.5 text-emerald-400 fill-current" />
+          </span>
+        )}
+      </div>
+
+      {/* Changes summary */}
+      {v.changes_summary && (
+        <p className="text-[11px] text-[var(--text-secondary)] leading-snug">
+          {v.changes_summary}
+        </p>
+      )}
+
+      {/* Error */}
+      {v.error && (
+        <p className="text-[11px] text-red-400 leading-snug">{v.error}</p>
+      )}
+
+      {/* Actions */}
+      <VariantActions
+        v={v}
+        groupId={groupId}
+        winnerRunId={winnerRunId}
+        activeRunId={activeRunId}
+        onSwitchRun={onSwitchRun}
+        onRefineFromCheckpoint={onRefineFromCheckpoint}
+        onSelectWinner={onSelectWinner}
+        onRateVariant={onRateVariant}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
+// ─── VariantGroupView ────────────────────────────────────────────────────────
+
+interface VariantGroupViewProps {
+  node: BranchCanvasNode;
+  variantGroup: VariantGroupStatus | null | undefined;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+  onRefineFromCheckpoint?: (runId: string, checkpointId: string) => void;
+  onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
+  onStopGroup?: (groupId: string) => void;
+  onRateVariant?: (groupId: string, runId: string, rating: number) => void;
+  disabled?: boolean;
+}
+
+function VariantGroupView({
+  node,
+  variantGroup,
+  activeRunId,
+  onSwitchRun,
+  onRefineFromCheckpoint,
+  onSelectWinner,
+  onStopGroup,
+  onRateVariant,
+  disabled,
+}: VariantGroupViewProps) {
+  const groupId = node.data.group_id as string;
+
+  // Use the live group only when its id matches the selected node
+  const group = variantGroup?.group_id === groupId ? variantGroup : null;
+
+  if (!group) {
+    return (
+      <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
+        加载分组中…
+        <br />
+        <span className="opacity-70">Loading group…</span>
+      </p>
+    );
+  }
+
+  const isTerminal = TERMINAL_STATUSES.has(group.status);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Header: status badge + feedback + stop button */}
+      <div className="flex items-start gap-2">
+        <div className="flex items-center gap-1.5 flex-1 min-w-0 flex-wrap">
+          {statusDot(group.status)}
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] font-mono shrink-0">
+            {group.status}
+          </span>
+          {group.feedback && (
+            <span className="text-[11px] text-[var(--text-secondary)] truncate">{group.feedback}</span>
+          )}
+        </div>
+        {/* Stop group button */}
+        <button
+          onClick={() => onStopGroup?.(groupId)}
+          disabled={disabled || isTerminal || !onStopGroup}
+          title="停止分组 Stop group"
+          className="flex items-center gap-1 px-2 py-0.5 text-[11px] rounded transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-red-500/20 hover:text-red-400"
+        >
+          <StopCircle className="w-3 h-3" />
+          停止 Stop
+        </button>
+      </div>
+
+      {/* Feedback block (full text, if truncated above) */}
+      {group.feedback && (
+        <div className="text-[11px] text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded p-2 leading-relaxed">
+          <span className="text-[var(--text-muted)]">反馈 Feedback: </span>
+          {group.feedback}
+        </div>
+      )}
+
+      {/* Variant cards */}
+      {group.variants.length > 0 ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[11px] text-[var(--text-muted)]">
+            变体 Variants ({group.variants.length})
+          </p>
+          {group.variants.map((v) => (
+            <VariantCard
+              key={v.run_id}
+              v={v}
+              groupId={groupId}
+              winnerRunId={group.winner_run_id}
+              activeRunId={activeRunId}
+              onSwitchRun={onSwitchRun}
+              onRefineFromCheckpoint={onRefineFromCheckpoint}
+              onSelectWinner={onSelectWinner}
+              onRateVariant={onRateVariant}
+              disabled={disabled}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-[11px] text-[var(--text-muted)]">暂无变体 No variants yet</p>
+      )}
+    </div>
+  );
+}
+
+// ─── VariantRunDetailView ────────────────────────────────────────────────────
+
+interface VariantRunDetailViewProps {
+  node: BranchCanvasNode;
+  variantGroup: VariantGroupStatus | null | undefined;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+  onRefineFromCheckpoint?: (runId: string, checkpointId: string) => void;
+  onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
+  onRateVariant?: (groupId: string, runId: string, rating: number) => void;
+  disabled?: boolean;
+}
+
+function VariantRunDetailView({
+  node,
+  variantGroup,
+  activeRunId,
+  onSwitchRun,
+  onRefineFromCheckpoint,
+  onSelectWinner,
+  onRateVariant,
+  disabled,
+}: VariantRunDetailViewProps) {
+  const runId = node.data.run_id as string;
+  const variantGroupId = node.data.variant_group_id as string | undefined;
+
+  // Match the group only when its id aligns with this variant run's group
+  const group =
+    variantGroup?.group_id === variantGroupId ? variantGroup : null;
+  const entry = group?.variants.find((v) => v.run_id === runId) ?? null;
+
+  if (!group || !entry) {
+    return (
+      <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
+        加载变体中…
+        <br />
+        <span className="opacity-70">Loading variant…</span>
+      </p>
+    );
+  }
+
+  const groupId = group.group_id;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Back-ref: which group */}
+      <p className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={groupId}>
+        分组 Group: {groupId.slice(-8)}
+      </p>
+
+      {/* Single variant card (reuse the same card component) */}
+      <VariantCard
+        key={node.id}
+        v={entry}
+        groupId={groupId}
+        winnerRunId={group.winner_run_id}
+        activeRunId={activeRunId}
+        onSwitchRun={onSwitchRun}
+        onRefineFromCheckpoint={onRefineFromCheckpoint}
+        onSelectWinner={onSelectWinner}
+        onRateVariant={onRateVariant}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
 function ReservedNodeView() {
   return (
     <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
@@ -505,7 +860,10 @@ export default function BranchCanvasInspector({
   onSubmitBranch,
   onCancelBranch,
   onExploreVariants,
-  // variantGroup, onSelectWinner, onStopGroup, onRateVariant used in next task (V3-8)
+  variantGroup,
+  onSelectWinner,
+  onStopGroup,
+  onRateVariant,
   disabled,
   submitError,
 }: Props) {
@@ -557,9 +915,38 @@ export default function BranchCanvasInspector({
           />
         );
 
-      // Reserved V3/V4 types
       case "variant_group":
+        return (
+          <VariantGroupView
+            key={node.id}
+            node={node}
+            variantGroup={variantGroup}
+            activeRunId={activeRunId}
+            onSwitchRun={onSwitchRun}
+            onRefineFromCheckpoint={onRefineFromCheckpoint}
+            onSelectWinner={onSelectWinner}
+            onStopGroup={onStopGroup}
+            onRateVariant={onRateVariant}
+            disabled={disabled}
+          />
+        );
+
       case "variant_run":
+        return (
+          <VariantRunDetailView
+            key={node.id}
+            node={node}
+            variantGroup={variantGroup}
+            activeRunId={activeRunId}
+            onSwitchRun={onSwitchRun}
+            onRefineFromCheckpoint={onRefineFromCheckpoint}
+            onSelectWinner={onSelectWinner}
+            onRateVariant={onRateVariant}
+            disabled={disabled}
+          />
+        );
+
+      // Reserved V4 types
       case "region_constraint":
       case "preference":
         return <ReservedNodeView />;
