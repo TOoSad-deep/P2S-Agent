@@ -1881,3 +1881,156 @@ def test_get_variant_group_winner_sorted_first(tmp_path, monkeypatch):
     assert resp.status_code == 200
     variants = resp.json()["variants"]
     assert variants[0]["run_id"] == "ws_b", "Winner must appear first regardless of score"
+
+
+def test_winner_persists_run_index_favorite_and_appends_event(tmp_path, monkeypatch):
+    """POST /winner seeds the winner into the run index, then verifies
+    favorite=True is persisted there and a 'winner' event is appended."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    # Seed children and group.
+    children = [
+        {"run_id": "wi_a", "status": "completed", "variant_index": 0, "variant_label": "A",
+         "quality_router": {"final_score": 0.85}},
+        {"run_id": "wi_b", "status": "completed", "variant_index": 1, "variant_label": "B",
+         "quality_router": {"final_score": 0.60}},
+    ]
+    _seed_group(vg_root, group_id="group_windex", children=children)
+
+    # Seed the winner run into the run index before calling the endpoint.
+    from app.pipeline.run_index import RunLineageRecord, append_run_created, load_run_index
+    idx_path = tmp_path / "ri.jsonl"
+    winner_rec = RunLineageRecord(
+        run_id="wi_a",
+        root_run_id="run_parent",
+        parent_run_id="run_parent",
+        source_checkpoint_id="final:selected",
+        source_checkpoint_label=None,
+        mode="explore",
+        feedback="make it brighter",
+        title=None,
+        status="completed",
+        run_dir=None,
+        created_at=1.0,
+        final_score=0.85,
+        variant_group_id="group_windex",
+        variant_index=0,
+        variant_label="A",
+    )
+    append_run_created(winner_rec, path=idx_path)
+
+    client = _client()
+    resp = client.post(
+        "/png-shader/variant-groups/group_windex/winner",
+        json={"winner_run_id": "wi_a", "reason": "highest score"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Verify favorite=True written into the run index.
+    index = load_run_index(path=idx_path)
+    assert "wi_a" in index, "winner run_id must be in index"
+    assert index["wi_a"].favorite is True, "favorite must be True after /winner"
+
+    # Verify 'winner' event was appended to the group event log.
+    from app.pipeline.variant_groups import load_group_events
+    evs = load_group_events("group_windex", root=vg_root)
+    assert any(
+        e.get("event") == "winner" and e.get("run_id") == "wi_a"
+        for e in evs
+    ), f"Expected a 'winner' event for wi_a in events: {evs}"
+
+
+def test_winner_save_group_failure_returns_500(tmp_path, monkeypatch):
+    """If save_group raises, POST /winner must return 500 (not silently succeed)."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    children = [
+        {"run_id": "wf_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
+    ]
+    _seed_group(vg_root, group_id="group_wfail", children=children)
+
+    # Patch save_group to simulate an I/O failure.
+    monkeypatch.setattr(
+        "app.routers.png_shader.save_group",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    client = _client()
+    resp = client.post(
+        "/png-shader/variant-groups/group_wfail/winner",
+        json={"winner_run_id": "wf_a"},
+    )
+    assert resp.status_code == 500, resp.text
+    assert "persist" in resp.json().get("detail", "").lower()
+
+
+def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
+    """GET /variant-groups/{id}: a child evicted from _run_store but present in
+    the run index must appear in variants using index-derived status and favorite."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    # Seed a group with one child, but do NOT put that child in _run_store.
+    from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
+    rec = VariantGroupRecord(
+        group_id="group_evict",
+        root_run_id="run_parent",
+        parent_run_id="run_parent",
+        source_checkpoint_id="final:selected",
+        feedback="test eviction",
+        mode="explore",
+        variant_count=1,
+        diversity="medium",
+        status="completed",
+        child_run_ids=["ev_run"],
+        created_at=1.0,
+    )
+    _save_group(rec, root=vg_root)
+    # _run_store intentionally left empty — ev_run is "evicted".
+
+    # Seed ev_run into the run index (as if it was previously completed).
+    from app.pipeline.run_index import RunLineageRecord, append_run_created
+    idx_path = tmp_path / "ri.jsonl"
+    ev_rec = RunLineageRecord(
+        run_id="ev_run",
+        root_run_id="run_parent",
+        parent_run_id="run_parent",
+        source_checkpoint_id="final:selected",
+        source_checkpoint_label=None,
+        mode="explore",
+        feedback="test eviction",
+        title=None,
+        status="completed",
+        run_dir=None,
+        created_at=1.0,
+        final_score=0.72,
+        favorite=True,
+        variant_group_id="group_evict",
+        variant_index=0,
+        variant_label="evicted_variant",
+    )
+    append_run_created(ev_rec, path=idx_path)
+
+    client = _client()
+    resp = client.get("/png-shader/variant-groups/group_evict")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    variants = body["variants"]
+    assert len(variants) == 1
+
+    v = variants[0]
+    assert v["run_id"] == "ev_run"
+    assert v["status"] == "completed", f"expected 'completed', got {v['status']!r}"
+    assert v["final_score"] == 0.72, f"expected 0.72, got {v['final_score']!r}"
+    assert v["favorite"] is True, "run-index favorite must be reflected in evicted child"

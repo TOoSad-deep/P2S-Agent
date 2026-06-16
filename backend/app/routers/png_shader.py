@@ -1457,12 +1457,17 @@ async def stop_run(run_id: str) -> dict:
 _STATUS_RANK = {"completed": 0, "running": 1, "queued": 2, "cancelled": 3, "failed": 4}
 
 
-@router.get("/variant-groups/{group_id}")
-async def get_variant_group(group_id: str) -> dict:
-    """Return aggregated status + sorted variants for a variant group."""
+def _get_group_or_404(group_id: str):
     record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+    return record
+
+
+@router.get("/variant-groups/{group_id}")
+async def get_variant_group(group_id: str) -> dict:
+    """Return aggregated status + sorted variants for a variant group."""
+    record = _get_group_or_404(group_id)
 
     # Build per-child variant dicts.
     index_records = load_run_index(path=_RUN_INDEX_PATH)
@@ -1564,9 +1569,7 @@ async def get_variant_group(group_id: str) -> dict:
 @router.post("/variant-groups/{group_id}/stop")
 async def stop_variant_group(group_id: str) -> dict:
     """Signal all queued/running children of a variant group to stop."""
-    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+    record = _get_group_or_404(group_id)
 
     with _run_store_lock:
         for run_id in record.child_run_ids:
@@ -1592,9 +1595,7 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+    record = _get_group_or_404(group_id)
 
     winner_run_id = payload.get("winner_run_id")
     if not winner_run_id or winner_run_id not in record.child_run_ids:
@@ -1606,8 +1607,9 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
     record.winner_run_id = winner_run_id
     try:
         save_group(record, root=_VARIANT_GROUPS_ROOT)
-    except Exception:
-        logger.warning("save_group failed for group_id=%s", group_id, exc_info=True)
+    except Exception as exc:
+        logger.error("save_group failed for group_id=%s", group_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to persist winner") from exc
 
     # Mark the winner favorite in the run index (best-effort).
     try:
@@ -1650,9 +1652,7 @@ async def rate_variant(group_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+    record = _get_group_or_404(group_id)
 
     run_id = payload.get("run_id")
     if not run_id or run_id not in record.child_run_ids:
