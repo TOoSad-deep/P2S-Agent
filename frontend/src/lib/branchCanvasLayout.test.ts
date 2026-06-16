@@ -339,4 +339,26 @@ describe("layoutBranchCanvas", () => {
     expect(mystery).toBeDefined();
     expect(mystery.position).toEqual({ x: 42, y: 100 });
   });
+
+  // ── 13. Orphan run (unknown parent_run_id) treated as root ────────────────
+  it("places an orphan run (unknown parent_run_id) as a root without crashing", () => {
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode("orphan", "does-not-exist"),
+    ];
+    expect(() => layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES)).not.toThrow();
+    const result = layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES);
+    const orphan = result.find((n) => n.id === "run:orphan")!;
+    expect(orphan.position.x).toBe(COLUMN_WIDTH); // treated as a depth-0 root
+  });
+
+  // ── 14. No infinite-loop on a parent cycle (A.parent=B, B.parent=A) ───────
+  it("does not infinite-loop on a parent cycle (A.parent=B, B.parent=A)", () => {
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode("A", "B"),
+      makeRunNode("B", "A"),
+    ];
+    expect(() => layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES)).not.toThrow();
+  });
 });

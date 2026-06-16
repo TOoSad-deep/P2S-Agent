@@ -30,6 +30,8 @@ interface RunEntry {
  * - Apply layoutOverrides last: any node id in overrides gets that exact position.
  * - Unknown-type nodes keep their incoming position.
  * - Inputs are not mutated; every returned node is a shallow clone with a new position object.
+ * - `_edges` is accepted but currently unused; reserved for future constraint-aware layout.
+ * - Checkpoint nodes whose run_id is absent from the node list keep their incoming position (typically {0,0}).
  */
 export function layoutBranchCanvas(
   nodes: BranchCanvasNode[],
@@ -42,7 +44,6 @@ export function layoutBranchCanvas(
   const runNodes: BranchCanvasNode[] = [];
   // Map from run_id → ordered list of checkpoint nodes (preserving input order)
   const cpByRunId = new Map<string, BranchCanvasNode[]>();
-  const unknownNodes: BranchCanvasNode[] = [];
 
   for (const node of nodes) {
     const nodeType = (node.data as { type?: string }).type;
@@ -59,11 +60,7 @@ export function layoutBranchCanvas(
           cpByRunId.set(runId, list);
         }
         list.push(node);
-      } else {
-        unknownNodes.push(node);
       }
-    } else {
-      unknownNodes.push(node);
     }
   }
 
