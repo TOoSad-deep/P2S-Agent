@@ -1293,6 +1293,7 @@ def _fold_draw_overlay(draw_id: str) -> dict[str, dict]:
             if tags:
                 existing = cur.get("tags") or []
                 merged = list(existing)
+                # Tags are append-only in V3.5 (no untag event type); each tag event unions in new tags.
                 for t in tags:
                     if t not in merged:
                         merged.append(t)
@@ -1439,7 +1440,7 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail="quality must be an object")
 
     feedback = record.feedback
-    mode = record.metadata.get("mode", "batch_draw")
+    mode = record.mode
     request_locks = record.metadata.get("locks") or {}
     diversity = str(payload.get("diversity") or record.diversity)
     checkpoint_id = record.source_checkpoint_id
@@ -1520,7 +1521,7 @@ async def redraw_card(draw_id: str, payload: dict) -> dict:
     parent = _draw_parent_or_409(record)
     diversity = str(payload.get("diversity") or "medium")
     feedback = record.feedback
-    mode = record.metadata.get("mode", "batch_draw")
+    mode = record.mode
     request_locks = record.metadata.get("locks") or {}
     quality = record.metadata.get("quality") or {}
     checkpoint_id = record.source_checkpoint_id
@@ -1529,6 +1530,7 @@ async def redraw_card(draw_id: str, payload: dict) -> dict:
     _prevalidate_draw_quality(reference_path, quality)
 
     # Build a ONE-element strategies list.
+    # build_variant_strategies requires count>=2, so we request 2 and take only the first.
     strategies = build_variant_strategies(
         feedback=feedback, count=2, diversity=diversity, mode=mode,
     )[:1]
@@ -1593,6 +1595,9 @@ async def draw_card_event(draw_id: str, run_id: str, payload: dict) -> dict:
     """Record a per-card review event (favorite/eliminate/tag/note/use_as_*).
 
     Body: { event_type (required), value?, reason?, tags?=[] }
+
+    Note: ``tag`` events are append-only in V3.5 (no untag); ``eliminate``/``favorite``
+    accept value=false to clear.
     """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
@@ -1608,12 +1613,15 @@ async def draw_card_event(draw_id: str, run_id: str, payload: dict) -> dict:
             detail=f"event_type must be one of {sorted(_DRAW_CARD_EVENT_TYPES)}",
         )
 
-    append_session_event(
-        draw_id,
-        {"event": event_type, "run_id": run_id, "value": payload.get("value"),
-         "reason": payload.get("reason"), "tags": payload.get("tags") or [], "at": time()},
-        root=_DRAW_SESSIONS_ROOT,
-    )
+    try:
+        append_session_event(
+            draw_id,
+            {"event": event_type, "run_id": run_id, "value": payload.get("value"),
+             "reason": payload.get("reason"), "tags": payload.get("tags") or [], "at": time()},
+            root=_DRAW_SESSIONS_ROOT,
+        )
+    except Exception:
+        logger.warning("append_session_event failed for draw_id=%s", draw_id, exc_info=True)
 
     if event_type == "favorite":
         favorite = bool(payload.get("value", True))
@@ -1623,6 +1631,8 @@ async def draw_card_event(draw_id: str, run_id: str, payload: dict) -> dict:
             pass
         except Exception:
             logger.warning("draw favorite mirror failed for run_id=%s", run_id, exc_info=True)
+        # Mirror to run-store for the /status/{run_id} consumer; draw-session GET
+        # treats the events overlay as authoritative.
         with _run_store_lock:
             stored = _run_store.get(run_id)
             if stored is not None:

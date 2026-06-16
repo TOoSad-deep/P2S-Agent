@@ -2531,3 +2531,40 @@ def test_draw_session_card_event_422_non_member(tmp_path):
         json={"event_type": "favorite", "value": True},
     )
     assert resp.status_code == 422
+
+
+def test_draw_session_card_event_un_eliminate(tmp_path):
+    """eliminate=true followed by eliminate=false -> later-overrides-earlier fold:
+    card eliminated must be false after the second event."""
+    _run_store.clear()
+    _run_store["c_ue"] = {
+        "run_id": "c_ue", "status": "completed", "variant_index": 0,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {"final_score": 0.5}, "refinement_history": [],
+    }
+    _seed_draw_session(tmp_path, draw_id="draw_ue", card_run_ids=["c_ue"])
+    client = _client()
+
+    # First: eliminate the card.
+    ev1 = client.post(
+        "/png-shader/draw-sessions/draw_ue/cards/c_ue/event",
+        json={"event_type": "eliminate", "value": True},
+    )
+    assert ev1.status_code == 200, ev1.text
+    assert ev1.json()["ok"] is True
+
+    body1 = client.get("/png-shader/draw-sessions/draw_ue").json()
+    card1 = next(c for c in body1["cards"] if c["run_id"] == "c_ue")
+    assert card1["eliminated"] is True, "card must be eliminated after first event"
+
+    # Second: clear the elimination.
+    ev2 = client.post(
+        "/png-shader/draw-sessions/draw_ue/cards/c_ue/event",
+        json={"event_type": "eliminate", "value": False},
+    )
+    assert ev2.status_code == 200, ev2.text
+    assert ev2.json()["ok"] is True
+
+    body2 = client.get("/png-shader/draw-sessions/draw_ue").json()
+    card2 = next(c for c in body2["cards"] if c["run_id"] == "c_ue")
+    assert card2["eliminated"] is False, "card must not be eliminated after value=false event"
