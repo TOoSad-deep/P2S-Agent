@@ -241,6 +241,48 @@ export interface BranchRefineRequest {
   quality?: Partial<StrategyConfig>;
 }
 
+export interface ExploreVariantsRequest {
+  checkpoint_id: string;
+  feedback: string;
+  variant_count?: number;       // 2..6, default 4
+  diversity?: "low" | "medium" | "high";
+  mode?: string;                // "explore"
+  quality?: Partial<StrategyConfig>;
+  stop_parent?: boolean;
+}
+
+export interface ExploreVariantsResponse {
+  group_id: string;
+  status: string;
+  parent_run_id: string;
+  source_checkpoint_id: string;
+  child_run_ids: string[];
+}
+
+export interface VariantStatusEntry {
+  run_id: string;
+  variant_index: number;
+  label: string;
+  status: string;
+  final_score?: number | null;
+  current_score?: number | null;
+  selected_glsl?: string | null;
+  thumbnail_url?: string | null;
+  changes_summary?: string | null;
+  error?: string | null;
+  favorite?: boolean;
+}
+
+export interface VariantGroupStatus {
+  group_id: string;
+  parent_run_id: string;
+  source_checkpoint_id: string;
+  feedback: string;
+  status: "queued" | "running" | "completed" | "partial_failed" | "failed" | "cancelled" | string;
+  winner_run_id?: string | null;
+  variants: VariantStatusEntry[];
+}
+
 export type LlmMode = "off" | "auto" | "on";
 
 export interface ParameterizeResult {
@@ -701,6 +743,95 @@ export function usePngShader() {
     }
   }, [pollStatus, stopPolling]);
 
+  // V3: Variant exploration — submit, poll, stop, select winner, rate.
+  const exploreVariants = useCallback(async (
+    parentRunId: string,
+    request: ExploreVariantsRequest,
+  ): Promise<ExploreVariantsResponse | null> => {
+    const requestId = makeRequestId("explore-variants");
+    logFrontendEvent("api_explore_variants_submit", {
+      request_id: requestId,
+      parent_run_id: parentRunId,
+      checkpoint_id: request.checkpoint_id,
+      feedback_len: request.feedback.length,
+      variant_count: request.variant_count,
+    });
+    const response = await fetch(`${API_BASE}/png-shader/runs/${parentRunId}/explore-variants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-request-id": requestId, "x-run-id": parentRunId },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_explore_variants_failed", { request_id: requestId, parent_run_id: parentRunId, status: response.status }, "warn");
+      throw new Error(`Explore variants failed (${response.status}): ${text}`);
+    }
+    const data: ExploreVariantsResponse = await response.json();
+    return data;
+  }, []);
+
+  const fetchVariantGroup = useCallback(async (groupId: string): Promise<VariantGroupStatus> => {
+    const requestId = makeRequestId("variant-group");
+    const response = await fetch(`${API_BASE}/png-shader/variant-groups/${groupId}`, {
+      headers: { "x-request-id": requestId },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_variant_group_failed", { request_id: requestId, group_id: groupId, status: response.status }, "warn");
+      throw new Error(`Variant group failed (${response.status}): ${text}`);
+    }
+    const data: VariantGroupStatus = await response.json();
+    return data;
+  }, []);
+
+  const stopVariantGroup = useCallback(async (groupId: string): Promise<void> => {
+    const requestId = makeRequestId("variant-group-stop");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/variant-groups/${groupId}/stop`, {
+        method: "POST",
+        headers: { "x-request-id": requestId },
+      });
+      logFrontendEvent("api_variant_group_stop", { request_id: requestId, group_id: groupId, status: response.status }, response.ok ? "info" : "warn");
+    } catch {
+      logFrontendEvent("api_variant_group_stop", { group_id: groupId, error: "network error" }, "warn");
+    }
+  }, []);
+
+  const selectVariantWinner = useCallback(async (groupId: string, runId: string, reason?: string): Promise<void> => {
+    const requestId = makeRequestId("variant-winner");
+    const response = await fetch(`${API_BASE}/png-shader/variant-groups/${groupId}/winner`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-request-id": requestId },
+      body: JSON.stringify({ winner_run_id: runId, reason }),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_variant_winner", { request_id: requestId, group_id: groupId, run_id: runId, status: response.status }, "warn");
+      throw new Error(`Select winner failed (${response.status}): ${text}`);
+    }
+    logFrontendEvent("api_variant_winner", { request_id: requestId, group_id: groupId, run_id: runId, status: response.status });
+  }, []);
+
+  const rateVariant = useCallback(async (
+    groupId: string,
+    runId: string,
+    rating: number,
+    reason?: string,
+    tags?: string[],
+  ): Promise<void> => {
+    const requestId = makeRequestId("variant-rate");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/variant-groups/${groupId}/ratings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify({ run_id: runId, rating, reason, tags }),
+      });
+      logFrontendEvent("api_variant_rate", { request_id: requestId, group_id: groupId, run_id: runId, rating, status: response.status }, response.ok ? "info" : "warn");
+    } catch {
+      logFrontendEvent("api_variant_rate", { group_id: groupId, run_id: runId, error: "network error" }, "warn");
+    }
+  }, []);
+
   const clearResult = useCallback(() => {
     stopPolling();
     activeRunRef.current = null;
@@ -735,6 +866,11 @@ export function usePngShader() {
     updateRunMetadata,
     switchRun,
     branchRefine,
+    exploreVariants,
+    fetchVariantGroup,
+    stopVariantGroup,
+    selectVariantWinner,
+    rateVariant,
   };
 }
 
