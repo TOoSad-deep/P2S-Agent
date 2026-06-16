@@ -463,3 +463,99 @@ def test_build_branch_tree_non_variant_node_has_none_variant_fields(tmp_path):
     assert child_node["variant_group_id"] is None
     assert child_node["variant_index"] is None
     assert child_node["variant_label"] is None
+
+
+# ---------------------------------------------------------------------------
+# V3.5 draw-session lineage fields: RunLineageRecord, fold, and branch tree
+# ---------------------------------------------------------------------------
+
+
+def test_draw_session_lineage_fields_survive_created_fold(tmp_path):
+    """A record with all three draw-session lineage fields folds back correctly."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record(
+        "ds-run-1",
+        draw_session_id="draw_session_42",
+        draw_card_index=3,
+        replacement_of_run_id="old-run-7",
+    )
+    append_run_created(rec, path=idx)
+
+    index = load_run_index(path=idx)
+    assert "ds-run-1" in index
+    r = index["ds-run-1"]
+    assert r.draw_session_id == "draw_session_42"
+    assert r.draw_card_index == 3
+    assert r.replacement_of_run_id == "old-run-7"
+
+
+def test_draw_card_index_int_coercion_from_string(tmp_path):
+    """draw_card_index stored as string in JSONL is coerced back to int on load."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record("ds-run-coerce")
+    append_run_created(rec, path=idx)
+    # Simulate a JSONL line where draw_card_index is serialised as a string.
+    with idx.open("a", encoding="utf-8") as fh:
+        import json as _json
+        fh.write(_json.dumps({"event": "updated", "run_id": "ds-run-coerce", "draw_card_index": "5"}) + "\n")
+
+    index = load_run_index(path=idx)
+    assert index["ds-run-coerce"].draw_card_index == 5
+    assert isinstance(index["ds-run-coerce"].draw_card_index, int)
+
+
+def test_draw_session_lineage_defaults_to_none(tmp_path):
+    """A plain record (no draw fields) folds with all three as None."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record("plain-ds-run")
+    append_run_created(rec, path=idx)
+
+    index = load_run_index(path=idx)
+    r = index["plain-ds-run"]
+    assert r.draw_session_id is None
+    assert r.draw_card_index is None
+    assert r.replacement_of_run_id is None
+
+
+def test_build_branch_tree_draw_session_node_fields(tmp_path):
+    """build_branch_tree node for a draw-session child includes all three draw fields."""
+    idx = tmp_path / "idx.jsonl"
+    t = 4_000_000.0
+    root = _record("ds-root", root_run_id="ds-root", parent_run_id=None, created_at=t)
+    ds_child = _record(
+        "ds-child-1",
+        root_run_id="ds-root",
+        parent_run_id="ds-root",
+        created_at=t + 10,
+        draw_session_id="draw_session_42",
+        draw_card_index=3,
+        replacement_of_run_id="old-run-7",
+    )
+    for rec in [root, ds_child]:
+        append_run_created(rec, path=idx)
+
+    records = load_run_index(path=idx)
+    tree = build_branch_tree(records, "ds-root")
+
+    child_node = next(c for c in tree["children"] if c["run_id"] == "ds-child-1")
+    assert child_node["draw_session_id"] == "draw_session_42"
+    assert child_node["draw_card_index"] == 3
+    assert child_node["replacement_of_run_id"] == "old-run-7"
+
+
+def test_build_branch_tree_non_draw_session_node_has_none_draw_fields(tmp_path):
+    """build_branch_tree node for a non-draw-session run has all three draw fields as None."""
+    idx = tmp_path / "idx.jsonl"
+    t = 5_000_000.0
+    root = _record("nds-root", root_run_id="nds-root", parent_run_id=None, created_at=t)
+    child = _record("nds-child", root_run_id="nds-root", parent_run_id="nds-root", created_at=t + 5)
+    for rec in [root, child]:
+        append_run_created(rec, path=idx)
+
+    records = load_run_index(path=idx)
+    tree = build_branch_tree(records, "nds-root")
+
+    child_node = next(c for c in tree["children"] if c["run_id"] == "nds-child")
+    assert child_node["draw_session_id"] is None
+    assert child_node["draw_card_index"] is None
+    assert child_node["replacement_of_run_id"] is None

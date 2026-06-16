@@ -409,3 +409,41 @@ class TestLoadGroupNonDictJson:
     def test_load_group_non_dict_json_number_returns_none(self, tmp_path):
         self._write_json(tmp_path, "grp-num-root", "42")
         assert load_group("grp-num-root", root=tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# V3.5 draw_session_id round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestGroupDrawSessionId:
+    def _make_record(self, **overrides) -> VariantGroupRecord:
+        defaults = dict(
+            group_id="grp-draw-001",
+            root_run_id="run-root",
+            parent_run_id="run-parent",
+            source_checkpoint_id="ckpt-1",
+            feedback="test feedback",
+            mode="refine",
+            variant_count=2,
+            diversity="medium",
+            status="queued",
+        )
+        defaults.update(overrides)
+        return VariantGroupRecord(**defaults)
+
+    def test_save_load_round_trips_draw_session_id(self, tmp_path):
+        """A VariantGroupRecord with draw_session_id set is preserved by save/load."""
+        rec = self._make_record(draw_session_id="draw_abc")
+        save_group(rec, root=tmp_path)
+        loaded = load_group(rec.group_id, root=tmp_path)
+        assert loaded is not None
+        assert loaded.draw_session_id == "draw_abc"
+
+    def test_save_load_round_trips_draw_session_id_default_none(self, tmp_path):
+        """A record without draw_session_id serialises and loads as None."""
+        rec = self._make_record()  # no draw_session_id → defaults to None
+        save_group(rec, root=tmp_path)
+        loaded = load_group(rec.group_id, root=tmp_path)
+        assert loaded is not None
+        assert loaded.draw_session_id is None

@@ -82,6 +82,9 @@ class RunLineageRecord:
     variant_group_id: str | None = None
     variant_index: int | None = None
     variant_label: str | None = None
+    draw_session_id: str | None = None
+    draw_card_index: int | None = None
+    replacement_of_run_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +134,9 @@ def _dict_to_record(d: dict[str, Any]) -> RunLineageRecord:
         variant_group_id=d.get("variant_group_id"),
         variant_index=int(d["variant_index"]) if d.get("variant_index") is not None else None,
         variant_label=d.get("variant_label"),
+        draw_session_id=d.get("draw_session_id"),
+        draw_card_index=int(d["draw_card_index"]) if d.get("draw_card_index") is not None else None,
+        replacement_of_run_id=d.get("replacement_of_run_id"),
     )
 
 
@@ -282,6 +288,9 @@ def build_branch_tree(
             "variant_group_id": rec.variant_group_id,
             "variant_index": rec.variant_index,
             "variant_label": rec.variant_label,
+            "draw_session_id": rec.draw_session_id,
+            "draw_card_index": rec.draw_card_index,
+            "replacement_of_run_id": rec.replacement_of_run_id,
             "children": children,
         }
 

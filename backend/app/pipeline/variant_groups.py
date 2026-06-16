@@ -66,6 +66,7 @@ class VariantGroupRecord:
     winner_run_id: str | None = None
     created_at: float = 0.0
     completed_at: float | None = None
+    draw_session_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +234,7 @@ def load_group(
             winner_run_id=data.get("winner_run_id"),
             created_at=created_at_val,
             completed_at=data.get("completed_at"),
+            draw_session_id=data.get("draw_session_id"),
         )
     except (TypeError, ValueError):
         return None
