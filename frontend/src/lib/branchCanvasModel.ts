@@ -153,12 +153,11 @@ function capTimeline(
  */
 function aggregateVariantStatus(statuses: string[]): string {
   if (statuses.length === 0) return "failed";
-  const all = statuses;
-  const hasRunning = all.some((s) => s === "running" || s === "queued");
+  const hasRunning = statuses.some((s) => s === "running" || s === "queued");
   if (hasRunning) return "running";
-  const allCompleted = all.every((s) => s === "completed");
+  const allCompleted = statuses.every((s) => s === "completed");
   if (allCompleted) return "completed";
-  const anyCompleted = all.some((s) => s === "completed");
+  const anyCompleted = statuses.some((s) => s === "completed");
   if (anyCompleted) return "partial_failed";
   return "failed";
 }
@@ -205,12 +204,17 @@ export function buildBranchCanvasModel(
   // ── Compute expandedRunIds (only non-variant runs participate) ─────────────
   // Priority: active first, then favorites in DFS order. Cap at MAX_EXPANDED_RUNS.
   // Then remove any id in collapsedRunIds (explicit collapse always wins).
+  // Variant runs are excluded — they have no checkpoint nodes and must not
+  // consume a budget slot that a real run could use.
   const candidateIds: string[] = [];
-  if (activeRunId !== null && allTreeNodes.some((n) => n.run_id === activeRunId)) {
+  if (activeRunId !== null
+      && !variantRunIds.has(activeRunId)
+      && allTreeNodes.some((n) => n.run_id === activeRunId)) {
     candidateIds.push(activeRunId);
   }
   for (const node of allTreeNodes) {
     if (
+      !variantRunIds.has(node.run_id) &&
       favoriteRunIds.has(node.run_id) &&
       !candidateIds.includes(node.run_id)
     ) {
@@ -229,15 +233,6 @@ export function buildBranchCanvasModel(
   // ── Track which cp: nodes were actually emitted ────────────────────────────
   // key = "cp:{run_id}:{checkpoint_id}" → true
   const emittedCpNodeIds = new Set<string>();
-
-  // ── Track which run nodes were emitted as variant_group nodes ─────────────
-  // Maps run_id → "vg:{group_id}" for variant runs
-  const variantRunToGroupNodeId = new Map<string, string>();
-  for (const [groupId, members] of variantGroupMap) {
-    for (const m of members) {
-      variantRunToGroupNodeId.set(m.run_id, `vg:${groupId}`);
-    }
-  }
 
   const nodes: BranchCanvasNode[] = [];
   const edges: BranchCanvasEdge[] = [];

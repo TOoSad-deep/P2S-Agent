@@ -792,4 +792,81 @@ describe("buildBranchCanvasModel", () => {
     const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
     expect(vgNode!.data.status).toBe("partial_failed");
   });
+
+  // ── V3-6. [failed, failed] → "failed" ────────────────────────────────────
+  it("aggregates variant group status: [failed, failed] → failed", () => {
+    const GROUP_ID = "grp-status-all-failed";
+    const VA = "run-var-f1";
+    const VB = "run-var-f2";
+
+    const tree = makeTreeNode({
+      run_id: ROOT_ID,
+      children: [
+        makeTreeNode({ run_id: VA, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 0, status: "failed" }),
+        makeTreeNode({ run_id: VB, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 1, status: "failed" }),
+      ],
+    });
+
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+    const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
+    expect(vgNode).toBeDefined();
+    expect(vgNode!.data.status).toBe("failed");
+  });
+
+  // ── V3-7. Active variant run doesn't waste an expansion budget slot ────────
+  it("active variant run produces no checkpoint nodes and a favorited non-variant run still expands", () => {
+    // MAX_EXPANDED_RUNS = 3. Build 3 non-variant runs that should all expand
+    // if budget allows, plus one variant run set as activeRunId.
+    // The variant run must NOT consume a slot; all 3 non-variant runs should expand.
+    const GROUP_ID = "grp-budget-test";
+    const VAR_ID = "run-var-budget";
+    const NON_VAR_A = "run-nv-budget-a";
+    const NON_VAR_B = "run-nv-budget-b";
+    const NON_VAR_C = "run-nv-budget-c";
+
+    const variantRun = makeTreeNode({
+      run_id: VAR_ID,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      variant_group_id: GROUP_ID,
+      variant_index: 0,
+    });
+
+    const nonVarA = makeTreeNode({ run_id: NON_VAR_A, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, favorite: true });
+    const nonVarB = makeTreeNode({ run_id: NON_VAR_B, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, favorite: true });
+    const nonVarC = makeTreeNode({ run_id: NON_VAR_C, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, favorite: true });
+
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [variantRun, nonVarA, nonVarB, nonVarC] });
+
+    const cpEntry = [{ id: "candidate:selected" }];
+    const out = buildBranchCanvasModel(
+      baseInput({
+        branchTree: tree,
+        // Set the variant run as the active run — it must NOT burn a budget slot
+        activeRunId: VAR_ID,
+        favoriteRunIds: new Set([NON_VAR_A, NON_VAR_B, NON_VAR_C]),
+        timelinesByRunId: {
+          [VAR_ID]: makeTimeline(cpEntry, VAR_ID),
+          [NON_VAR_A]: makeTimeline(cpEntry, NON_VAR_A),
+          [NON_VAR_B]: makeTimeline(cpEntry, NON_VAR_B),
+          [NON_VAR_C]: makeTimeline(cpEntry, NON_VAR_C),
+        },
+      }),
+    );
+
+    // The active variant run must have NO checkpoint nodes (variant runs never expand)
+    const varCpNodes = out.nodes.filter((n) => n.id.startsWith(`cp:${VAR_ID}:`));
+    expect(varCpNodes).toHaveLength(0);
+
+    // All 3 favorited non-variant runs should be expanded (budget = 3, variant didn't consume any)
+    const expandedRunIds = new Set(
+      out.nodes
+        .filter((n) => n.id.startsWith("cp:"))
+        .map((n) => n.id.slice(3, n.id.indexOf(":", 3))),
+    );
+    expect(expandedRunIds.has(NON_VAR_A)).toBe(true);
+    expect(expandedRunIds.has(NON_VAR_B)).toBe(true);
+    expect(expandedRunIds.has(NON_VAR_C)).toBe(true);
+    expect(expandedRunIds.size).toBe(3);
+  });
 });
