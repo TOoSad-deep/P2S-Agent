@@ -238,11 +238,21 @@ export interface RunMetadataRecord {
   [key: string]: unknown;
 }
 
+export interface RegionConstraint {
+  id: string;
+  label: string;
+  mode: "modify" | "protect";
+  instruction: string;
+  geometry_type: "rect";
+  geometry: { x: number; y: number; w: number; h: number };
+  strength: number;
+}
+
 export interface HumanConstraintSpec {
   locks: Record<string, boolean>;
   targets: Record<string, "keep" | "increase" | "decrease">;
   edit_strength: number;           // 0..1
-  regions: unknown[];              // V4.2 fills this; keep [] for V4.1
+  regions: RegionConstraint[];     // V4.2 region/mask constraints
   use_preferences: boolean;
 }
 

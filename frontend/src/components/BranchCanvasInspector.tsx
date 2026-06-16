@@ -338,6 +338,8 @@ interface BranchActionViewProps {
   fusionEnabled?: boolean;
   submitError?: string | null;
   disabled?: boolean;
+  // V4.2 region editor backdrop
+  imageUrl?: string | null;
 }
 
 function BranchActionView({
@@ -354,6 +356,7 @@ function BranchActionView({
   fusionEnabled,
   submitError,
   disabled,
+  imageUrl,
 }: BranchActionViewProps) {
   const data = node.data;
   const runId = data.run_id!;
@@ -387,6 +390,7 @@ function BranchActionView({
           onContinueCard={onContinueCard ?? (() => {})}
           disabled={disabled}
           error={submitError}
+          imageUrl={imageUrl}
         />
         <button
           onClick={() => setDrawMode(false)}
@@ -581,6 +585,7 @@ function BranchActionView({
               value={constraintSpec}
               onChange={setConstraintSpec}
               disabled={disabled}
+              imageUrl={imageUrl}
             />
           </div>
         )}
@@ -1012,9 +1017,14 @@ function DrawSessionDetailView({
     );
   }
 
+  const drawParentRunId = drawSession.parent_run_id;
+  const drawImageUrl = drawParentRunId
+    ? `/png-shader/runs/${drawParentRunId}/artifacts/selected_render`
+    : null;
+
   return (
     <DrawSessionInspector
-      parentRunId={drawSession.parent_run_id ?? ""}
+      parentRunId={drawParentRunId ?? ""}
       checkpointId={drawSession.source_checkpoint_id}
       session={drawSession}
       fusionEnabled={fusionEnabled}
@@ -1027,6 +1037,7 @@ function DrawSessionDetailView({
       onSelectWinner={onSelectDrawWinner}
       onStopDraw={onStopDraw}
       disabled={disabled}
+      imageUrl={drawImageUrl}
     />
   );
 }
@@ -1105,7 +1116,11 @@ export default function BranchCanvasInspector({
           />
         );
 
-      case "branch_action":
+      case "branch_action": {
+        const branchRunId = node.data.run_id;
+        const branchImageUrl = branchRunId
+          ? `/png-shader/runs/${branchRunId}/artifacts/selected_render`
+          : null;
         return (
           <BranchActionView
             key={node.id}
@@ -1122,8 +1137,10 @@ export default function BranchCanvasInspector({
             fusionEnabled={fusionEnabled}
             submitError={submitError}
             disabled={disabled}
+            imageUrl={branchImageUrl}
           />
         );
+      }
 
       case "variant_group":
         return (

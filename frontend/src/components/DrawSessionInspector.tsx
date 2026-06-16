@@ -65,6 +65,8 @@ export interface DrawSessionInspectorProps {
   onStopDraw?: (drawId: string) => void;
   disabled?: boolean;
   error?: string | null;
+  // V4.2 region editor backdrop
+  imageUrl?: string | null;
 }
 
 // ─── Filter + sort helpers ─────────────────────────────────────────────────────
@@ -117,9 +119,10 @@ interface StartFormProps {
   checkpointId?: string;
   onStartDraw: (parentRunId: string, request: CreateDrawSessionRequest) => void;
   disabled?: boolean;
+  imageUrl?: string | null;
 }
 
-function StartForm({ parentRunId, checkpointId, onStartDraw, disabled }: StartFormProps) {
+function StartForm({ parentRunId, checkpointId, onStartDraw, disabled, imageUrl }: StartFormProps) {
   const [feedback, setFeedback] = useState("");
   const [cardCount, setCardCount] = useState<number>(8);
   const [diversity, setDiversity] = useState<Diversity>("medium");
@@ -214,6 +217,7 @@ function StartForm({ parentRunId, checkpointId, onStartDraw, disabled }: StartFo
               value={constraintSpec}
               onChange={setConstraintSpec}
               disabled={disabled}
+              imageUrl={imageUrl}
             />
           </div>
         )}
@@ -314,6 +318,7 @@ export default function DrawSessionInspector({
   onStopDraw,
   disabled = false,
   error,
+  imageUrl,
 }: DrawSessionInspectorProps) {
   // Local UI state for filter + sort (only used when session != null)
   const [filter, setFilter] = useState<FilterKey>("all");
@@ -331,6 +336,7 @@ export default function DrawSessionInspector({
           checkpointId={checkpointId}
           onStartDraw={onStartDraw}
           disabled={disabled}
+          imageUrl={imageUrl}
         />
         {error && (
           <p className="text-[11px] text-red-400 leading-snug">{error}</p>

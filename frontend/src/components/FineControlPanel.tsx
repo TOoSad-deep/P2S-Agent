@@ -1,6 +1,9 @@
-// FineControlPanel.tsx — Structured constraints UI for V4.1.
+// FineControlPanel.tsx — Structured constraints UI for V4.1/V4.2.
 // Presentational + props-driven; no data fetching. All changes are immutable updates via onChange.
+import { useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { HumanConstraintSpec } from "../hooks/usePngShader";
+import RegionMaskEditor from "./RegionMaskEditor";
 
 export const DEFAULT_CONSTRAINT_SPEC: HumanConstraintSpec = {
   locks: {},
@@ -20,6 +23,8 @@ export function isMeaningfulConstraint(spec: HumanConstraintSpec): boolean {
   if (spec.edit_strength !== 0.5) return true;
   // Preferences opt-out
   if (!spec.use_preferences) return true;
+  // Any region constraints defined (V4.2)
+  if (spec.regions.length > 0) return true;
   return false;
 }
 
@@ -53,11 +58,13 @@ interface FineControlPanelProps {
   value: HumanConstraintSpec;
   onChange: (next: HumanConstraintSpec) => void;
   disabled?: boolean;
+  imageUrl?: string | null;
 }
 
 // ─── Component ─────────────────────────────────────────────────────────────────
 
-export default function FineControlPanel({ value, onChange, disabled }: FineControlPanelProps) {
+export default function FineControlPanel({ value, onChange, disabled, imageUrl }: FineControlPanelProps) {
+  const [regionsOpen, setRegionsOpen] = useState(false);
   const setLock = (key: string, checked: boolean) => {
     onChange({ ...value, locks: { ...value.locks, [key]: checked } });
   };
@@ -170,6 +177,37 @@ export default function FineControlPanel({ value, onChange, disabled }: FineCont
         />
         使用我的偏好 Use my preferences
       </label>
+
+      {/* ── Region constraints (V4.2) ── */}
+      <div className="border border-[var(--border-color)] rounded-md overflow-hidden">
+        <button
+          onClick={() => setRegionsOpen((prev) => !prev)}
+          disabled={disabled}
+          className="flex items-center gap-1.5 w-full px-2 py-1.5 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {regionsOpen ? (
+            <ChevronDown className="w-3 h-3 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" />
+          )}
+          区域约束 / Regions
+          {value.regions.length > 0 && (
+            <span className="ml-auto text-[10px] font-mono px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-400">
+              {value.regions.length}
+            </span>
+          )}
+        </button>
+        {regionsOpen && (
+          <div className="px-2 pb-2 pt-1 border-t border-[var(--border-color)] bg-[var(--bg-tertiary)]">
+            <RegionMaskEditor
+              imageUrl={imageUrl}
+              regions={value.regions}
+              onChange={(regions) => onChange({ ...value, regions })}
+              disabled={disabled}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
