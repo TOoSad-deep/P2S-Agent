@@ -215,6 +215,8 @@ def load_group(
     except (json.JSONDecodeError, OSError):
         return None
     try:
+        _created = data.get("created_at")
+        created_at_val = float(_created) if _created is not None else 0.0
         return VariantGroupRecord(
             group_id=data.get("group_id", group_id),
             root_run_id=data.get("root_run_id", ""),
@@ -227,7 +229,7 @@ def load_group(
             status=data.get("status", "queued"),
             child_run_ids=list(data.get("child_run_ids") or []),
             winner_run_id=data.get("winner_run_id"),
-            created_at=float(data.get("created_at") or 0.0),
+            created_at=created_at_val,
             completed_at=data.get("completed_at"),
         )
     except (TypeError, ValueError):
@@ -250,6 +252,7 @@ def append_group_event(
     groups_dir.mkdir(parents=True, exist_ok=True)
     path = groups_dir / f"{group_id}_events.jsonl"
     line = json.dumps(event, ensure_ascii=False) + "\n"
+    # Module-level lock: serializes event appends across all groups (events files are per-group; contention is low given 2-6 variants).
     with _EVENTS_LOCK:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)

@@ -193,6 +193,14 @@ class TestBuildVariantStrategiesDeterminism:
         r2 = build_variant_strategies(**args)
         assert r1 == r2
 
+    def test_mutating_output_does_not_affect_subsequent_call(self):
+        r1 = build_variant_strategies(feedback="f", count=6, diversity="high", mode="explore")
+        r1[0]["locks"]["INJECTED"] = True
+        r1[0]["notes"].append("INJECTED")
+        r2 = build_variant_strategies(feedback="f", count=6, diversity="high", mode="explore")
+        assert "INJECTED" not in r2[0]["locks"]
+        assert "INJECTED" not in r2[0]["notes"]
+
 
 # ---------------------------------------------------------------------------
 # save_group / load_group round-trip
@@ -374,3 +382,6 @@ class TestAggregateGroupStatus:
 
     def test_single_completed_returns_completed(self):
         assert aggregate_group_status(["completed"]) == "completed"
+
+    def test_aggregate_unknown_status_treated_as_non_terminal(self):
+        assert aggregate_group_status(["bogus"]) == "running"
