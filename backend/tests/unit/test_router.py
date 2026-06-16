@@ -15,16 +15,22 @@ from app.routers.png_shader import _run_store, router
 
 
 # ---------------------------------------------------------------------------
-# Autouse fixture: isolate every test from the real run_index.jsonl
+# Autouse fixture: isolate every test from the real run_index.jsonl and
+# variant_groups directory.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def _isolate_run_index(tmp_path, monkeypatch):
     """Redirect all run-index writes to a per-test temp file so the real
-    backend/test_results/run_index.jsonl is never touched during tests."""
+    backend/test_results/run_index.jsonl is never touched during tests.
+    Also redirect variant_groups writes to an isolated temp directory."""
     monkeypatch.setattr(
         "app.routers.png_shader._RUN_INDEX_PATH",
         str(tmp_path / "run_index.jsonl"),
+    )
+    monkeypatch.setattr(
+        "app.routers.png_shader._VARIANT_GROUPS_ROOT",
+        str(tmp_path / "vg"),
     )
 
 FastAPI = fastapi.FastAPI
@@ -1107,3 +1113,265 @@ def test_run_index_completed_run_dir_from_result(tmp_path, monkeypatch):
     assert rec.status == "completed"
     assert rec.run_dir == rd
     assert rec.final_score == 0.5
+
+
+# ---------------------------------------------------------------------------
+# V3-3: explore-variants endpoint + variant worker semaphore
+# ---------------------------------------------------------------------------
+
+def _wait_for_variant_completion(
+    client: TestClient, run_id: str, timeout_seconds: float = 15.0
+) -> dict:
+    """Like _wait_for_completion but also waits through 'queued' status."""
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        response = client.get(f"/png-shader/status/{run_id}")
+        assert response.status_code == 200
+        data = response.json()
+        if data["status"] not in ("running", "queued"):
+            return data
+        time.sleep(0.05)
+    raise AssertionError(f"Variant run {run_id} did not complete within {timeout_seconds}s")
+
+
+def _fake_variant_pipeline(captured_list):
+    """Return a fast fake pipeline that records per-call captures in a list."""
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, seed_glsl=None,
+                      human_feedback_notes=None, directed_acceptance=None,
+                      force_first_refinement_iteration=False, lineage=None,
+                      extra_artifacts=None, **kwargs):
+        captured_list.append({
+            "run_id": run_id,
+            "seed_glsl": seed_glsl,
+            "human_feedback_notes": human_feedback_notes,
+            "force_first": force_first_refinement_iteration,
+            "lineage": lineage,
+            "directed_acceptance": directed_acceptance,
+            "extra_artifacts": extra_artifacts,
+            "image_path": str(image_path),
+        })
+        return {
+            "run_id": run_id,
+            "selected_glsl": seed_glsl or "",
+            "scoreboard": {},
+            "quality_router": {},
+            "refinement_summary": {},
+            "lineage": lineage,
+        }
+    return fake_pipeline
+
+
+def test_explore_variants_creates_4_children(tmp_path, monkeypatch):
+    """POST /explore-variants with default count returns 4 children, all complete,
+    with correct variant_group_id / variant_label / lineage.variant_index in store.
+    The group record is persisted with all 4 child_run_ids."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH",
+                        str(tmp_path / "ri.jsonl"))
+
+    _seed_parent(tmp_path)
+    captures: list[dict] = []
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline(captures),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={
+            "feedback": "make the lighting warmer and softer",
+            "variant_count": 4,
+            "diversity": "medium",
+            "mode": "explore",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "running"
+    assert body["parent_run_id"] == "run_parent"
+    child_run_ids = body["child_run_ids"]
+    assert len(child_run_ids) == 4
+    group_id = body["group_id"]
+    assert group_id.startswith("group_")
+
+    # Wait for all children to complete.
+    for cid in child_run_ids:
+        result = _wait_for_variant_completion(client, cid)
+        assert result["status"] == "completed", f"{cid} ended with status {result['status']}"
+
+    # Verify store fields on each child.
+    for idx, cid in enumerate(child_run_ids):
+        stored = _run_store[cid]
+        assert stored["variant_group_id"] == group_id
+        assert stored["variant_label"] is not None
+        assert stored["lineage"]["variant_index"] == idx
+        assert stored["lineage"]["variant_group_id"] == group_id
+
+    # Verify the group record was persisted.
+    from app.pipeline.variant_groups import load_group
+    rec = load_group(group_id, root=vg_root)
+    assert rec is not None
+    assert set(rec.child_run_ids) == set(child_run_ids)
+    assert rec.parent_run_id == "run_parent"
+    assert rec.feedback == "make the lighting warmer and softer"
+
+
+def test_explore_variants_run_index_has_variant_fields(tmp_path, monkeypatch):
+    """Each child's run-index record carries variant_group_id, variant_index, variant_label."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri_v.jsonl")
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    _seed_parent(tmp_path)
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "warmer tones", "variant_count": 2},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    child_run_ids = body["child_run_ids"]
+    group_id = body["group_id"]
+
+    for cid in child_run_ids:
+        _wait_for_variant_completion(client, cid)
+
+    from app.pipeline.run_index import load_run_index
+    records = load_run_index(path=idx)
+    for idx_child, cid in enumerate(child_run_ids):
+        assert cid in records, f"{cid} missing from run index"
+        rec = records[cid]
+        assert rec.variant_group_id == group_id
+        assert rec.variant_index == idx_child
+        assert rec.variant_label is not None
+        assert rec.parent_run_id == "run_parent"
+        assert rec.mode == "explore"
+
+
+def test_explore_variants_count_out_of_range(tmp_path, monkeypatch):
+    """variant_count outside [2, 6] returns 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp_low = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "more color", "variant_count": 1},
+    )
+    assert resp_low.status_code == 422
+
+    resp_high = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "more color", "variant_count": 7},
+    )
+    assert resp_high.status_code == 422
+
+
+def test_explore_variants_404_unknown_parent():
+    """Unknown parent run_id returns 404."""
+    _run_store.clear()
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/ghost/explore-variants",
+        json={"feedback": "brighter"},
+    )
+    assert resp.status_code == 404
+
+
+def test_explore_variants_422_bad_checkpoint(tmp_path):
+    """Bad checkpoint_id returns 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "brighter", "checkpoint_id": "refinement:iter:99"},
+    )
+    assert resp.status_code == 422
+
+
+def test_explore_variants_422_empty_feedback(tmp_path):
+    """Empty feedback returns 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "   "},
+    )
+    assert resp.status_code == 422
+
+
+def test_explore_variants_409_parent_no_run_dir():
+    """Parent without run_dir returns 409."""
+    _run_store.clear()
+    _run_store["run_norun"] = {
+        "run_id": "run_norun", "status": "completed", "selected_glsl": _BRANCH_GLSL,
+        "scoreboard": {"selected_id": "llm_0", "candidates": [
+            {"id": "llm_0", "selected": True, "previewable": True,
+             "compile_glsl": _BRANCH_GLSL, "final_score": 0.7}]},
+        "refinement_history": [], "quality_router": {"final_score": 0.7},
+    }
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_norun/explore-variants",
+        json={"feedback": "brighter"},
+    )
+    assert resp.status_code == 409
+
+
+def test_explore_variants_409_no_checkpoints():
+    """Parent with no scoreboard / no checkpoints returns 409."""
+    _run_store.clear()
+    _run_store["run_empty"] = {
+        "run_id": "run_empty", "status": "running",
+        "strategy": {}, "stop_requested": False, "strategy_revision": 1,
+    }
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_empty/explore-variants",
+        json={"feedback": "brighter"},
+    )
+    assert resp.status_code == 409
+
+
+def test_explore_variants_concurrency_all_complete(tmp_path, monkeypatch):
+    """All 4 children complete even though semaphore allows only 2 concurrent workers."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH",
+                        str(tmp_path / "ri_conc.jsonl"))
+
+    _seed_parent(tmp_path)
+    captures: list[dict] = []
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline(captures),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "richer colors", "variant_count": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    child_run_ids = resp.json()["child_run_ids"]
+
+    # All 4 must reach a terminal state (the semaphore serialises but all get through).
+    for cid in child_run_ids:
+        result = _wait_for_variant_completion(client, cid, timeout_seconds=20.0)
+        assert result["status"] == "completed", f"{cid} did not complete: {result['status']}"
+
+    # All 4 pipelines were invoked.
+    assert len(captures) == 4

@@ -34,6 +34,12 @@ from app.pipeline.checkpoints import (
     resolve_checkpoint_artifact,
     save_timeline,
 )
+from app.pipeline.variant_groups import (
+    VariantGroupRecord,
+    append_group_event,
+    build_variant_strategies,
+    save_group,
+)
 from app.pipeline.graph import run_png_shader_pipeline
 from app.pipeline.human_feedback import (
     MODES,
@@ -71,6 +77,12 @@ _run_models_lock = threading.Lock()
 
 # Metadata fields that are allowed to be patched and mirrored into the in-memory store.
 _METADATA_MIRROR_KEYS: frozenset[str] = frozenset({"title", "favorite", "tags"})
+
+# Variant exploration concurrency constants.
+_MAX_VARIANT_COUNT = 6
+_MAX_VARIANT_CONCURRENCY = 2
+_variant_worker_semaphore = threading.Semaphore(_MAX_VARIANT_CONCURRENCY)
+_VARIANT_GROUPS_ROOT: Optional[str] = None  # tests override to isolate
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +153,7 @@ def _run_png_shader_background(
     trace_input: dict,
     trace_metadata: dict,
     pipeline_extra: Optional[dict] = None,
+    variant_semaphore: Optional[threading.Semaphore] = None,
 ) -> None:
     """Run the PNG shader pipeline after the submit request has returned.
 
@@ -150,7 +163,45 @@ def _run_png_shader_background(
     ``pipeline_extra`` carries human-in-loop kwargs (human_feedback_notes,
     directed_acceptance, force_first_refinement_iteration, lineage,
     extra_artifacts) forwarded to ``run_png_shader_pipeline``.
+    ``variant_semaphore`` when provided puts the run through a queued→acquired
+    lifecycle: the run waits in "queued" until the semaphore is free, then
+    flips to "running"/"acquired".
     """
+    # --- Variant queued lifecycle ---
+    if variant_semaphore is not None:
+        # Mark as queued and check for pre-acquire cancellation.
+        with _run_store_lock:
+            stored = _run_store.get(run_id, {})
+            stored["current_phase"] = "queued"
+            _run_store[run_id] = stored
+            stop_early = bool(stored.get("stop_requested"))
+
+        if stop_early:
+            _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
+            with _run_store_lock:
+                stored = _run_store.get(run_id, {})
+                preserved = {
+                    "strategy": stored.get("strategy"),
+                    "stop_requested": stored.get("stop_requested", False),
+                    "strategy_revision": stored.get("strategy_revision", 1),
+                }
+                _run_store[run_id] = {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "completed_at": time(),
+                    **preserved,
+                }
+            if upload_dir is not None:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+            return
+
+        variant_semaphore.acquire()
+        with _run_store_lock:
+            stored = _run_store.get(run_id, {})
+            stored["status"] = "running"
+            stored["current_phase"] = "acquired"
+            _run_store[run_id] = stored
+
     def _progress(phase: str) -> None:
         with _run_store_lock:
             stored = _run_store.get(run_id)
@@ -225,6 +276,16 @@ def _run_png_shader_background(
                         "strategy": stored.get("strategy"),
                         "stop_requested": stored.get("stop_requested", False),
                         "strategy_revision": stored.get("strategy_revision", 1),
+                        # Preserve variant identity fields so they survive the
+                        # result overwrite and remain queryable from /status.
+                        **({"variant_group_id": stored["variant_group_id"]}
+                           if "variant_group_id" in stored else {}),
+                        **({"variant_index": stored["variant_index"]}
+                           if "variant_index" in stored else {}),
+                        **({"variant_label": stored["variant_label"]}
+                           if "variant_label" in stored else {}),
+                        **({"lineage": stored["lineage"]}
+                           if "lineage" in stored else {}),
                     }
                     _run_store[run_id] = {**result_with_status, **preserved}
                 if run_tree is not None:
@@ -263,6 +324,15 @@ def _run_png_shader_background(
                     "strategy": stored.get("strategy"),
                     "stop_requested": stored.get("stop_requested", False),
                     "strategy_revision": stored.get("strategy_revision", 1),
+                    # Preserve variant identity fields on failure path too.
+                    **({"variant_group_id": stored["variant_group_id"]}
+                       if "variant_group_id" in stored else {}),
+                    **({"variant_index": stored["variant_index"]}
+                       if "variant_index" in stored else {}),
+                    **({"variant_label": stored["variant_label"]}
+                       if "variant_label" in stored else {}),
+                    **({"lineage": stored["lineage"]}
+                       if "lineage" in stored else {}),
                 }
                 _run_store[run_id] = {
                     "run_id": run_id,
@@ -274,6 +344,8 @@ def _run_png_shader_background(
         finally:
             if upload_dir is not None:
                 shutil.rmtree(upload_dir, ignore_errors=True)
+            if variant_semaphore is not None:
+                variant_semaphore.release()
 
 
 def _start_pipeline_worker(
@@ -287,11 +359,14 @@ def _start_pipeline_worker(
     trace_input: dict,
     trace_metadata: dict,
     pipeline_extra: Optional[dict] = None,
+    variant_semaphore: Optional[threading.Semaphore] = None,
 ) -> None:
     """Register the run's model and launch the background pipeline thread.
 
-    Shared by ``/run`` (uploaded image, ``upload_dir`` set) and
+    Shared by ``/run`` (uploaded image, ``upload_dir`` set``) and
     ``/branch-refine`` (parent reference image, ``upload_dir=None``).
+    ``variant_semaphore`` is forwarded to the worker for the queued→acquired
+    lifecycle used by variant child runs.
     """
     _store_run_model(run_id, model_config)
     threading.Thread(
@@ -306,6 +381,7 @@ def _start_pipeline_worker(
             "trace_input": trace_input,
             "trace_metadata": trace_metadata,
             "pipeline_extra": pipeline_extra,
+            "variant_semaphore": variant_semaphore,
         },
         daemon=True,
     ).start()
@@ -654,6 +730,246 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
                 stored_parent["stop_requested"] = True
 
     return initial_result
+
+
+@router.post("/runs/{run_id}/explore-variants")
+async def explore_variants(run_id: str, payload: dict) -> dict:
+    """Fan one checkpoint into N variant child runs, each guided by a different strategy.
+
+    Body: { checkpoint_id?, feedback, variant_count?=4, diversity?="medium",
+            mode?="explore", quality?={}, stop_parent?=false }
+
+    Each child is queued behind a shared semaphore (max _MAX_VARIANT_CONCURRENCY
+    concurrent workers). The endpoint returns immediately with the group_id and
+    child_run_ids; callers poll /status/<child_run_id> for individual progress.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    with _run_store_lock:
+        parent = _run_store.get(run_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+    variant_count = int(payload.get("variant_count") or 4)
+    diversity = str(payload.get("diversity") or "medium")
+    mode = str(payload.get("mode") or "explore")
+    feedback = str(payload.get("feedback") or "")
+    checkpoint_id_raw = payload.get("checkpoint_id")
+    quality_overrides = payload.get("quality") or {}
+    stop_parent = bool(payload.get("stop_parent"))
+
+    if not isinstance(quality_overrides, dict):
+        raise HTTPException(status_code=422, detail="quality must be an object")
+
+    if variant_count < 2 or variant_count > _MAX_VARIANT_COUNT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"variant_count must be between 2 and {_MAX_VARIANT_COUNT}, got {variant_count}",
+        )
+
+    if not feedback or not feedback.strip():
+        raise HTTPException(status_code=422, detail="feedback is required for explore-variants")
+
+    if not list_checkpoints(parent):
+        raise HTTPException(status_code=409, detail="no branchable checkpoint yet")
+
+    checkpoint_id = str(checkpoint_id_raw) if checkpoint_id_raw is not None else "final:selected"
+    try:
+        checkpoint = resolve_checkpoint(parent, checkpoint_id)
+    except CheckpointError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    parent_run_dir = parent.get("run_dir")
+    if not parent_run_dir:
+        raise HTTPException(status_code=409, detail="parent run_dir is not available yet")
+    reference_path = Path(parent_run_dir) / "reference_input.png"
+    if not reference_path.exists():
+        raise HTTPException(status_code=409, detail="parent reference image is not available")
+
+    group_id = "group_" + uuid4().hex[:8]
+    parent_lineage = parent.get("lineage") or {}
+    root_run_id = parent_lineage.get("root_run_id") or run_id
+
+    strategies = build_variant_strategies(
+        feedback=feedback,
+        count=variant_count,
+        diversity=diversity,
+        mode=mode,
+    )
+
+    child_run_ids: list[str] = []
+
+    for idx, strategy in enumerate(strategies):
+        child_run_id = "run_" + uuid4().hex[:8]
+
+        variant_lineage = {
+            "parent_run_id": run_id,
+            "root_run_id": root_run_id,
+            "source_checkpoint_id": checkpoint_id,
+            "source_checkpoint_label": checkpoint.label,
+            "mode": mode,
+            "feedback": feedback,
+            "variant_group_id": group_id,
+            "variant_index": idx,
+            "variant_label": strategy["label"],
+            "variant_strategy": strategy,
+        }
+
+        notes = build_human_feedback_notes(
+            feedback=feedback,
+            mode=mode,
+            locks=strategy.get("locks") or {},
+            checkpoint=checkpoint,
+        ) + list(strategy.get("notes") or [])
+
+        quality = dict(quality_overrides)
+        quality["refinement_mode"] = "on"
+        quality["max_refinement_iterations"] = max(
+            int(quality.get("max_refinement_iterations", 0) or 0), 1
+        )
+        quality["vlm_judge_enabled"] = 1
+
+        directed_acceptance = {
+            "enabled": True,
+            "feedback": feedback,
+            "mode": mode,
+            "score_drop_tolerance": strategy["score_drop_tolerance"],
+            "require_vlm_for_score_drop": True,
+        }
+
+        child_input_spec = build_input_spec(str(reference_path), quality=quality)
+        errors = validate_input_spec(child_input_spec)
+        if errors:
+            raise HTTPException(status_code=422, detail={"input_spec_errors": errors})
+
+        branch_request = {
+            "checkpoint_id": checkpoint_id,
+            "feedback": feedback,
+            "mode": mode,
+            "variant_index": idx,
+            "variant_label": strategy["label"],
+            "group_id": group_id,
+        }
+        extra_artifacts = {
+            "branch_request.json": branch_request,
+            "lineage.json": variant_lineage,
+            "source_checkpoint.json": checkpoint_metadata(checkpoint),
+            "source_checkpoint.glsl": checkpoint.glsl,
+            "human_feedback.txt": feedback,
+            "directed_acceptance.json": directed_acceptance,
+            "variant_strategy.json": strategy,
+        }
+
+        initial_result = {
+            "run_id": child_run_id,
+            "status": "queued",
+            "current_phase": "queued",
+            "parent_run_id": run_id,
+            "source_checkpoint_id": checkpoint_id,
+            "lineage": variant_lineage,
+            "variant_group_id": group_id,
+            "variant_index": idx,
+            "variant_label": strategy["label"],
+            "submitted_at": time(),
+            "strategy": dict(child_input_spec.get("quality") or quality),
+            "stop_requested": False,
+            "strategy_revision": 1,
+        }
+        _store_run(child_run_id, initial_result)
+        _index_created(RunLineageRecord(
+            run_id=child_run_id,
+            root_run_id=root_run_id,
+            parent_run_id=run_id,
+            source_checkpoint_id=checkpoint_id,
+            source_checkpoint_label=checkpoint.label,
+            mode=mode,
+            feedback=feedback,
+            title=None,
+            status="queued",
+            run_dir=None,
+            created_at=time(),
+            variant_group_id=group_id,
+            variant_index=idx,
+            variant_label=strategy["label"],
+        ))
+        _start_pipeline_worker(
+            run_id=child_run_id,
+            image_path=reference_path,
+            upload_dir=None,
+            pipeline_input_spec=child_input_spec,
+            seed_glsl=checkpoint.glsl,
+            model_config=_get_run_model(run_id),
+            trace_input={
+                "run_id": child_run_id,
+                "parent_run_id": run_id,
+                "checkpoint_id": checkpoint_id,
+                "variant_group_id": group_id,
+                "variant_index": idx,
+            },
+            trace_metadata={
+                "run_id": child_run_id,
+                "pipeline": "png-shader-variant",
+                "parent_run_id": run_id,
+                "variant_group_id": group_id,
+                "variant_index": idx,
+            },
+            pipeline_extra={
+                "human_feedback_notes": notes,
+                "directed_acceptance": directed_acceptance,
+                "force_first_refinement_iteration": True,
+                "lineage": variant_lineage,
+                "extra_artifacts": extra_artifacts,
+            },
+            variant_semaphore=_variant_worker_semaphore,
+        )
+        child_run_ids.append(child_run_id)
+
+    # Persist the group record best-effort (I/O errors must not fail the request).
+    record = VariantGroupRecord(
+        group_id=group_id,
+        root_run_id=root_run_id,
+        parent_run_id=run_id,
+        source_checkpoint_id=checkpoint_id,
+        feedback=feedback,
+        mode=mode,
+        variant_count=variant_count,
+        diversity=diversity,
+        status="running",
+        child_run_ids=child_run_ids,
+        created_at=time(),
+    )
+    try:
+        save_group(record, root=_VARIANT_GROUPS_ROOT)
+        append_group_event(
+            group_id,
+            {"event": "created", "child_run_ids": child_run_ids, "at": time()},
+            root=_VARIANT_GROUPS_ROOT,
+        )
+    except Exception:
+        logger.warning("variant group persist failed for group_id=%s", group_id, exc_info=True)
+
+    if stop_parent:
+        with _run_store_lock:
+            stored_parent = _run_store.get(run_id)
+            if stored_parent is not None and stored_parent.get("status") == "running":
+                stored_parent["stop_requested"] = True
+
+    log_event(
+        logger,
+        "variant_group_created",
+        run_id=run_id,
+        group_id=group_id,
+        variant_count=variant_count,
+    )
+
+    return {
+        "group_id": group_id,
+        "status": "running",
+        "parent_run_id": run_id,
+        "source_checkpoint_id": checkpoint_id,
+        "child_run_ids": child_run_ids,
+    }
 
 
 @router.post("/refine/{run_id}")
