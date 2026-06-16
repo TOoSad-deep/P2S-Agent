@@ -3315,3 +3315,110 @@ def test_explore_variants_injects_preference_notes(tmp_path, monkeypatch):
         )
         snap = artifacts["preference_profile_snapshot.json"]
         assert "clearer reflections without darkening" in snap.get("positive_preferences", [])
+
+
+# ---------------------------------------------------------------------------
+# V4.4-B2: preference-assisted ranking surfaced in GET /variant-groups/{id}
+# ---------------------------------------------------------------------------
+
+def test_get_variant_group_preference_ranking_enabled(tmp_path, monkeypatch):
+    """GET /variant-groups/{id}: matching preferred label → recommended=true;
+    winner_run_id is unchanged (None); preference_enabled=true at group level."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+
+    import app.routers.png_shader as ps
+    from app.pipeline.preferences import save_profile, default_profile
+
+    # Seed an enabled profile that prefers "conservative".
+    prof = default_profile()
+    prof["enabled"] = True
+    prof["preferred_variant_labels"] = ["conservative"]
+    save_profile(prof, root=prefs_root)
+
+    children = [
+        {
+            "run_id": "pr_a",
+            "status": "completed",
+            "variant_index": 0,
+            "variant_label": "conservative",
+            "quality_router": {"final_score": 0.7},
+        },
+        {
+            "run_id": "pr_b",
+            "status": "completed",
+            "variant_index": 1,
+            "variant_label": "semantic",
+            "quality_router": {"final_score": 0.8},
+        },
+    ]
+    _seed_group(vg_root, group_id="group_pref", children=children)
+
+    client = _client()
+    resp = client.get("/png-shader/variant-groups/group_pref")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # Group-level field.
+    assert body["preference_enabled"] is True
+
+    # winner_run_id must still be None (no winner set via /winner).
+    assert body["winner_run_id"] is None
+
+    variants_by_id = {v["run_id"]: v for v in body["variants"]}
+
+    # The "conservative" variant matches the preferred label.
+    assert variants_by_id["pr_a"]["recommended"] is True
+    assert variants_by_id["pr_a"]["preference_score"] >= 1.0
+
+    # The "semantic" variant has no label match.
+    assert variants_by_id["pr_b"]["recommended"] is False
+    assert variants_by_id["pr_b"]["preference_score"] == 0.0
+
+    # Winner sort order is unchanged (highest-score "semantic" is first when
+    # no winner is set, because score sort still governs).
+    # Most importantly, winner_run_id was never auto-set.
+    assert body["winner_run_id"] is None
+
+
+def test_get_variant_group_preference_ranking_disabled(tmp_path, monkeypatch):
+    """GET /variant-groups/{id}: with disabled/default profile → recommended=false,
+    preference_enabled=false."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+
+    from app.pipeline.preferences import save_profile, default_profile
+
+    # Seed a disabled profile.
+    prof = default_profile()
+    prof["enabled"] = False
+    prof["preferred_variant_labels"] = ["conservative"]
+    save_profile(prof, root=prefs_root)
+
+    children = [
+        {
+            "run_id": "pd_a",
+            "status": "completed",
+            "variant_index": 0,
+            "variant_label": "conservative",
+            "quality_router": {"final_score": 0.9},
+        },
+    ]
+    _seed_group(vg_root, group_id="group_pref_dis", children=children)
+
+    client = _client()
+    resp = client.get("/png-shader/variant-groups/group_pref_dis")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["preference_enabled"] is False
+
+    v = body["variants"][0]
+    assert v["recommended"] is False
+    assert v["preference_score"] == 0.0

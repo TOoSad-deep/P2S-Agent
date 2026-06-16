@@ -62,6 +62,7 @@ from app.pipeline.preferences import (
     load_preference_events,
     load_profile,
     patch_profile,
+    rank_variants_by_preference,
     rebuild_profile,
     save_profile,
 )
@@ -2320,6 +2321,15 @@ async def get_variant_group(group_id: str) -> dict:
 
     variants.sort(key=_sort_key)
 
+    # Annotate each variant with preference ranking (recommendation hint only;
+    # winner is NEVER changed here).
+    profile = load_profile(root=_PREFERENCES_ROOT)
+    ranking = rank_variants_by_preference(variants, profile)
+    for v in variants:
+        pref = ranking.get(v["run_id"], {"preference_score": 0.0, "recommended": False})
+        v["preference_score"] = pref["preference_score"]
+        v["recommended"] = pref["recommended"]
+
     status = aggregate_group_status([v["status"] for v in variants])
 
     return {
@@ -2329,6 +2339,7 @@ async def get_variant_group(group_id: str) -> dict:
         "feedback": record.feedback,
         "status": status,
         "winner_run_id": record.winner_run_id,
+        "preference_enabled": bool(profile.get("enabled")),
         "variants": variants,
     }
 

@@ -16,6 +16,7 @@ from app.pipeline.preferences import (
     load_preference_events,
     load_profile,
     patch_profile,
+    rank_variants_by_preference,
     rebuild_profile,
     save_profile,
 )
@@ -580,3 +581,172 @@ class TestIsolation:
             # If it existed before, it should not have our test data
             content = real_events.read_text()
             assert "evt-1" not in content
+
+
+# ---------------------------------------------------------------------------
+# V4.4: rank_variants_by_preference
+# ---------------------------------------------------------------------------
+
+def _make_variant(run_id: str, label: str, changes_summary: str | None = None) -> dict:
+    return {"run_id": run_id, "label": label, "changes_summary": changes_summary}
+
+
+def _enabled_profile(**kwargs) -> dict:
+    p = default_profile()
+    p["enabled"] = True
+    p.update(kwargs)
+    return p
+
+
+class TestRankVariantsByPreference:
+    # ------------------------------------------------------------------
+    # Preferred label → recommended + score ≥ 1.0
+    # ------------------------------------------------------------------
+
+    def test_label_match_recommended_true(self):
+        variants = [
+            _make_variant("r1", "conservative"),
+            _make_variant("r2", "semantic"),
+        ]
+        profile = _enabled_profile(preferred_variant_labels=["conservative"])
+        result = rank_variants_by_preference(variants, profile)
+
+        assert result["r1"]["recommended"] is True
+        assert result["r1"]["preference_score"] >= 1.0
+        assert result["r2"]["recommended"] is False
+        assert result["r2"]["preference_score"] == 0.0
+
+    # ------------------------------------------------------------------
+    # Disabled profile → all zero / False regardless of label match
+    # ------------------------------------------------------------------
+
+    def test_disabled_profile_all_zero(self):
+        variants = [
+            _make_variant("r1", "conservative"),
+            _make_variant("r2", "semantic"),
+        ]
+        profile = _enabled_profile(preferred_variant_labels=["conservative"])
+        profile["enabled"] = False
+        result = rank_variants_by_preference(variants, profile)
+
+        for v in variants:
+            assert result[v["run_id"]]["preference_score"] == 0.0
+            assert result[v["run_id"]]["recommended"] is False
+
+    # ------------------------------------------------------------------
+    # No preferred labels & no keyword hits → all 0 / False
+    # ------------------------------------------------------------------
+
+    def test_no_labels_no_keywords_all_zero(self):
+        variants = [
+            _make_variant("r1", "conservative", "made lighting brighter"),
+            _make_variant("r2", "semantic", "fixed colors"),
+        ]
+        profile = _enabled_profile(preferred_variant_labels=[], positive_preferences=[])
+        result = rank_variants_by_preference(variants, profile)
+
+        for v in variants:
+            assert result[v["run_id"]]["preference_score"] == 0.0
+            assert result[v["run_id"]]["recommended"] is False
+
+    # ------------------------------------------------------------------
+    # Determinism: same inputs → same output; inputs not mutated
+    # ------------------------------------------------------------------
+
+    def test_deterministic_and_no_mutation(self):
+        variants = [
+            _make_variant("r1", "conservative", "improved brightness"),
+            _make_variant("r2", "semantic"),
+        ]
+        profile = _enabled_profile(
+            preferred_variant_labels=["conservative"],
+            positive_preferences=["brightness"],
+        )
+        # Snapshot original state
+        original_variants = [dict(v) for v in variants]
+        original_profile = dict(profile)
+
+        result1 = rank_variants_by_preference(variants, profile)
+        result2 = rank_variants_by_preference(variants, profile)
+
+        # Same output both times.
+        assert result1 == result2
+
+        # Inputs not mutated.
+        for orig, v in zip(original_variants, variants):
+            assert v == orig
+        assert profile == original_profile
+
+    # ------------------------------------------------------------------
+    # Ties: two variants with the same top score → both recommended
+    # ------------------------------------------------------------------
+
+    def test_ties_both_recommended(self):
+        variants = [
+            _make_variant("r1", "bold"),
+            _make_variant("r2", "elegant"),
+            _make_variant("r3", "minimal"),
+        ]
+        profile = _enabled_profile(preferred_variant_labels=["bold", "elegant"])
+        result = rank_variants_by_preference(variants, profile)
+
+        assert result["r1"]["recommended"] is True
+        assert result["r2"]["recommended"] is True
+        assert result["r3"]["recommended"] is False
+        assert result["r1"]["preference_score"] == result["r2"]["preference_score"]
+        assert result["r1"]["preference_score"] >= 1.0
+
+    # ------------------------------------------------------------------
+    # Keyword contribution from changes_summary
+    # ------------------------------------------------------------------
+
+    def test_keyword_in_changes_summary_adds_score(self):
+        variants = [
+            _make_variant("r1", "variant_a", "improved brightness and contrast"),
+            _make_variant("r2", "variant_b"),
+        ]
+        profile = _enabled_profile(
+            preferred_variant_labels=[],
+            positive_preferences=["brightness"],
+        )
+        result = rank_variants_by_preference(variants, profile)
+
+        assert result["r1"]["preference_score"] > 0.0
+        assert result["r1"]["recommended"] is True
+        assert result["r2"]["preference_score"] == 0.0
+        assert result["r2"]["recommended"] is False
+
+    def test_keyword_contribution_capped_at_half(self):
+        variants = [
+            _make_variant("r1", "x", "brightness contrast saturation hue clarity"),
+        ]
+        profile = _enabled_profile(
+            preferred_variant_labels=[],
+            positive_preferences=["brightness", "contrast", "saturation", "hue", "clarity"],
+        )
+        result = rank_variants_by_preference(variants, profile)
+        # Capped at 0.5 total keyword contribution.
+        assert result["r1"]["preference_score"] == pytest.approx(0.5)
+
+    # ------------------------------------------------------------------
+    # Return values are JSON-friendly (float, bool)
+    # ------------------------------------------------------------------
+
+    def test_result_json_friendly(self):
+        variants = [_make_variant("r1", "x")]
+        profile = _enabled_profile(preferred_variant_labels=["x"])
+        result = rank_variants_by_preference(variants, profile)
+
+        score = result["r1"]["preference_score"]
+        rec = result["r1"]["recommended"]
+        assert isinstance(score, float)
+        assert isinstance(rec, bool)
+
+    # ------------------------------------------------------------------
+    # Empty variants list → empty dict
+    # ------------------------------------------------------------------
+
+    def test_empty_variants(self):
+        profile = _enabled_profile(preferred_variant_labels=["x"])
+        result = rank_variants_by_preference([], profile)
+        assert result == {}

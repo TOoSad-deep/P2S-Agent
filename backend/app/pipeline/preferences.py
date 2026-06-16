@@ -384,6 +384,87 @@ def rebuild_profile(
 
 
 # ---------------------------------------------------------------------------
+# Preference-assisted variant ranking
+# ---------------------------------------------------------------------------
+
+
+def rank_variants_by_preference(
+    variants: list[dict],
+    profile: dict,
+) -> dict[str, dict]:
+    """Return ``{run_id: {"preference_score": float, "recommended": bool}}`` for
+    each variant.
+
+    Deterministic; does NOT mutate inputs; never picks a winner — the result
+    is a HINT only.
+
+    Rules:
+    - If ``profile.get("enabled")`` is falsy → every variant gets
+      ``{"preference_score": 0.0, "recommended": False}``.
+    - Otherwise, each variant earns:
+      - ``+1.0`` if its ``label`` is in ``profile["preferred_variant_labels"]``.
+      - ``+0.25`` for each ``positive_preferences`` keyword that appears
+        (case-insensitive substring) in the variant's ``changes_summary``
+        (if present), capped at ``+0.5`` total keyword contribution.
+    - ``recommended`` is ``True`` for variant(s) whose ``preference_score`` is
+      strictly > 0 *and* tied for the maximum score. If all scores are 0, no
+      variant is recommended (all ``False``).
+    - Result is keyed by ``run_id``; values contain only JSON-friendly Python
+      floats and bools.
+    """
+    # Build a deterministic zero result for a single variant.
+    def _zero() -> dict:
+        return {"preference_score": 0.0, "recommended": False}
+
+    # Short-circuit: preferences disabled.
+    if not profile.get("enabled"):
+        return {v["run_id"]: _zero() for v in variants}
+
+    preferred_labels: list[str] = list(profile.get("preferred_variant_labels") or [])
+    positive_keywords: list[str] = list(profile.get("positive_preferences") or [])
+
+    # Compute raw scores (no mutation of input dicts).
+    scores: dict[str, float] = {}
+    for v in variants:
+        run_id = v["run_id"]
+        score = 0.0
+
+        # Label match: +1.0.
+        label = v.get("label") or ""
+        if label in preferred_labels:
+            score += 1.0
+
+        # Keyword hits in changes_summary: +0.25 each, capped at +0.5.
+        changes_summary = v.get("changes_summary")
+        if changes_summary and positive_keywords:
+            summary_lower = changes_summary.lower()
+            keyword_contribution = 0.0
+            for kw in positive_keywords:
+                if kw and kw.lower() in summary_lower:
+                    keyword_contribution += 0.25
+                    if keyword_contribution >= 0.5:
+                        keyword_contribution = 0.5
+                        break
+            score += keyword_contribution
+
+        scores[run_id] = round(score, 10)
+
+    # Determine max score and which variants are recommended.
+    max_score = max(scores.values()) if scores else 0.0
+    recommend_ids: set[str] = set()
+    if max_score > 0.0:
+        recommend_ids = {rid for rid, s in scores.items() if s == max_score}
+
+    return {
+        v["run_id"]: {
+            "preference_score": float(scores[v["run_id"]]),
+            "recommended": v["run_id"] in recommend_ids,
+        }
+        for v in variants
+    }
+
+
+# ---------------------------------------------------------------------------
 # LLM prompt notes
 # ---------------------------------------------------------------------------
 
