@@ -9,6 +9,9 @@ import type {
   BranchTreeResponse,
   RunMetadataPatch,
   BranchRefineRequest,
+  ExploreVariantsRequest,
+  ExploreVariantsResponse,
+  VariantGroupStatus,
 } from "../hooks/usePngShader";
 import {
   buildBranchCanvasModel,
@@ -30,6 +33,11 @@ interface Props {
   switchRun: (id: string) => void;
   updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<unknown>;
   branchRefine: (parentRunId: string, request: BranchRefineRequest) => Promise<string | null>;
+  exploreVariants: (parentRunId: string, request: ExploreVariantsRequest) => Promise<ExploreVariantsResponse | null>;
+  fetchVariantGroup: (groupId: string) => Promise<VariantGroupStatus>;
+  stopVariantGroup: (groupId: string) => Promise<void>;
+  selectVariantWinner: (groupId: string, runId: string, reason?: string) => Promise<void>;
+  rateVariant: (groupId: string, runId: string, rating: number, reason?: string, tags?: string[]) => Promise<void>;
   // optional preview callback (wired by parent if desired)
   onPreviewNode?: (node: BranchCanvasNode | null) => void;
   disabled?: boolean;
@@ -80,6 +88,11 @@ export default function BranchCanvasWorkspace({
   switchRun,
   updateRunMetadata,
   branchRefine,
+  exploreVariants,
+  fetchVariantGroup,
+  stopVariantGroup,
+  selectVariantWinner,
+  rateVariant,
   onPreviewNode,
   disabled,
 }: Props) {
@@ -91,6 +104,9 @@ export default function BranchCanvasWorkspace({
   const [submitError, setSubmitError] = useState<string | null>(null);
   // TODO(V2.1-8): make stateful when the collapse toggle UI is added
   const collapsedRunIds = useMemo(() => new Set<string>(), []);
+  const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set());
+  const [activeVariantGroupId, setActiveVariantGroupId] = useState<string | null>(null);
+  const [variantGroup, setVariantGroup] = useState<VariantGroupStatus | null>(null);
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -203,8 +219,9 @@ export default function BranchCanvasWorkspace({
         statusesByRunId,
         collapsedRunIds,
         favoriteRunIds,
+        collapsedGroupIds,
       }),
-    [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds],
+    [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds],
   );
 
   // ── Derived: positioned nodes (layout only; no selection) ─────────────────
@@ -281,6 +298,19 @@ export default function BranchCanvasWorkspace({
       setSelectedNodeId(id);
       const node = displayNodes.find((n) => n.id === id) ?? null;
       onPreviewNode?.(node);
+      // Toggle collapse for variant_group nodes
+      if (node?.data.type === "variant_group" && node.data.group_id) {
+        const gid = node.data.group_id;
+        setCollapsedGroupIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(gid)) {
+            next.delete(gid);
+          } else {
+            next.add(gid);
+          }
+          return next;
+        });
+      }
     },
     [displayNodes, onPreviewNode],
   );
@@ -369,6 +399,75 @@ export default function BranchCanvasWorkspace({
     setBranchDraft(null);
     setSelectedNodeId(null);
   }, []);
+
+  // ── Variant exploration handlers ───────────────────────────────────────────
+
+  const handleExploreVariants = useCallback(
+    async (parentRunId: string, request: ExploreVariantsRequest) => {
+      try {
+        const resp = await exploreVariants(parentRunId, request);
+        setBranchDraft(null);
+        setSelectedNodeId(null);
+        if (resp?.group_id) {
+          setActiveVariantGroupId(resp.group_id);
+          if (runId) fetchBranches(runId).then(setBranchInfo).catch(() => {});
+        }
+      } catch {
+        setSubmitError("变体探索失败 / Explore variants failed");
+      }
+    },
+    [exploreVariants, runId, fetchBranches],
+  );
+
+  const handleSelectWinner = useCallback(
+    async (groupId: string, winnerRunId: string, reason?: string) => {
+      try {
+        await selectVariantWinner(groupId, winnerRunId, reason);
+      } catch {
+        return;
+      }
+      switchRun(winnerRunId);
+      if (runId) fetchBranches(runId).then(setBranchInfo).catch(() => {});
+      fetchVariantGroup(groupId).then(setVariantGroup).catch(() => {});
+    },
+    [selectVariantWinner, switchRun, runId, fetchBranches, fetchVariantGroup],
+  );
+
+  const handleStopGroup = useCallback(
+    (groupId: string) => { stopVariantGroup(groupId); },
+    [stopVariantGroup],
+  );
+
+  const handleRateVariant = useCallback(
+    (groupId: string, rid: string, rating: number) => { rateVariant(groupId, rid, rating); },
+    [rateVariant],
+  );
+
+  // ── Group polling (2s, stops on terminal status) ───────────────────────────
+  useEffect(() => {
+    if (!activeVariantGroupId) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const TERMINAL = new Set(["completed", "failed", "partial_failed", "cancelled"]);
+    const poll = async () => {
+      if (!alive) return;
+      try {
+        const g = await fetchVariantGroup(activeVariantGroupId);
+        if (!alive) return;
+        setVariantGroup(g);
+        if (runId) fetchBranches(runId).then((b) => { if (alive) setBranchInfo(b); }).catch(() => {});
+        if (TERMINAL.has(g.status)) return; // stop polling
+      } catch {
+        // best-effort: keep trying
+      }
+      timer = setTimeout(poll, 2000);
+    };
+    poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeVariantGroupId, fetchVariantGroup, fetchBranches, runId]);
 
   // ── Placeholder when no run ────────────────────────────────────────────────
   if (!runId || !branchInfo) {
@@ -471,6 +570,11 @@ export default function BranchCanvasWorkspace({
             onContinueFromRun={handleContinueFromRun}
             onSubmitBranch={handleSubmitBranch}
             onCancelBranch={handleCancelBranch}
+            onExploreVariants={handleExploreVariants}
+            variantGroup={variantGroup}
+            onSelectWinner={handleSelectWinner}
+            onStopGroup={handleStopGroup}
+            onRateVariant={handleRateVariant}
             submitError={submitError}
             disabled={disabled}
           />

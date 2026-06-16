@@ -25,6 +25,11 @@ export default function App() {
     fetchBranches,
     updateRunMetadata,
     switchRun,
+    exploreVariants,
+    fetchVariantGroup,
+    stopVariantGroup,
+    selectVariantWinner,
+    rateVariant,
   } = usePngShader()
 
   const models = useModels()
@@ -175,6 +180,11 @@ export default function App() {
           updateRunMetadata={updateRunMetadata}
           switchRun={switchRun}
           branchRefine={branchRefine}
+          exploreVariants={exploreVariants}
+          fetchVariantGroup={fetchVariantGroup}
+          stopVariantGroup={stopVariantGroup}
+          selectVariantWinner={selectVariantWinner}
+          rateVariant={rateVariant}
         />
       </main>
 

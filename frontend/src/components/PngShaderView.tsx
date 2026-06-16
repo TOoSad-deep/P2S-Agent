@@ -20,6 +20,9 @@ import type {
   BranchTreeResponse,
   RunMetadataPatch,
   RunMetadataRecord,
+  ExploreVariantsRequest,
+  ExploreVariantsResponse,
+  VariantGroupStatus,
 } from "../hooks/usePngShader";
 import StrategyControlPanel from "./StrategyControlPanel";
 import ModelSelectorPanel from "./ModelSelectorPanel";
@@ -55,6 +58,11 @@ interface Props {
   updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<RunMetadataRecord>;
   switchRun: (id: string) => void;
   branchRefine: (parentRunId: string, request: BranchRefineRequest) => Promise<string | null>;
+  exploreVariants: (parentRunId: string, request: ExploreVariantsRequest) => Promise<ExploreVariantsResponse | null>;
+  fetchVariantGroup: (groupId: string) => Promise<VariantGroupStatus>;
+  stopVariantGroup: (groupId: string) => Promise<void>;
+  selectVariantWinner: (groupId: string, runId: string, reason?: string) => Promise<void>;
+  rateVariant: (groupId: string, runId: string, rating: number, reason?: string, tags?: string[]) => Promise<void>;
 }
 
 /** Mirror of backend list_checkpoints: candidates with GLSL, iteration
@@ -138,6 +146,11 @@ export default function PngShaderView({
   updateRunMetadata,
   switchRun,
   branchRefine,
+  exploreVariants,
+  fetchVariantGroup,
+  stopVariantGroup,
+  selectVariantWinner,
+  rateVariant,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
@@ -463,6 +476,11 @@ export default function PngShaderView({
                   switchRun={switchRun}
                   updateRunMetadata={updateRunMetadata}
                   branchRefine={branchRefine}
+                  exploreVariants={exploreVariants}
+                  fetchVariantGroup={fetchVariantGroup}
+                  stopVariantGroup={stopVariantGroup}
+                  selectVariantWinner={selectVariantWinner}
+                  rateVariant={rateVariant}
                   disabled={loading}
                 />
               ) : (

@@ -4,7 +4,7 @@
 import { useState, useEffect } from "react";
 import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
-import type { BranchMode, BranchRefineRequest } from "../hooks/usePngShader";
+import type { BranchMode, BranchRefineRequest, ExploreVariantsRequest, VariantGroupStatus } from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
 
 // ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
@@ -33,6 +33,12 @@ interface Props {
   onContinueFromRun: (runId: string) => void;
   onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
   onCancelBranch: () => void;
+  // V3 variant props (optional — used by BranchActionView now; others wired for next task)
+  onExploreVariants?: (parentRunId: string, request: ExploreVariantsRequest) => void;
+  variantGroup?: VariantGroupStatus | null;
+  onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
+  onStopGroup?: (groupId: string) => void;
+  onRateVariant?: (groupId: string, runId: string, rating: number) => void;
   submitError?: string | null;
   disabled?: boolean;
 }
@@ -279,23 +285,31 @@ function CheckpointNodeView({ node, onRefineFromCheckpoint, disabled }: Checkpoi
   );
 }
 
+const VARIANT_COUNTS = [2, 3, 4, 6] as const;
+type VariantCount = typeof VARIANT_COUNTS[number];
+type Diversity = "low" | "medium" | "high";
+
 interface BranchActionViewProps {
   node: BranchCanvasNode;
   onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
   onCancelBranch: () => void;
+  onExploreVariants?: (parentRunId: string, request: ExploreVariantsRequest) => void;
   submitError?: string | null;
   disabled?: boolean;
 }
 
-function BranchActionView({ node, onSubmitBranch, onCancelBranch, submitError, disabled }: BranchActionViewProps) {
+function BranchActionView({ node, onSubmitBranch, onCancelBranch, onExploreVariants, submitError, disabled }: BranchActionViewProps) {
   const data = node.data;
   const runId = data.run_id!;
 
   const [feedback, setFeedback] = useState("");
   const [mode, setMode] = useState<BranchMode>("refine");
   const [locks, setLocks] = useState<Record<string, boolean>>({});
+  const [exploreMode, setExploreMode] = useState(false);
+  const [variantCount, setVariantCount] = useState<VariantCount>(4);
+  const [diversity, setDiversity] = useState<Diversity>("medium");
 
-  const feedbackRequired = mode === "refine" || mode === "polish";
+  const feedbackRequired = exploreMode || mode === "refine" || mode === "polish";
   const canSubmit = !disabled && (!feedbackRequired || feedback.trim().length > 0);
 
   const toggleLock = (key: string) =>
@@ -304,12 +318,22 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, submitError, d
   const handleSubmit = () => {
     if (!canSubmit) return;
     const checkpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
-    onSubmitBranch(runId, {
-      checkpoint_id: checkpointId,
-      feedback: feedback.trim(),
-      mode,
-      locks,
-    });
+    if (exploreMode && onExploreVariants) {
+      onExploreVariants(runId, {
+        checkpoint_id: checkpointId,
+        feedback: feedback.trim(),
+        variant_count: variantCount,
+        diversity,
+        mode: "explore",
+      });
+    } else {
+      onSubmitBranch(runId, {
+        checkpoint_id: checkpointId,
+        feedback: feedback.trim(),
+        mode,
+        locks,
+      });
+    }
   };
 
   return (
@@ -332,44 +356,105 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, submitError, d
         className="w-full text-xs p-2 rounded bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-primary)] resize-y placeholder:text-[var(--text-muted)] disabled:opacity-40"
       />
 
-      {/* Mode segmented */}
-      <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
-        {MODES.map(({ mode: m, label, sub, desc }) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            disabled={disabled}
-            title={`${sub} — ${desc}`}
-            className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-all disabled:opacity-40 ${
-              mode === m
-                ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
-                : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-            }`}
-          >
-            {label}
-            <span className="ml-1 opacity-70">{sub}</span>
-          </button>
-        ))}
-      </div>
+      {/* Explore variants toggle */}
+      <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer">
+        <input
+          type="checkbox"
+          checked={exploreMode}
+          onChange={(e) => setExploreMode(e.target.checked)}
+          disabled={disabled}
+          className="accent-emerald-500"
+        />
+        探索多个变体 / Explore variants
+      </label>
 
-      {/* Locks */}
-      <div className="grid grid-cols-2 gap-1">
-        {LOCKS.map(({ key, label }) => (
-          <label
-            key={key}
-            className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer"
-          >
-            <input
-              type="checkbox"
-              checked={!!locks[key]}
-              onChange={() => toggleLock(key)}
-              disabled={disabled}
-              className="accent-emerald-500"
-            />
-            {label}
-          </label>
-        ))}
-      </div>
+      {exploreMode ? (
+        /* Explore controls */
+        <div className="flex flex-col gap-1.5">
+          {/* Variant count */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-[var(--text-muted)] shrink-0">数量 Count</span>
+            <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
+              {VARIANT_COUNTS.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setVariantCount(n)}
+                  disabled={disabled}
+                  className={`px-2 py-0.5 text-[11px] rounded-md transition-all disabled:opacity-40 ${
+                    variantCount === n
+                      ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Diversity */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-[var(--text-muted)] shrink-0">多样性 Diversity</span>
+            <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
+              {(["low", "medium", "high"] as const).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDiversity(d)}
+                  disabled={disabled}
+                  className={`px-2 py-0.5 text-[11px] rounded-md transition-all disabled:opacity-40 ${
+                    diversity === d
+                      ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                  }`}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* Refine controls (unchanged) */
+        <>
+          {/* Mode segmented */}
+          <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
+            {MODES.map(({ mode: m, label, sub, desc }) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                disabled={disabled}
+                title={`${sub} — ${desc}`}
+                className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-all disabled:opacity-40 ${
+                  mode === m
+                    ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
+                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                }`}
+              >
+                {label}
+                <span className="ml-1 opacity-70">{sub}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Locks */}
+          <div className="grid grid-cols-2 gap-1">
+            {LOCKS.map(({ key, label }) => (
+              <label
+                key={key}
+                className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={!!locks[key]}
+                  onChange={() => toggleLock(key)}
+                  disabled={disabled}
+                  className="accent-emerald-500"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
 
       {/* Submit error */}
       {submitError && (
@@ -391,7 +476,7 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, submitError, d
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-semibold"
         >
           <GitBranch className="w-3 h-3" />
-          运行分支 Submit
+          {exploreMode ? "运行变体探索 / Explore" : "运行分支 Submit"}
         </button>
       </div>
     </div>
@@ -419,8 +504,10 @@ export default function BranchCanvasInspector({
   onContinueFromRun,
   onSubmitBranch,
   onCancelBranch,
-  submitError,
+  onExploreVariants,
+  // variantGroup, onSelectWinner, onStopGroup, onRateVariant used in next task (V3-8)
   disabled,
+  submitError,
 }: Props) {
   // Reset run-node title draft when node identity changes (handled inside RunNodeView too,
   // but the key prop on RunNodeView ensures full remount on node switch).
@@ -464,6 +551,7 @@ export default function BranchCanvasInspector({
             node={node}
             onSubmitBranch={onSubmitBranch}
             onCancelBranch={onCancelBranch}
+            onExploreVariants={onExploreVariants}
             submitError={submitError}
             disabled={disabled}
           />
