@@ -252,11 +252,11 @@ function CheckpointNodeView({ node, onRefineFromCheckpoint, disabled }: Checkpoi
         </div>
       )}
 
-      {/* Feedback if any */}
-      {data.feedback && (
+      {/* Changes summary */}
+      {data.changes_summary && (
         <div className="text-[11px] text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded p-2 leading-relaxed">
-          <span className="text-[var(--text-muted)]">反馈 Feedback: </span>
-          {data.feedback}
+          <span className="text-[var(--text-muted)]">变更摘要 Summary: </span>
+          {data.changes_summary}
         </div>
       )}
 
@@ -293,13 +293,6 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, disabled }: Br
   const [mode, setMode] = useState<BranchMode>("refine");
   const [locks, setLocks] = useState<Record<string, boolean>>({});
 
-  // Reset form state when the selected node changes
-  useEffect(() => {
-    setFeedback("");
-    setMode("refine");
-    setLocks({});
-  }, [node.id]);
-
   const feedbackRequired = mode === "refine" || mode === "polish";
   const canSubmit = !disabled && (!feedbackRequired || feedback.trim().length > 0);
 
@@ -310,7 +303,7 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, disabled }: Br
     if (!canSubmit) return;
     const checkpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
     onSubmitBranch(runId, {
-      checkpoint_id: checkpointId as string,
+      checkpoint_id: checkpointId,
       feedback: feedback.trim(),
       mode,
       locks,
@@ -323,7 +316,7 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, disabled }: Br
       {data.source_checkpoint_id && (
         <p className="text-[11px] text-[var(--text-muted)]">
           起点 Start:{" "}
-          <span className="font-mono text-[var(--text-secondary)]">{data.source_checkpoint_id as string}</span>
+          <span className="font-mono text-[var(--text-secondary)]">{data.source_checkpoint_id}</span>
         </p>
       )}
 

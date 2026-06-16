@@ -26,6 +26,7 @@ export interface BranchCanvasNodeData extends Record<string, unknown> {
   accepted?: boolean | null;
   favorite?: boolean;
   feedback?: string | null;
+  changes_summary?: string | null;
   thumbnail_artifact_id?: string | null;
   shader_artifact_id?: string | null;
   group_id?: string | null;
@@ -267,6 +268,7 @@ export function buildBranchCanvasModel(
             score: entry.score ?? null,
             delta: entry.delta ?? null,
             accepted: entry.accepted ?? null,
+            changes_summary: entry.changes_summary ?? null,
             thumbnail_artifact_id: entry.artifact_ids?.render ?? null,
             shader_artifact_id: entry.artifact_ids?.shader ?? null,
           },

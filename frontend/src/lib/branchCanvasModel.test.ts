@@ -352,6 +352,7 @@ describe("buildBranchCanvasModel", () => {
       accepted: true,
       has_glsl: true,
       artifact_ids: { render: "art-render-001", shader: "art-shader-001" },
+      changes_summary: "Added fog layer and brightened water reflections",
     };
     const out = buildBranchCanvasModel(
       baseInput({
@@ -372,7 +373,34 @@ describe("buildBranchCanvasModel", () => {
     expect(cpNode!.data.accepted).toBe(true);
     expect(cpNode!.data.thumbnail_artifact_id).toBe("art-render-001");
     expect(cpNode!.data.shader_artifact_id).toBe("art-shader-001");
+    expect(cpNode!.data.changes_summary).toBe("Added fog layer and brightened water reflections");
     expect(cpNode!.position).toEqual({ x: 0, y: 0 });
+  });
+
+  // ── 11b. changes_summary is null when not provided ─────────────────────────
+  it("sets changes_summary to null when timeline entry omits it", () => {
+    const tree = makeTreeNode({ run_id: ROOT_ID });
+    const entry: CheckpointTimelineEntry = {
+      id: "final:selected",
+      run_id: ROOT_ID,
+      kind: "candidate",
+      label: "Final",
+      score: 0.80,
+      delta: null,
+      accepted: null,
+      has_glsl: false,
+    };
+    const out = buildBranchCanvasModel(
+      baseInput({
+        branchTree: tree,
+        activeRunId: ROOT_ID,
+        timelinesByRunId: { [ROOT_ID]: [entry] },
+      }),
+    );
+
+    const cpNode = out.nodes.find((n) => n.id === `cp:${ROOT_ID}:final:selected`);
+    expect(cpNode).toBeDefined();
+    expect(cpNode!.data.changes_summary).toBeNull();
   });
 
   // ── 12. source_checkpoint_id that is a child reference is kept during cap ─
