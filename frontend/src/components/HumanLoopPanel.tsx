@@ -7,6 +7,7 @@ import type {
   BranchRefineRequest,
   PipelineCheckpointMeta,
 } from "../hooks/usePngShader";
+import { fmtScore } from "../lib/format";
 
 const MODES: { mode: BranchMode; label: string; sub: string; desc: string }[] = [
   { mode: "refine", label: "定向", sub: "Refine", desc: "按反馈定向优化（强制至少一轮）" },
@@ -29,10 +30,6 @@ interface Props {
   lineage?: BranchLineage | null;
   disabled?: boolean;
   busy?: boolean;
-}
-
-function fmtScore(score?: number | null): string {
-  return typeof score === "number" ? score.toFixed(3) : "—";
 }
 
 export default function HumanLoopPanel({

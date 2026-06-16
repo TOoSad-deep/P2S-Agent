@@ -1,18 +1,10 @@
 // BranchCanvasNode.tsx — custom React Flow v12 node components (V2.1-4).
 // Pure presentational. No data fetching. No app state.
+import { memo } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { ChevronRight, GitBranch, Image, Loader, Star, X } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
-
-// ─── Shared helpers ───────────────────────────────────────────────────────────
-
-function fmtScore(score: number | null | undefined): string {
-  return typeof score === "number" ? score.toFixed(3) : "—";
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max - 1) + "…" : text;
-}
+import { fmtScore, truncate } from "../lib/format";
 
 // ─── Status dot/spinner (reusable within this file) ──────────────────────────
 
@@ -37,7 +29,7 @@ function StatusDot({ status }: { status: string | undefined }) {
 
 // ─── 1. RunNode ───────────────────────────────────────────────────────────────
 
-export function RunNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+export const RunNode = memo(function RunNode({ data, selected }: NodeProps<BranchCanvasNode>) {
   const ringClass = selected ? "ring-2 ring-emerald-500" : "";
 
   return (
@@ -104,11 +96,11 @@ export function RunNode({ data, selected }: NodeProps<BranchCanvasNode>) {
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
-}
+});
 
 // ─── 2. CheckpointNode ────────────────────────────────────────────────────────
 
-export function CheckpointNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+export const CheckpointNode = memo(function CheckpointNode({ data, selected }: NodeProps<BranchCanvasNode>) {
   const ringClass = selected ? "ring-2 ring-emerald-500" : "";
 
   const deltaNum = typeof data.delta === "number" ? data.delta : null;
@@ -159,8 +151,7 @@ export function CheckpointNode({ data, selected }: NodeProps<BranchCanvasNode>) 
         )}
         {!deltaZero && deltaNum !== null && (
           <span
-            className="font-mono"
-            style={{ color: deltaPositive ? "#10b981" : deltaNegative ? "#f87171" : "var(--text-muted)" }}
+            className={`font-mono ${deltaPositive ? "text-emerald-400" : deltaNegative ? "text-red-400" : ""}`}
           >
             {deltaPositive ? "▲" : "▼"}{Math.abs(deltaNum).toFixed(3)}
           </span>
@@ -170,11 +161,11 @@ export function CheckpointNode({ data, selected }: NodeProps<BranchCanvasNode>) 
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
-}
+});
 
 // ─── 3. BranchActionNode ─────────────────────────────────────────────────────
 
-export function BranchActionNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+export const BranchActionNode = memo(function BranchActionNode({ data, selected }: NodeProps<BranchCanvasNode>) {
   const ringClass = selected ? "ring-2 ring-emerald-500" : "";
 
   const sourceRef = data.source_checkpoint_id ?? data.run_id;
@@ -185,7 +176,7 @@ export function BranchActionNode({ data, selected }: NodeProps<BranchCanvasNode>
       style={{
         width: 160,
         background: "color-mix(in srgb, var(--bg-secondary) 70%, transparent)",
-        border: "1.5px dashed #10b981",
+        border: "1.5px dashed var(--accent-primary)",
         color: "var(--text-primary)",
         opacity: 0.88,
       }}
@@ -213,11 +204,11 @@ export function BranchActionNode({ data, selected }: NodeProps<BranchCanvasNode>
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
-}
+});
 
 // ─── 4. InputNode ─────────────────────────────────────────────────────────────
 
-export function InputNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+export const InputNode = memo(function InputNode({ data, selected }: NodeProps<BranchCanvasNode>) {
   const ringClass = selected ? "ring-2 ring-emerald-500" : "";
 
   return (
@@ -230,8 +221,6 @@ export function InputNode({ data, selected }: NodeProps<BranchCanvasNode>) {
         color: "var(--text-primary)",
       }}
     >
-      <Handle type="target" position={Position.Top} />
-
       <Image
         className="w-3.5 h-3.5 flex-shrink-0"
         style={{ color: "var(--accent-primary)" }}
@@ -243,7 +232,7 @@ export function InputNode({ data, selected }: NodeProps<BranchCanvasNode>) {
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
-}
+});
 
 // ─── Stable nodeTypes export ──────────────────────────────────────────────────
 // Module constant — satisfies React Flow's nodeTypes stability contract.

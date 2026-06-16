@@ -1,16 +1,13 @@
 // CheckpointTimeline.tsx — scannable left-to-right timeline of a run's branchable checkpoints (V2).
 import { GitCommitHorizontal, Target, X } from "lucide-react";
 import type { CheckpointTimelineEntry } from "../hooks/usePngShader";
+import { fmtScore } from "../lib/format";
 
 interface Props {
   entries: CheckpointTimelineEntry[];
   activeCheckpointId: string | null;
   onSelect: (id: string) => void;
   disabled?: boolean;
-}
-
-function fmtScore(score?: number | null): string {
-  return typeof score === "number" ? score.toFixed(3) : "—";
 }
 
 export default function CheckpointTimeline({

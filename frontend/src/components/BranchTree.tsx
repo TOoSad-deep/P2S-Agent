@@ -1,16 +1,13 @@
 // BranchTree.tsx — recursive parent/child run tree (V2).
 import { GitBranch, Loader, Star } from "lucide-react";
 import type { BranchTreeNode } from "../hooks/usePngShader";
+import { fmtScore } from "../lib/format";
 
 interface Props {
   tree: BranchTreeNode | null;
   activeRunId: string | null;
   onSelectRun: (runId: string) => void;
   disabled?: boolean;
-}
-
-function fmtScore(score?: number | null): string {
-  return typeof score === "number" ? score.toFixed(3) : "—";
 }
 
 function shortId(runId: string): string {
