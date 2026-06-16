@@ -1,0 +1,483 @@
+// BranchCanvasInspector.tsx — right-side inspector for the Branch Canvas Workspace (V2.1-5).
+// Switches content by selected node type: null / input / run / checkpoint / branch_action / reserved.
+// Presentational + callbacks only; branch-draft form owns local state. No data fetching.
+import { useState, useEffect } from "react";
+import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge } from "lucide-react";
+import type { BranchCanvasNode } from "../lib/branchCanvasModel";
+import type { BranchMode, BranchRefineRequest } from "../hooks/usePngShader";
+import { fmtScore } from "../lib/format";
+
+// ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
+
+const MODES: { mode: BranchMode; label: string; sub: string; desc: string }[] = [
+  { mode: "refine", label: "定向", sub: "Refine", desc: "按反馈定向优化（强制至少一轮）" },
+  { mode: "polish", label: "精修", sub: "Polish", desc: "结构尽量不变，仅小幅画质提升" },
+  { mode: "continue", label: "继续", sub: "Continue", desc: "不注入目标，继续自动优化" },
+];
+
+const LOCKS: { key: string; label: string }[] = [
+  { key: "preserve_layout", label: "保持构图 Layout" },
+  { key: "preserve_palette", label: "保持调色 Palette" },
+  { key: "preserve_background", label: "保护背景 Background" },
+  { key: "small_edits_only", label: "仅小幅改动 Small edits" },
+];
+
+// ─── Props ────────────────────────────────────────────────────────────────────
+
+interface Props {
+  node: BranchCanvasNode | null;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+  onUpdateMetadata: (runId: string, patch: { title?: string; favorite?: boolean }) => void;
+  onRefineFromCheckpoint: (runId: string, checkpointId: string) => void;
+  onContinueFromRun: (runId: string) => void;
+  onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
+  onCancelBranch: () => void;
+  disabled?: boolean;
+}
+
+// ─── Panel wrapper ────────────────────────────────────────────────────────────
+
+function PanelShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-2.5 px-3 py-2.5 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg h-full overflow-y-auto">
+      {/* Header */}
+      <div className="flex items-center gap-2 shrink-0">
+        <Search className="w-4 h-4 text-[var(--accent-primary)] flex-shrink-0" />
+        <p className="text-xs font-medium text-[var(--text-primary)] leading-tight">
+          检查器
+          <span className="ml-2 text-[var(--text-muted)] font-normal">Inspector</span>
+        </p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ─── Sub-views ────────────────────────────────────────────────────────────────
+
+function NoNodeView() {
+  return (
+    <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
+      选择一个节点查看详情
+      <br />
+      <span className="opacity-70">Select a node</span>
+    </p>
+  );
+}
+
+function InputNodeView({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="text-[11px] font-medium text-[var(--text-secondary)]">
+        输入图像 <span className="text-[var(--text-muted)] font-normal">Input image</span>
+      </p>
+      <p className="text-[11px] text-[var(--text-primary)] font-mono truncate">{label}</p>
+    </div>
+  );
+}
+
+interface RunNodeViewProps {
+  node: BranchCanvasNode;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+  onUpdateMetadata: (runId: string, patch: { title?: string; favorite?: boolean }) => void;
+  onContinueFromRun: (runId: string) => void;
+  disabled?: boolean;
+}
+
+function RunNodeView({
+  node,
+  activeRunId,
+  onSwitchRun,
+  onUpdateMetadata,
+  onContinueFromRun,
+  disabled,
+}: RunNodeViewProps) {
+  const data = node.data;
+  const runId = data.run_id!;
+
+  // Local state for the editable title
+  const [titleDraft, setTitleDraft] = useState(data.title ?? "");
+
+  // Sync seed when node changes (parent effect resets too, but be defensive)
+  useEffect(() => {
+    setTitleDraft(data.title ?? "");
+  }, [node.id, data.title]);
+
+  const commitTitle = () => {
+    const trimmed = titleDraft.trim();
+    onUpdateMetadata(runId, { title: trimmed || undefined });
+  };
+
+  const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.currentTarget.blur();
+    }
+  };
+
+  const isCurrent = runId === activeRunId;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Status + score row */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] font-mono">
+          {data.status ?? "—"}
+        </span>
+        <span className="text-[11px] text-[var(--text-muted)]">
+          score{" "}
+          <span className="text-[var(--text-primary)] font-mono">{fmtScore(data.score)}</span>
+        </span>
+        {isCurrent && (
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-medium">
+            活跃 Active
+          </span>
+        )}
+      </div>
+
+      {/* Source checkpoint */}
+      {data.source_checkpoint_id && (
+        <p className="text-[11px] text-[var(--text-muted)]">
+          来自检查点 <span className="font-mono text-[var(--text-secondary)]">{data.source_checkpoint_id}</span>
+        </p>
+      )}
+
+      {/* Feedback */}
+      {data.feedback && (
+        <div className="text-[11px] text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded p-2 leading-relaxed">
+          <span className="text-[var(--text-muted)]">反馈 Feedback: </span>
+          {data.feedback}
+        </div>
+      )}
+
+      {/* Editable title */}
+      <div className="flex flex-col gap-1">
+        <label className="text-[11px] text-[var(--text-muted)]">标题 Title</label>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={handleTitleKeyDown}
+            disabled={disabled}
+            placeholder={runId.slice(-8)}
+            className="flex-1 text-xs px-2 py-1 rounded bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] disabled:opacity-40"
+          />
+          {/* Favorite star */}
+          <button
+            onClick={() => onUpdateMetadata(runId, { favorite: !data.favorite })}
+            disabled={disabled}
+            title={data.favorite ? "取消收藏 Unfavorite" : "收藏 Favorite"}
+            className={`p-1 rounded transition-all disabled:opacity-40 ${
+              data.favorite
+                ? "text-yellow-400 hover:text-yellow-300"
+                : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            }`}
+          >
+            <Star className={`w-3.5 h-3.5 ${data.favorite ? "fill-current" : ""}`} />
+          </button>
+        </div>
+      </div>
+
+      {/* Run ID (readonly, small) */}
+      <p className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={runId}>
+        {runId}
+      </p>
+
+      {/* Actions */}
+      <div className="flex flex-col gap-1.5 pt-1">
+        <button
+          onClick={() => onSwitchRun(runId)}
+          disabled={disabled || isCurrent}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          <GitBranch className="w-3 h-3" />
+          切换到此分支 / Switch to this run
+        </button>
+        <button
+          onClick={() => onContinueFromRun(runId)}
+          disabled={disabled}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          <GitMerge className="w-3 h-3" />
+          从最终结果继续 / Continue from final
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface CheckpointNodeViewProps {
+  node: BranchCanvasNode;
+  onRefineFromCheckpoint: (runId: string, checkpointId: string) => void;
+  disabled?: boolean;
+}
+
+function CheckpointNodeView({ node, onRefineFromCheckpoint, disabled }: CheckpointNodeViewProps) {
+  const data = node.data;
+  const runId = data.run_id!;
+  const checkpointId = data.checkpoint_id!;
+
+  const deltaPositive = typeof data.delta === "number" && data.delta > 0;
+  const deltaNegative = typeof data.delta === "number" && data.delta < 0;
+  const deltaZero = typeof data.delta === "number" && data.delta === 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Label + score */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] font-medium text-[var(--text-primary)]">{data.label}</span>
+        <span className="text-[11px] text-[var(--text-muted)]">
+          score <span className="font-mono text-[var(--text-primary)]">{fmtScore(data.score)}</span>
+        </span>
+      </div>
+
+      {/* Delta */}
+      {typeof data.delta === "number" && !deltaZero && (
+        <p className={`text-[11px] font-mono ${deltaPositive ? "text-emerald-400" : deltaNegative ? "text-red-400" : "text-[var(--text-muted)]"}`}>
+          {deltaPositive ? "▲" : "▼"} {Math.abs(data.delta).toFixed(3)}
+        </p>
+      )}
+
+      {/* Accepted / rejected */}
+      {data.accepted !== null && data.accepted !== undefined && (
+        <div className={`flex items-center gap-1.5 text-[11px] ${data.accepted ? "text-emerald-400" : "text-red-400"}`}>
+          {data.accepted ? (
+            <><CheckCircle className="w-3 h-3" /> 已接受 Accepted</>
+          ) : (
+            <><XCircle className="w-3 h-3" /> 已拒绝 Rejected</>
+          )}
+        </div>
+      )}
+
+      {/* Feedback if any */}
+      {data.feedback && (
+        <div className="text-[11px] text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded p-2 leading-relaxed">
+          <span className="text-[var(--text-muted)]">反馈 Feedback: </span>
+          {data.feedback}
+        </div>
+      )}
+
+      {/* Checkpoint ID */}
+      <p className="text-[10px] text-[var(--text-muted)] font-mono truncate" title={checkpointId}>
+        {checkpointId}
+      </p>
+
+      {/* Action */}
+      <button
+        onClick={() => onRefineFromCheckpoint(runId, checkpointId)}
+        disabled={disabled}
+        className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-medium"
+      >
+        <GitBranch className="w-3 h-3" />
+        从此处定向优化 / Refine from here
+      </button>
+    </div>
+  );
+}
+
+interface BranchActionViewProps {
+  node: BranchCanvasNode;
+  onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
+  onCancelBranch: () => void;
+  disabled?: boolean;
+}
+
+function BranchActionView({ node, onSubmitBranch, onCancelBranch, disabled }: BranchActionViewProps) {
+  const data = node.data;
+  const runId = data.run_id!;
+
+  const [feedback, setFeedback] = useState("");
+  const [mode, setMode] = useState<BranchMode>("refine");
+  const [locks, setLocks] = useState<Record<string, boolean>>({});
+
+  // Reset form state when the selected node changes
+  useEffect(() => {
+    setFeedback("");
+    setMode("refine");
+    setLocks({});
+  }, [node.id]);
+
+  const feedbackRequired = mode === "refine" || mode === "polish";
+  const canSubmit = !disabled && (!feedbackRequired || feedback.trim().length > 0);
+
+  const toggleLock = (key: string) =>
+    setLocks((prev) => ({ ...prev, [key]: !prev[key] }));
+
+  const handleSubmit = () => {
+    if (!canSubmit) return;
+    const checkpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
+    onSubmitBranch(runId, {
+      checkpoint_id: checkpointId as string,
+      feedback: feedback.trim(),
+      mode,
+      locks,
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Source info */}
+      {data.source_checkpoint_id && (
+        <p className="text-[11px] text-[var(--text-muted)]">
+          起点 Start:{" "}
+          <span className="font-mono text-[var(--text-secondary)]">{data.source_checkpoint_id as string}</span>
+        </p>
+      )}
+
+      {/* Feedback textarea */}
+      <textarea
+        value={feedback}
+        onChange={(e) => setFeedback(e.target.value)}
+        disabled={disabled}
+        rows={3}
+        placeholder="例如：保持云雾层次，但让水面反射更明显，整体不要变暗。"
+        className="w-full text-xs p-2 rounded bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-primary)] resize-y placeholder:text-[var(--text-muted)] disabled:opacity-40"
+      />
+
+      {/* Mode segmented */}
+      <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
+        {MODES.map(({ mode: m, label, sub, desc }) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            disabled={disabled}
+            title={`${sub} — ${desc}`}
+            className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-all disabled:opacity-40 ${
+              mode === m
+                ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
+                : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+            }`}
+          >
+            {label}
+            <span className="ml-1 opacity-70">{sub}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Locks */}
+      <div className="grid grid-cols-2 gap-1">
+        {LOCKS.map(({ key, label }) => (
+          <label
+            key={key}
+            className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer"
+          >
+            <input
+              type="checkbox"
+              checked={!!locks[key]}
+              onChange={() => toggleLock(key)}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+
+      {/* Submit / Cancel */}
+      <div className="flex gap-1.5 pt-1">
+        <button
+          onClick={onCancelBranch}
+          disabled={disabled}
+          className="flex-1 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          取消 Cancel
+        </button>
+        <button
+          onClick={handleSubmit}
+          disabled={!canSubmit}
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 text-white font-semibold"
+        >
+          <GitBranch className="w-3 h-3" />
+          运行分支 Submit
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ReservedNodeView() {
+  return (
+    <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
+      暂未实现
+      <br />
+      <span className="opacity-70">Not yet available</span>
+    </p>
+  );
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+
+export default function BranchCanvasInspector({
+  node,
+  activeRunId,
+  onSwitchRun,
+  onUpdateMetadata,
+  onRefineFromCheckpoint,
+  onContinueFromRun,
+  onSubmitBranch,
+  onCancelBranch,
+  disabled,
+}: Props) {
+  // Reset run-node title draft when node identity changes (handled inside RunNodeView too,
+  // but the key prop on RunNodeView ensures full remount on node switch).
+
+  const renderContent = () => {
+    if (!node) return <NoNodeView />;
+
+    const { type } = node.data;
+
+    switch (type) {
+      case "input":
+        return <InputNodeView label={node.data.label} />;
+
+      case "run":
+        return (
+          <RunNodeView
+            key={node.id}
+            node={node}
+            activeRunId={activeRunId}
+            onSwitchRun={onSwitchRun}
+            onUpdateMetadata={onUpdateMetadata}
+            onContinueFromRun={onContinueFromRun}
+            disabled={disabled}
+          />
+        );
+
+      case "checkpoint":
+        return (
+          <CheckpointNodeView
+            key={node.id}
+            node={node}
+            onRefineFromCheckpoint={onRefineFromCheckpoint}
+            disabled={disabled}
+          />
+        );
+
+      case "branch_action":
+        return (
+          <BranchActionView
+            key={node.id}
+            node={node}
+            onSubmitBranch={onSubmitBranch}
+            onCancelBranch={onCancelBranch}
+            disabled={disabled}
+          />
+        );
+
+      // Reserved V3/V4 types
+      case "variant_group":
+      case "variant_run":
+      case "region_constraint":
+      case "preference":
+        return <ReservedNodeView />;
+
+      default:
+        return <ReservedNodeView />;
+    }
+  };
+
+  return <PanelShell>{renderContent()}</PanelShell>;
+}
