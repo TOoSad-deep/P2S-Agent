@@ -3146,3 +3146,172 @@ def test_rate_variant_mirrors_preference_event(tmp_path, monkeypatch):
     assert rated_evts[0].reason == "too dark"
     assert "dark" in rated_evts[0].tags
     assert rated_evts[0].context.get("source") == "variant_rating"
+
+
+# ---------------------------------------------------------------------------
+# V4.4 Preference injection — branch_refine + explore_variants
+# ---------------------------------------------------------------------------
+
+def _seed_nonempty_profile(positive_prefs: list[str] | None = None) -> None:
+    """Write an enabled profile with at least one positive preference into the
+    router's current _PREFERENCES_ROOT (already monkeypatched by autouse fixture)."""
+    from app.routers import png_shader as ps
+    from app.pipeline import preferences as prefs
+
+    root = ps._PREFERENCES_ROOT
+    prof = prefs.default_profile()
+    prof["positive_preferences"] = positive_prefs or ["clearer reflections without darkening"]
+    prefs.save_profile(prof, root=root)
+
+
+def test_branch_refine_injects_preference_notes_and_snapshot(tmp_path, monkeypatch):
+    """branch_refine with an enabled non-empty profile → human_feedback_notes contains
+    a [PREFERENCE+] note; extra_artifacts has preference_profile_snapshot.json."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    _seed_nonempty_profile()
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the lighting warmer",
+            "mode": "refine",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    notes = captured["human_feedback_notes"]
+    assert any(n.startswith("[PREFERENCE") for n in notes), (
+        f"expected a [PREFERENCE...] note but got: {notes}"
+    )
+    assert any("[PREFERENCE+] clearer reflections without darkening" in n for n in notes), (
+        f"expected specific positive pref note in: {notes}"
+    )
+
+    artifacts = captured["extra_artifacts"]
+    assert "preference_profile_snapshot.json" in artifacts, (
+        f"preference_profile_snapshot.json missing from extra_artifacts: {list(artifacts)}"
+    )
+    snap = artifacts["preference_profile_snapshot.json"]
+    assert "clearer reflections without darkening" in snap.get("positive_preferences", [])
+
+
+def test_branch_refine_use_preferences_false_no_injection(tmp_path, monkeypatch):
+    """branch_refine with use_preferences=false in constraints → no [PREFERENCE] note,
+    no preference_profile_snapshot.json, even when profile is non-empty."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    _seed_nonempty_profile()
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the lighting warmer",
+            "mode": "refine",
+            "constraints": {"use_preferences": False},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    notes = captured["human_feedback_notes"]
+    assert not any(n.startswith("[PREFERENCE") for n in notes), (
+        f"unexpected [PREFERENCE...] note with use_preferences=false: {notes}"
+    )
+
+    artifacts = captured["extra_artifacts"]
+    assert "preference_profile_snapshot.json" not in artifacts, (
+        "unexpected preference_profile_snapshot.json when use_preferences=false"
+    )
+
+    da = captured["directed_acceptance"]
+    assert "preference_score_drop_tolerance_hint" not in da, (
+        "unexpected preference_score_drop_tolerance_hint in directed_acceptance"
+    )
+
+
+def test_branch_refine_empty_profile_no_preference_injection(tmp_path, monkeypatch):
+    """branch_refine with the default empty profile (no seeded notes) → no [PREFERENCE]
+    note injected (backward-compat: empty profile yields no notes)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    # Do NOT seed a non-empty profile — the router will load the default (empty) profile.
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the lighting warmer",
+            "mode": "refine",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    notes = captured["human_feedback_notes"]
+    assert not any(n.startswith("[PREFERENCE") for n in notes), (
+        f"unexpected [PREFERENCE...] note with empty profile: {notes}"
+    )
+
+    artifacts = captured["extra_artifacts"]
+    assert "preference_profile_snapshot.json" not in artifacts, (
+        "unexpected preference_profile_snapshot.json with empty profile"
+    )
+
+
+def test_explore_variants_injects_preference_notes(tmp_path, monkeypatch):
+    """explore_variants with an enabled non-empty profile → each child's
+    human_feedback_notes includes a [PREFERENCE+] note and extra_artifacts has
+    preference_profile_snapshot.json."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    _seed_nonempty_profile(["clearer reflections without darkening"])
+    captures: list[dict] = []
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline(captures),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={
+            "feedback": "add more warmth to the lighting",
+            "variant_count": 2,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    child_run_ids = resp.json()["child_run_ids"]
+    for cid in child_run_ids:
+        _wait_for_variant_completion(client, cid)
+
+    assert len(captures) == 2, f"expected 2 captured pipelines, got {len(captures)}"
+    for cap in captures:
+        notes = cap["human_feedback_notes"]
+        assert any(n.startswith("[PREFERENCE") for n in notes), (
+            f"expected [PREFERENCE...] note in child notes: {notes}"
+        )
+        artifacts = cap["extra_artifacts"]
+        assert "preference_profile_snapshot.json" in artifacts, (
+            f"preference_profile_snapshot.json missing from child extra_artifacts: {list(artifacts)}"
+        )
+        snap = artifacts["preference_profile_snapshot.json"]
+        assert "clearer reflections without darkening" in snap.get("positive_preferences", [])

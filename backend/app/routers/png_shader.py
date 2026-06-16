@@ -56,6 +56,7 @@ from app.pipeline.draw_sessions import (
 from app.pipeline.preferences import (
     PreferenceEvent,
     append_preference_event,
+    build_preference_notes,
     clear_preferences,
     default_profile,
     load_preference_events,
@@ -696,6 +697,12 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     # V4.1: append constraint notes when constraints were supplied.
     if _constraint_spec is not None:
         notes += build_constraint_notes(_constraint_spec)
+
+    # V4.4: inject user preference notes (gated by use_preferences flag).
+    _use_preferences: bool = _constraint_spec.use_preferences if _constraint_spec is not None else True
+    _pref_profile = load_profile(root=_PREFERENCES_ROOT)
+    _pref_notes = build_preference_notes(_pref_profile)
+
     parent_lineage = parent.get("lineage") or {}
     root_run_id = parent_lineage.get("root_run_id") or run_id
     lineage = {
@@ -757,6 +764,14 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         _constraint_dict = spec_to_dict(_constraint_spec)
         extra_artifacts["constraints.json"] = _constraint_dict
         directed_acceptance["constraints"] = _constraint_dict
+
+    # V4.4: inject preference notes + snapshot when enabled and profile is non-empty.
+    if _use_preferences and _pref_notes:
+        notes += _pref_notes
+        extra_artifacts["preference_profile_snapshot.json"] = _pref_profile
+        directed_acceptance["preference_score_drop_tolerance_hint"] = _pref_profile.get(
+            "score_drop_tolerance_hint"
+        )
 
     log_event(
         logger,
@@ -837,6 +852,7 @@ def _create_variant_group(
     quality_overrides: dict,
     draw_session_id: "str | None" = None,
     constraint_spec: "HumanConstraintSpec | None" = None,
+    use_preferences: bool = True,
 ) -> tuple[str, list[str]]:
     """Create one variant group: spawn N child runs (one per strategy), persist
     the VariantGroupRecord, append the 'created' event. Returns (group_id, child_run_ids).
@@ -847,6 +863,10 @@ def _create_variant_group(
     """
     group_id = "group_" + uuid4().hex[:8]
     child_run_ids: list[str] = []
+
+    # V4.4: load preference profile once for the whole group (all children share it).
+    _vg_pref_profile = load_profile(root=_PREFERENCES_ROOT)
+    _vg_pref_notes = build_preference_notes(_vg_pref_profile)
 
     for idx, strategy in enumerate(strategies):
         child_run_id = "run_" + uuid4().hex[:8]
@@ -916,6 +936,14 @@ def _create_variant_group(
             _cspec_dict = spec_to_dict(constraint_spec)
             extra_artifacts["constraints.json"] = _cspec_dict
             directed_acceptance["constraints"] = _cspec_dict
+
+        # V4.4: inject preference notes + snapshot when enabled and profile is non-empty.
+        if use_preferences and _vg_pref_notes:
+            notes += _vg_pref_notes
+            extra_artifacts["preference_profile_snapshot.json"] = _vg_pref_profile
+            directed_acceptance["preference_score_drop_tolerance_hint"] = _vg_pref_profile.get(
+                "score_drop_tolerance_hint"
+            )
 
         initial_result = {
             "run_id": child_run_id,
@@ -1085,6 +1113,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
         mode=mode,
     )
 
+    _ev_use_preferences: bool = _ev_constraint_spec.use_preferences if _ev_constraint_spec is not None else True
     group_id, child_run_ids = _create_variant_group(
         parent_run_id=run_id,
         root_run_id=root_run_id,
@@ -1097,6 +1126,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
         strategies=strategies,
         quality_overrides=quality_overrides,
         constraint_spec=_ev_constraint_spec,
+        use_preferences=_ev_use_preferences,
     )
 
     if stop_parent:
@@ -1190,6 +1220,7 @@ def _create_draw_groups(
     card_count: int,
     on_group=None,
     constraint_spec: "HumanConstraintSpec | None" = None,
+    use_preferences: bool = True,
 ) -> tuple[list[str], list[str]]:
     """Plan *card_count* into batches and create one variant group per batch.
 
@@ -1220,6 +1251,7 @@ def _create_draw_groups(
             quality_overrides=quality,
             draw_session_id=draw_id,
             constraint_spec=constraint_spec,
+            use_preferences=use_preferences,
         )
         group_ids.append(gid)
         card_run_ids.extend(cids)
@@ -1282,6 +1314,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     draw_id = "draw_" + uuid4().hex[:8]
     root_run_id = (parent.get("lineage") or {}).get("root_run_id") or run_id
 
+    _ds_use_preferences: bool = _ds_constraint_spec.use_preferences if _ds_constraint_spec is not None else True
     group_ids, card_run_ids = _create_draw_groups(
         parent_run_id=run_id,
         root_run_id=root_run_id,
@@ -1296,6 +1329,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
         draw_id=draw_id,
         card_count=card_count,
         constraint_spec=_ds_constraint_spec,
+        use_preferences=_ds_use_preferences,
     )
 
     # Persist the session record + creation event best-effort (I/O must not 500).
@@ -1552,6 +1586,7 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
         except Exception:
             logger.warning("draw-more incremental save failed for draw_id=%s", draw_id, exc_info=True)
 
+    _dm_use_preferences: bool = _dm_constraint_spec.use_preferences if _dm_constraint_spec is not None else True
     _create_draw_groups(
         parent_run_id=record.parent_run_id,
         root_run_id=record.root_run_id,
@@ -1567,6 +1602,7 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
         card_count=card_count,
         on_group=_commit,
         constraint_spec=_dm_constraint_spec,
+        use_preferences=_dm_use_preferences,
     )
 
     record.status = "running"
