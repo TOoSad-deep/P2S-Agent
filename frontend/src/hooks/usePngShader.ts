@@ -286,6 +286,80 @@ export interface VariantGroupStatus {
   variants: VariantStatusEntry[];
 }
 
+export interface DrawCardStatus {
+  card_id: string;
+  run_id: string;
+  group_id: string | null;
+  index: number;
+  status: string;
+  label: string;
+  strategy_label?: string | null;
+  final_score?: number | null;
+  current_score?: number | null;
+  thumbnail_url?: string | null;
+  feedback?: string | null;
+  favorite?: boolean;
+  eliminated?: boolean;
+  tags?: string[];
+  replacement_of_run_id?: string | null;
+  can_use_for_fusion?: boolean;
+  error?: string | null;
+}
+
+export interface DrawSessionStatus {
+  draw_id: string;
+  parent_run_id: string;
+  source_checkpoint_id: string;
+  feedback: string;
+  status: "queued" | "running" | "completed" | "partial_failed" | "failed" | "cancelled";
+  requested_count: number;
+  completed_count: number;
+  running_count: number;
+  failed_count: number;
+  winner_run_id?: string | null;
+  group_ids: string[];
+  cards: DrawCardStatus[];
+}
+
+export interface CreateDrawSessionRequest {
+  checkpoint_id?: string;
+  feedback: string;
+  card_count?: number;       // 2..12, default 8
+  diversity?: string;        // "low" | "medium" | "high"
+  quality?: Record<string, unknown>;
+  constraints?: { locks?: Record<string, boolean> };
+  mode?: string;
+  stop_parent?: boolean;
+}
+export interface CreateDrawSessionResponse {
+  draw_id: string;
+  status: string;
+  parent_run_id: string;
+  source_checkpoint_id: string;
+  group_ids: string[];
+  card_run_ids: string[];
+}
+export interface DrawMoreRequest {
+  card_count?: number;       // default 4
+  diversity?: string;
+  quality?: Record<string, unknown>;
+}
+export interface DrawMoreResponse {
+  draw_id: string;
+  status: string;
+  group_ids: string[];
+  card_run_ids: string[];
+}
+export interface RedrawCardResponse {
+  draw_id: string;
+  group_id: string;
+  replaced_run_id: string;
+  replacement_run_id: string;
+}
+export type DrawCardEventType =
+  | "favorite" | "eliminate" | "tag" | "note"
+  | "use_as_fusion_base" | "use_as_region_source";
+
 export type LlmMode = "off" | "auto" | "on";
 
 export interface ParameterizeResult {
@@ -835,6 +909,128 @@ export function usePngShader() {
     }
   }, []);
 
+  // V3.5: Draw-session API layer
+  const createDrawSession = useCallback(async (
+    parentRunId: string,
+    request: CreateDrawSessionRequest,
+  ): Promise<CreateDrawSessionResponse | null> => {
+    const requestId = makeRequestId("draw-session-create");
+    logFrontendEvent("api_draw_session_create", {
+      request_id: requestId,
+      parent_run_id: parentRunId,
+      checkpoint_id: request.checkpoint_id,
+      feedback_len: request.feedback.length,
+      card_count: request.card_count,
+    });
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/runs/${parentRunId}/draw-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId, "x-run-id": parentRunId },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_draw_session_create_failed", { request_id: requestId, parent_run_id: parentRunId, status: response.status }, "warn");
+        setError(`Create draw session failed (${response.status}): ${text}`);
+        return null;
+      }
+      const data: CreateDrawSessionResponse = await response.json();
+      return data;
+    } catch (err) {
+      logFrontendEvent("api_draw_session_create_failed", { parent_run_id: parentRunId, error: err instanceof Error ? err.message : String(err) }, "warn");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, []);
+
+  const fetchDrawSession = useCallback(async (drawId: string): Promise<DrawSessionStatus> => {
+    const requestId = makeRequestId("draw-session");
+    const response = await fetch(`${API_BASE}/png-shader/draw-sessions/${drawId}`, {
+      headers: { "x-request-id": requestId },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_draw_session_failed", { request_id: requestId, draw_id: drawId, status: response.status }, "warn");
+      throw new Error(`Draw session fetch failed (${response.status}): ${text}`);
+    }
+    const data: DrawSessionStatus = await response.json();
+    return data;
+  }, []);
+
+  const drawMore = useCallback(async (
+    drawId: string,
+    request: DrawMoreRequest,
+  ): Promise<DrawMoreResponse | null> => {
+    const requestId = makeRequestId("draw-more");
+    logFrontendEvent("api_draw_more", { request_id: requestId, draw_id: drawId, card_count: request.card_count });
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/draw-sessions/${drawId}/draw-more`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_draw_more_failed", { request_id: requestId, draw_id: drawId, status: response.status }, "warn");
+        setError(`Draw more failed (${response.status}): ${text}`);
+        return null;
+      }
+      const data: DrawMoreResponse = await response.json();
+      return data;
+    } catch (err) {
+      logFrontendEvent("api_draw_more_failed", { draw_id: drawId, error: err instanceof Error ? err.message : String(err) }, "warn");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, []);
+
+  const redrawCard = useCallback(async (
+    drawId: string,
+    runId: string,
+    opts?: { reason?: string; diversity?: string },
+  ): Promise<RedrawCardResponse | null> => {
+    const requestId = makeRequestId("redraw-card");
+    logFrontendEvent("api_redraw_card", { request_id: requestId, draw_id: drawId, run_id: runId });
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/draw-sessions/${drawId}/redraw`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify({ run_id: runId, ...opts }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_redraw_card_failed", { request_id: requestId, draw_id: drawId, run_id: runId, status: response.status }, "warn");
+        setError(`Redraw card failed (${response.status}): ${text}`);
+        return null;
+      }
+      const data: RedrawCardResponse = await response.json();
+      return data;
+    } catch (err) {
+      logFrontendEvent("api_redraw_card_failed", { draw_id: drawId, run_id: runId, error: err instanceof Error ? err.message : String(err) }, "warn");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, []);
+
+  const cardEvent = useCallback(async (
+    drawId: string,
+    runId: string,
+    eventType: DrawCardEventType,
+    opts?: { value?: unknown; reason?: string; tags?: string[] },
+  ): Promise<void> => {
+    const requestId = makeRequestId("card-event");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/draw-sessions/${drawId}/cards/${runId}/event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify({ event_type: eventType, ...opts }),
+      });
+      logFrontendEvent("api_card_event", { request_id: requestId, draw_id: drawId, run_id: runId, event_type: eventType, status: response.status }, response.ok ? "info" : "warn");
+    } catch {
+      logFrontendEvent("api_card_event_failed", { draw_id: drawId, run_id: runId, event_type: eventType, error: "network error" }, "warn");
+    }
+  }, []);
+
   const clearResult = useCallback(() => {
     stopPolling();
     activeRunRef.current = null;
@@ -874,6 +1070,11 @@ export function usePngShader() {
     stopVariantGroup,
     selectVariantWinner,
     rateVariant,
+    createDrawSession,
+    fetchDrawSession,
+    drawMore,
+    redrawCard,
+    cardEvent,
   };
 }
 
