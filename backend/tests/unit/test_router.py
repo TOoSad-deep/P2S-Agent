@@ -1375,3 +1375,168 @@ def test_explore_variants_concurrency_all_complete(tmp_path, monkeypatch):
 
     # All 4 pipelines were invoked.
     assert len(captures) == 4
+
+
+# ---------------------------------------------------------------------------
+# V3.1: stoppable queued variants + post-acquire stop recheck + concurrency cap
+# ---------------------------------------------------------------------------
+
+def test_stop_queued_variant_returns_200(tmp_path):
+    """POST /stop on a variant child with status='queued' must return 200 (not 409)
+    and set stop_requested=True."""
+    import threading as _threading
+    from app.routers.png_shader import _run_store as _rs
+
+    _rs.clear()
+    run_id = "run_qstop"
+    _rs[run_id] = {
+        "run_id": run_id,
+        "status": "queued",
+        "current_phase": "queued",
+        "strategy": {},
+        "stop_requested": False,
+        "strategy_revision": 1,
+        "variant_group_id": "group_x",
+        "variant_index": 0,
+        "variant_label": "A",
+    }
+
+    client = _client()
+    resp = client.post(f"/png-shader/runs/{run_id}/stop")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"stopping": True}
+    assert _rs[run_id]["stop_requested"] is True
+
+
+def test_stop_before_acquire_cancels_without_acquiring(tmp_path, monkeypatch):
+    """A variant worker that finds stop_requested=True before acquiring the semaphore
+    must cancel immediately without calling acquire(), leaving status='cancelled' and
+    group identity intact."""
+    import threading as _threading
+    from app.routers.png_shader import _run_store as _rs, _run_png_shader_background, _variant_preserved
+
+    _rs.clear()
+    run_id = "run_preacq"
+    _rs[run_id] = {
+        "run_id": run_id,
+        "status": "queued",
+        "current_phase": "queued",
+        "strategy": {"refinement_threshold": 0.8},
+        "stop_requested": True,  # pre-set before worker checks
+        "strategy_revision": 1,
+        "variant_group_id": "group_preacq",
+        "variant_index": 1,
+        "variant_label": "B",
+        "lineage": {"variant_group_id": "group_preacq", "variant_index": 1},
+    }
+
+    acquire_called = []
+
+    class _RecordingSemaphore:
+        def acquire(self):
+            acquire_called.append(True)
+            return True
+        def release(self):
+            pass
+
+    recording_sem = _RecordingSemaphore()
+
+    # Seed a fake image path (worker reads stop_requested before touching the pipeline)
+    import tempfile, pathlib
+    with tempfile.TemporaryDirectory() as td:
+        fake_image = pathlib.Path(td) / "input.png"
+        from PIL import Image as _Img
+        _Img.new("RGBA", (8, 8)).save(fake_image)
+
+        _run_png_shader_background(
+            run_id=run_id,
+            image_path=fake_image,
+            upload_dir=None,
+            pipeline_input_spec=None,
+            seed_glsl=None,
+            model_config=None,
+            trace_input={},
+            trace_metadata={},
+            pipeline_extra=None,
+            variant_semaphore=recording_sem,
+        )
+
+    # Semaphore must NOT have been acquired (cancelled before acquire).
+    assert acquire_called == [], "acquire() must not be called when stop_requested is already set"
+
+    stored = _rs[run_id]
+    assert stored["status"] == "cancelled"
+    # Group identity fields must be preserved.
+    assert stored["variant_group_id"] == "group_preacq"
+    assert stored["variant_index"] == 1
+    assert stored["variant_label"] == "B"
+
+
+def test_variant_concurrency_peak_le_2(tmp_path, monkeypatch):
+    """Peak concurrent variant pipeline executions must never exceed _MAX_VARIANT_CONCURRENCY=2."""
+    import threading as _threading
+
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH",
+                        str(tmp_path / "ri_peak.jsonl"))
+
+    _seed_parent(tmp_path)
+
+    peak_lock = _threading.Lock()
+    active = [0]
+    peak = [0]
+    done_event = _threading.Event()
+    # Barrier: each worker sets its ready event; test releases them all once N are blocked.
+    WORKERS = 4
+    ready_count = [0]
+    ready_lock = _threading.Lock()
+    gate = _threading.Event()
+
+    def measuring_pipeline(image_path, input_spec=None, run_id=None, **kwargs):
+        with peak_lock:
+            active[0] += 1
+            if active[0] > peak[0]:
+                peak[0] = active[0]
+        # Signal readiness and wait for gate (bounded: 2 s max so test can't hang).
+        with ready_lock:
+            ready_count[0] += 1
+        gate.wait(timeout=2.0)
+        with peak_lock:
+            active[0] -= 1
+        return {
+            "run_id": run_id,
+            "selected_glsl": "",
+            "scoreboard": {},
+            "quality_router": {},
+            "refinement_summary": {},
+        }
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", measuring_pipeline)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "vivid contrast", "variant_count": WORKERS},
+    )
+    assert resp.status_code == 200, resp.text
+    child_run_ids = resp.json()["child_run_ids"]
+
+    # Wait until at least 2 workers are inside the pipeline (i.e. past the semaphore).
+    import time as _time
+    deadline = _time.time() + 5.0
+    while _time.time() < deadline:
+        with ready_lock:
+            cnt = ready_count[0]
+        if cnt >= 2:
+            break
+        _time.sleep(0.02)
+
+    # Release all waiting workers.
+    gate.set()
+
+    for cid in child_run_ids:
+        _wait_for_variant_completion(client, cid, timeout_seconds=15.0)
+
+    assert peak[0] <= 2, f"Peak concurrency {peak[0]} exceeded _MAX_VARIANT_CONCURRENCY=2"

@@ -142,6 +142,23 @@ def _publish_partial_to_store(run_id: str, partial: dict) -> None:
         stored.update(partial)
 
 
+def _variant_preserved(stored: dict) -> dict:
+    """Extract the fields that must survive a terminal store overwrite for a variant run.
+
+    Used in both the cancelled-before-acquire and cancelled-after-acquire paths so
+    that a stopped variant child retains its group identity in /status.
+    """
+    out = {
+        "strategy": stored.get("strategy"),
+        "stop_requested": stored.get("stop_requested", False),
+        "strategy_revision": stored.get("strategy_revision", 1),
+    }
+    for k in ("variant_group_id", "variant_index", "variant_label", "lineage"):
+        if k in stored:
+            out[k] = stored[k]
+    return out
+
+
 def _run_png_shader_background(
     *,
     run_id: str,
@@ -180,16 +197,11 @@ def _run_png_shader_background(
             _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
             with _run_store_lock:
                 stored = _run_store.get(run_id, {})
-                preserved = {
-                    "strategy": stored.get("strategy"),
-                    "stop_requested": stored.get("stop_requested", False),
-                    "strategy_revision": stored.get("strategy_revision", 1),
-                }
                 _run_store[run_id] = {
                     "run_id": run_id,
                     "status": "cancelled",
                     "completed_at": time(),
-                    **preserved,
+                    **_variant_preserved(stored),
                 }
             if upload_dir is not None:
                 shutil.rmtree(upload_dir, ignore_errors=True)
@@ -198,9 +210,25 @@ def _run_png_shader_background(
         variant_semaphore.acquire()
         with _run_store_lock:
             stored = _run_store.get(run_id, {})
-            stored["status"] = "running"
-            stored["current_phase"] = "acquired"
-            _run_store[run_id] = stored
+            stop_after_acquire = bool(stored.get("stop_requested"))
+            if stored is not None and run_id in _run_store:
+                _run_store[run_id]["status"] = "running"
+                _run_store[run_id]["current_phase"] = "acquired"
+
+        if stop_after_acquire:
+            _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
+            with _run_store_lock:
+                stored = _run_store.get(run_id, {})
+                _run_store[run_id] = {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "completed_at": time(),
+                    **_variant_preserved(stored),
+                }
+            variant_semaphore.release()
+            if upload_dir is not None:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+            return
 
     def _progress(phase: str) -> None:
         with _run_store_lock:
@@ -363,7 +391,7 @@ def _start_pipeline_worker(
 ) -> None:
     """Register the run's model and launch the background pipeline thread.
 
-    Shared by ``/run`` (uploaded image, ``upload_dir`` set``) and
+    Shared by ``/run`` (uploaded image, ``upload_dir`` set) and
     ``/branch-refine`` (parent reference image, ``upload_dir=None``).
     ``variant_semaphore`` is forwarded to the worker for the queued→acquired
     lifecycle used by variant child runs.
@@ -1413,7 +1441,7 @@ async def stop_run(run_id: str) -> dict:
         stored = _run_store.get(run_id)
         if stored is None:
             raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
-        if stored.get("status") != "running":
+        if stored.get("status") not in ("running", "queued"):
             raise HTTPException(status_code=409, detail="run is not currently running")
         stored["stop_requested"] = True
         _run_store[run_id] = stored
