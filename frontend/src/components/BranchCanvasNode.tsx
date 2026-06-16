@@ -2,7 +2,7 @@
 // Pure presentational. No data fetching. No app state.
 import { memo } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { ChevronRight, GitBranch, Image, Loader, Star, X } from "lucide-react";
+import { ChevronDown, ChevronRight, GitBranch, Image, Layers, Loader, Star, X } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import { fmtScore, truncate } from "../lib/format";
 
@@ -234,6 +234,110 @@ export const InputNode = memo(function InputNode({ data, selected }: NodeProps<B
   );
 });
 
+// ─── 5. VariantGroupNode ──────────────────────────────────────────────────────
+
+export const VariantGroupNode = memo(function VariantGroupNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+  const ringClass = selected ? "ring-2 ring-emerald-500" : "";
+
+  return (
+    <div
+      className={`rounded-lg border text-[11px] flex flex-col gap-1 px-2.5 py-2 shadow-sm transition-all ${ringClass}`}
+      style={{
+        width: 190,
+        background: "var(--bg-secondary)",
+        borderColor: selected ? "var(--accent-primary)" : "var(--border-color)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <Handle type="target" position={Position.Top} />
+
+      {/* Header row: icon + label + collapse chevron + status */}
+      <div className="flex items-center gap-1.5">
+        <span title="variant group" className="flex-shrink-0">
+          <Layers className="w-3.5 h-3.5 text-emerald-400" />
+        </span>
+        <span
+          className="flex-1 truncate font-medium"
+          style={{ color: "var(--text-primary)" }}
+          title={data.label}
+        >
+          {data.label}
+        </span>
+        {/* Collapse affordance — purely visual */}
+        {data.collapsed ? (
+          <span title="collapsed" className="flex-shrink-0">
+            <ChevronRight className="w-3.5 h-3.5" style={{ color: "var(--text-muted)" }} />
+          </span>
+        ) : (
+          <span title="expanded" className="flex-shrink-0">
+            <ChevronDown className="w-3.5 h-3.5" style={{ color: "var(--text-muted)" }} />
+          </span>
+        )}
+        <StatusDot status={data.status} />
+      </div>
+
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+});
+
+// ─── 6. VariantRunNode ────────────────────────────────────────────────────────
+
+export const VariantRunNode = memo(function VariantRunNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+  const ringClass = selected ? "ring-2 ring-emerald-500" : "";
+
+  const indexLabel =
+    typeof data.variant_index === "number" ? `#${data.variant_index}` : null;
+
+  return (
+    <div
+      className={`rounded-lg border text-[11px] flex flex-col gap-1 px-2 py-1.5 shadow-sm transition-all ${ringClass}`}
+      style={{
+        width: 150,
+        background: "var(--bg-secondary)",
+        borderColor: selected ? "var(--accent-primary)" : "var(--border-color)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <Handle type="target" position={Position.Top} />
+
+      {/* Header row: index badge + label + favorite star */}
+      <div className="flex items-center gap-1.5">
+        {indexLabel !== null && (
+          <span
+            className="font-mono rounded px-0.5 flex-shrink-0 text-[10px]"
+            style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}
+          >
+            {indexLabel}
+          </span>
+        )}
+        <span
+          className="flex-1 truncate font-medium"
+          style={{ color: "var(--text-primary)" }}
+          title={data.label}
+        >
+          {data.label}
+        </span>
+        {data.favorite && (
+          <span title="winner / favorite" className="flex-shrink-0">
+            <Star className="w-3 h-3 text-emerald-400" fill="currentColor" />
+          </span>
+        )}
+      </div>
+
+      {/* Score + status dot */}
+      <div className="flex items-center gap-1.5">
+        <StatusDot status={data.status} />
+        <span style={{ color: "var(--text-muted)" }}>
+          {fmtScore(data.score)}
+        </span>
+      </div>
+
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+});
+
 // ─── Stable nodeTypes export ──────────────────────────────────────────────────
 // Module constant — satisfies React Flow's nodeTypes stability contract.
 
@@ -242,4 +346,6 @@ export const branchCanvasNodeTypes: NodeTypes = {
   run: RunNode,
   checkpoint: CheckpointNode,
   branch_action: BranchActionNode,
+  variant_group: VariantGroupNode,
+  variant_run: VariantRunNode,
 };
