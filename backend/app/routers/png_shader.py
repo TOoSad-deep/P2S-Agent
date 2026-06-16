@@ -762,79 +762,35 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     return initial_result
 
 
-@router.post("/runs/{run_id}/explore-variants")
-async def explore_variants(run_id: str, payload: dict) -> dict:
-    """Fan one checkpoint into N variant child runs, each guided by a different strategy.
+def _create_variant_group(
+    *,
+    parent_run_id: str,
+    root_run_id: str,
+    checkpoint,
+    checkpoint_id: str,
+    reference_path: Path,
+    feedback: str,
+    mode: str,
+    diversity: str,
+    strategies: list[dict],
+    quality_overrides: dict,
+    draw_session_id: "str | None" = None,
+) -> tuple[str, list[str]]:
+    """Create one variant group: spawn N child runs (one per strategy), persist
+    the VariantGroupRecord, append the 'created' event. Returns (group_id, child_run_ids).
 
-    Body: { checkpoint_id?, feedback, variant_count?=4, diversity?="medium",
-            mode?="explore", quality?={}, stop_parent?=false }
-
-    Each child is queued behind a shared semaphore (max _MAX_VARIANT_CONCURRENCY
-    concurrent workers). The endpoint returns immediately with the group_id and
-    child_run_ids; callers poll /status/<child_run_id> for individual progress.
+    Behavior-identical to the inline loop previously in explore_variants. When
+    draw_session_id is set it is recorded on the group record and on each child's
+    run-index lineage (additive; None preserves prior explore-variants behavior).
     """
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=422, detail="payload must be a JSON object")
-
-    with _run_store_lock:
-        parent = _run_store.get(run_id)
-    if parent is None:
-        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
-
-    variant_count = int(payload.get("variant_count") or 4)
-    diversity = str(payload.get("diversity") or "medium")
-    mode = str(payload.get("mode") or "explore")
-    feedback = str(payload.get("feedback") or "")
-    checkpoint_id_raw = payload.get("checkpoint_id")
-    quality_overrides = payload.get("quality") or {}
-    stop_parent = bool(payload.get("stop_parent"))
-
-    if not isinstance(quality_overrides, dict):
-        raise HTTPException(status_code=422, detail="quality must be an object")
-
-    if variant_count < 2 or variant_count > _MAX_VARIANT_COUNT:
-        raise HTTPException(
-            status_code=422,
-            detail=f"variant_count must be between 2 and {_MAX_VARIANT_COUNT}, got {variant_count}",
-        )
-
-    if not feedback or not feedback.strip():
-        raise HTTPException(status_code=422, detail="feedback is required for explore-variants")
-
-    if not list_checkpoints(parent):
-        raise HTTPException(status_code=409, detail="no branchable checkpoint yet")
-
-    checkpoint_id = str(checkpoint_id_raw) if checkpoint_id_raw is not None else "final:selected"
-    try:
-        checkpoint = resolve_checkpoint(parent, checkpoint_id)
-    except CheckpointError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    parent_run_dir = parent.get("run_dir")
-    if not parent_run_dir:
-        raise HTTPException(status_code=409, detail="parent run_dir is not available yet")
-    reference_path = Path(parent_run_dir) / "reference_input.png"
-    if not reference_path.exists():
-        raise HTTPException(status_code=409, detail="parent reference image is not available")
-
     group_id = "group_" + uuid4().hex[:8]
-    parent_lineage = parent.get("lineage") or {}
-    root_run_id = parent_lineage.get("root_run_id") or run_id
-
-    strategies = build_variant_strategies(
-        feedback=feedback,
-        count=variant_count,
-        diversity=diversity,
-        mode=mode,
-    )
-
     child_run_ids: list[str] = []
 
     for idx, strategy in enumerate(strategies):
         child_run_id = "run_" + uuid4().hex[:8]
 
         variant_lineage = {
-            "parent_run_id": run_id,
+            "parent_run_id": parent_run_id,
             "root_run_id": root_run_id,
             "source_checkpoint_id": checkpoint_id,
             "source_checkpoint_label": checkpoint.label,
@@ -895,7 +851,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
             "run_id": child_run_id,
             "status": "queued",
             "current_phase": "queued",
-            "parent_run_id": run_id,
+            "parent_run_id": parent_run_id,
             "source_checkpoint_id": checkpoint_id,
             "lineage": variant_lineage,
             "variant_group_id": group_id,
@@ -910,7 +866,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
         _index_created(RunLineageRecord(
             run_id=child_run_id,
             root_run_id=root_run_id,
-            parent_run_id=run_id,
+            parent_run_id=parent_run_id,
             source_checkpoint_id=checkpoint_id,
             source_checkpoint_label=checkpoint.label,
             mode=mode,
@@ -922,6 +878,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
             variant_group_id=group_id,
             variant_index=idx,
             variant_label=strategy["label"],
+            draw_session_id=draw_session_id,
         ))
         _start_pipeline_worker(
             run_id=child_run_id,
@@ -929,10 +886,10 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
             upload_dir=None,
             pipeline_input_spec=child_input_spec,
             seed_glsl=checkpoint.glsl,
-            model_config=_get_run_model(run_id),
+            model_config=_get_run_model(parent_run_id),
             trace_input={
                 "run_id": child_run_id,
-                "parent_run_id": run_id,
+                "parent_run_id": parent_run_id,
                 "checkpoint_id": checkpoint_id,
                 "variant_group_id": group_id,
                 "variant_index": idx,
@@ -940,7 +897,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
             trace_metadata={
                 "run_id": child_run_id,
                 "pipeline": "png-shader-variant",
-                "parent_run_id": run_id,
+                "parent_run_id": parent_run_id,
                 "variant_group_id": group_id,
                 "variant_index": idx,
             },
@@ -959,15 +916,16 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     record = VariantGroupRecord(
         group_id=group_id,
         root_run_id=root_run_id,
-        parent_run_id=run_id,
+        parent_run_id=parent_run_id,
         source_checkpoint_id=checkpoint_id,
         feedback=feedback,
         mode=mode,
-        variant_count=variant_count,
+        variant_count=len(strategies),
         diversity=diversity,
         status="running",
         child_run_ids=child_run_ids,
         created_at=time(),
+        draw_session_id=draw_session_id,
     )
     try:
         save_group(record, root=_VARIANT_GROUPS_ROOT)
@@ -978,6 +936,87 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
         )
     except Exception:
         logger.warning("variant group persist failed for group_id=%s", group_id, exc_info=True)
+
+    return group_id, child_run_ids
+
+
+@router.post("/runs/{run_id}/explore-variants")
+async def explore_variants(run_id: str, payload: dict) -> dict:
+    """Fan one checkpoint into N variant child runs, each guided by a different strategy.
+
+    Body: { checkpoint_id?, feedback, variant_count?=4, diversity?="medium",
+            mode?="explore", quality?={}, stop_parent?=false }
+
+    Each child is queued behind a shared semaphore (max _MAX_VARIANT_CONCURRENCY
+    concurrent workers). The endpoint returns immediately with the group_id and
+    child_run_ids; callers poll /status/<child_run_id> for individual progress.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    with _run_store_lock:
+        parent = _run_store.get(run_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+    variant_count = int(payload.get("variant_count") or 4)
+    diversity = str(payload.get("diversity") or "medium")
+    mode = str(payload.get("mode") or "explore")
+    feedback = str(payload.get("feedback") or "")
+    checkpoint_id_raw = payload.get("checkpoint_id")
+    quality_overrides = payload.get("quality") or {}
+    stop_parent = bool(payload.get("stop_parent"))
+
+    if not isinstance(quality_overrides, dict):
+        raise HTTPException(status_code=422, detail="quality must be an object")
+
+    if variant_count < 2 or variant_count > _MAX_VARIANT_COUNT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"variant_count must be between 2 and {_MAX_VARIANT_COUNT}, got {variant_count}",
+        )
+
+    if not feedback or not feedback.strip():
+        raise HTTPException(status_code=422, detail="feedback is required for explore-variants")
+
+    if not list_checkpoints(parent):
+        raise HTTPException(status_code=409, detail="no branchable checkpoint yet")
+
+    checkpoint_id = str(checkpoint_id_raw) if checkpoint_id_raw is not None else "final:selected"
+    try:
+        checkpoint = resolve_checkpoint(parent, checkpoint_id)
+    except CheckpointError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    parent_run_dir = parent.get("run_dir")
+    if not parent_run_dir:
+        raise HTTPException(status_code=409, detail="parent run_dir is not available yet")
+    reference_path = Path(parent_run_dir) / "reference_input.png"
+    if not reference_path.exists():
+        raise HTTPException(status_code=409, detail="parent reference image is not available")
+
+    parent_lineage = parent.get("lineage") or {}
+    root_run_id = parent_lineage.get("root_run_id") or run_id
+
+    strategies = build_variant_strategies(
+        feedback=feedback,
+        count=variant_count,
+        diversity=diversity,
+        mode=mode,
+    )
+
+    group_id, child_run_ids = _create_variant_group(
+        parent_run_id=run_id,
+        root_run_id=root_run_id,
+        checkpoint=checkpoint,
+        checkpoint_id=checkpoint_id,
+        reference_path=reference_path,
+        feedback=feedback,
+        mode=mode,
+        diversity=diversity,
+        strategies=strategies,
+        quality_overrides=quality_overrides,
+    )
 
     if stop_parent:
         with _run_store_lock:
