@@ -1126,11 +1126,24 @@ export default function BranchCanvasInspector({
 
       // V3.5 draw-session detail (a selected draw_card shows the whole session grid)
       case "draw_session":
-      case "draw_card":
+      case "draw_card": {
+        const nodeDrawId = (node.data as { draw_id?: string }).draw_id;
+        const guardedSession =
+          drawSession != null && drawSession.draw_id === nodeDrawId ? drawSession : null;
+        if (drawSession != null && guardedSession == null) {
+          // drawSession exists but belongs to a different node — show placeholder
+          return (
+            <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
+              加载抽卡批次…
+              <br />
+              <span className="opacity-70">Loading draw session…</span>
+            </p>
+          );
+        }
         return (
           <DrawSessionDetailView
             key={node.id}
-            drawSession={drawSession}
+            drawSession={guardedSession}
             fusionEnabled={fusionEnabled}
             onStartDraw={onStartDraw}
             onDrawMore={onDrawMore}
@@ -1143,6 +1156,7 @@ export default function BranchCanvasInspector({
             disabled={disabled}
           />
         );
+      }
 
       // Reserved V4 types
       case "region_constraint":

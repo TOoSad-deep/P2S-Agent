@@ -329,6 +329,10 @@ export default function DrawSessionInspector({
     { key: "strategy", label: "策略 Strategy" },
   ];
 
+  const bestScore = session.cards.length
+    ? Math.max(-Infinity, ...session.cards.map((c) => c.final_score ?? c.current_score ?? -Infinity))
+    : -Infinity;
+
   return (
     <div className="flex flex-col gap-2">
       {/* Session header */}
@@ -351,8 +355,11 @@ export default function DrawSessionInspector({
             {session.running_count} running
             {" · "}
             {session.failed_count} failed
-            {" · "}
-            <span className="font-mono">{fmtScore(undefined)}</span>
+            {bestScore > -Infinity && (
+              <>
+                {" · "}best <span className="font-mono">{fmtScore(bestScore)}</span>
+              </>
+            )}
           </p>
         </div>
 
