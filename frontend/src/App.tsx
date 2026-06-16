@@ -20,6 +20,7 @@ export default function App() {
     applyPreset,
     stopRun,
     stopPending,
+    branchPending,
     branchRefine,
     fetchTimeline,
     fetchBranches,
@@ -167,6 +168,7 @@ export default function App() {
           onApplyPreset={applyPreset}
           onStop={stopRun}
           stopPending={stopPending}
+          branchPending={branchPending}
           parameterizeGlsl={parameterizeGlsl}
           onBranchRefine={handleBranchRefine}
           runId={runId}

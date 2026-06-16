@@ -743,7 +743,10 @@ def _run_post_pipeline(
             "stop_reason": ref_result.get("stop_reason"),
         })
 
-        if ref_result.get("best_score", 0) > selected.final_score:
+        # Commit when the loop changed the best — `changed` covers a directed
+        # acceptance that intentionally lowers the score, which a score-only
+        # comparison would discard (V1.2 directed acceptance).
+        if ref_result.get("changed") or ref_result.get("best_score", 0) > selected.final_score:
             refined_dsl = ref_result["best_dsl"]
             refined_compile = compile_dsl(refined_dsl) if isinstance(refined_dsl, dict) else None
             selected.dsl = refined_dsl
@@ -830,7 +833,9 @@ def _run_post_pipeline(
                 "stop_reason": ref_result.get("stop_reason"),
             })
 
-            if ref_result.get("best_score", 0) > selected.final_score:
+            # See note above: `changed` lets a directed score-drop accept reach
+            # the final result instead of reverting to the seed.
+            if ref_result.get("changed") or ref_result.get("best_score", 0) > selected.final_score:
                 selected.compile_glsl = ref_result["best_glsl"]
                 selected.objective_metrics = ref_result["best_metrics"]
                 selected.quality_router = ref_result["best_quality"]

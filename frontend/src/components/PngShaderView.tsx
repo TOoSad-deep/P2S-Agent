@@ -15,12 +15,12 @@ import BranchCanvasWorkspace from "./BranchCanvasWorkspace";
 import type {
   PngShaderResult,
   BranchRefineRequest,
-  PipelineCheckpointMeta,
   CheckpointTimelineEntry,
   BranchTreeResponse,
   RunMetadataPatch,
   RunMetadataRecord,
 } from "../hooks/usePngShader";
+import { deriveCheckpoints } from "../lib/checkpoints";
 import StrategyControlPanel from "./StrategyControlPanel";
 import ModelSelectorPanel from "./ModelSelectorPanel";
 import type { ModelControls } from "../hooks/useModels";
@@ -47,6 +47,9 @@ interface Props {
   onApplyPreset: (mode: Exclude<StrategyMode, "custom">) => void;
   onStop: () => void;
   stopPending?: boolean;
+  /** True only while a branch-refine request is in flight (independent of the
+   *  parent run's loading state), so branching is allowed mid-run. */
+  branchPending?: boolean;
   parameterizeGlsl: (glsl: string) => Promise<{ glsl: string; param_count_before: number; param_count_after: number }>;
   onBranchRefine: (request: BranchRefineRequest) => void;
   runId: string | null;
@@ -55,50 +58,6 @@ interface Props {
   updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<RunMetadataRecord>;
   switchRun: (id: string) => void;
   branchRefine: (parentRunId: string, request: BranchRefineRequest) => Promise<string | null>;
-}
-
-/** Mirror of backend list_checkpoints: candidates with GLSL, iteration
- *  proposals with GLSL, then the final selected shader. */
-function deriveCheckpoints(result: PngShaderResult | null): PipelineCheckpointMeta[] {
-  if (!result) return [];
-  const out: PipelineCheckpointMeta[] = [];
-  for (const c of result.scoreboard?.candidates ?? []) {
-    const has = c.previewable ?? (c.compile_success && !!c.compile_glsl?.trim());
-    if (!has) continue;
-    out.push({
-      id: `candidate:${c.id}`,
-      kind: "candidate",
-      label: c.selected ? "Selected baseline" : `Candidate ${c.id}`,
-      score: c.final_score,
-      iteration: null,
-      accepted: c.selected,
-      has_glsl: true,
-    });
-  }
-  for (const e of result.refinement_history ?? []) {
-    if (!e.compile_glsl?.trim()) continue;
-    out.push({
-      id: `refinement:iter:${e.iteration}`,
-      kind: "refinement_iter",
-      label: `Iteration ${e.iteration} proposal`,
-      score: e.score_after,
-      iteration: e.iteration,
-      accepted: e.improved,
-      has_glsl: true,
-    });
-  }
-  if (result.selected_glsl?.trim()) {
-    out.push({
-      id: "final:selected",
-      kind: "final",
-      label: "Current best",
-      score: result.quality_router?.final_score ?? null,
-      iteration: null,
-      accepted: true,
-      has_glsl: true,
-    });
-  }
-  return out;
 }
 
 function candidatePreviewGlsl(candidate: CandidateEntry | null, result: PngShaderResult | null): string | null {
@@ -130,6 +89,7 @@ export default function PngShaderView({
   onApplyPreset,
   onStop,
   stopPending,
+  branchPending,
   parameterizeGlsl,
   onBranchRefine,
   runId,
@@ -429,8 +389,10 @@ export default function PngShaderView({
               onSelectCheckpoint={setBranchCheckpointId}
               onSubmit={onBranchRefine}
               lineage={result.lineage ?? null}
-              disabled={loading}
-              busy={loading}
+              // Gate on the branch request, not the parent run: a user can branch
+              // from an existing checkpoint while the parent is still running.
+              disabled={branchPending}
+              busy={branchPending}
             />
           )}
 

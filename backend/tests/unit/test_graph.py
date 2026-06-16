@@ -1388,6 +1388,60 @@ def test_dsl_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
     assert snaps == [1, 2]
 
 
+def test_dsl_loop_directed_accept_reports_changed(tmp_path, monkeypatch):
+    """P1: the DSL loop accepts a small score drop when the directed judge picks
+    the candidate, and must report changed=True with the lower best_score."""
+    from types import SimpleNamespace
+
+    lower_dsl = {"layers": [{"id": "b", "type": "circle", "params": {}}]}
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_refinement",
+        lambda **kwargs: {**lower_dsl, "_io": {}},
+    )
+    monkeypatch.setattr(
+        "app.pipeline.refinement.render_dsl_to_image", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "app.dsl.validator.validate_dsl",
+        lambda d: SimpleNamespace(valid=True, errors=[]),
+    )
+    monkeypatch.setattr(
+        "app.dsl.compiler.compile_dsl",
+        lambda d: SimpleNamespace(success=True, glsl="void mainImage(){}", errors=[]),
+    )
+
+    def fake_eval(revised, glsl, ref_path, render_path, **kwargs):
+        # Candidate render must exist for the directed judge to be consulted.
+        render_path.parent.mkdir(parents=True, exist_ok=True)
+        render_path.write_bytes(b"\x89PNG\r\n")
+        return {"mse": 0.6}, {"final_score": 0.47}, 0.47, None  # delta -0.03
+
+    monkeypatch.setattr("app.pipeline.refinement._evaluate_dsl", fake_eval)
+
+    result = run_dsl_refinement_loop(
+        preprocess={},
+        initial_dsl={"layers": [{"id": "a", "type": "circle", "params": {}}]},
+        initial_score=0.50,
+        initial_metrics={"mse": 0.5},
+        initial_quality={"final_score": 0.50},
+        reference_path=tmp_path / "ref.png",
+        canvas_width=64,
+        canvas_height=64,
+        max_shader_chars=12000,
+        max_iterations=1,
+        threshold=0.80,
+        high_score_stop=0.92,
+        directed_acceptance={"score_drop_tolerance": 0.05},
+        directed_pairwise_judge=lambda _cur, _cand: "B",
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert result["best_dsl"] == lower_dsl
+    assert result["best_score"] == pytest.approx(0.47)
+    assert result["changed"] is True
+    assert result["history"][0]["human_goal_override"] == "accepted_score_drop"
+
+
 def test_run_post_pipeline_publishes_baseline_and_iterations(tmp_path, monkeypatch):
     glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
     cand = CandidateRecord(
@@ -1460,6 +1514,68 @@ def test_run_post_pipeline_publishes_baseline_and_iterations(tmp_path, monkeypat
     assert last["refinement_summary"]["iterations"] == 1
     assert last["refinement_summary"]["enabled"] is True
     assert result["selected_glsl"] == improved_glsl
+
+
+def test_run_post_pipeline_commits_directed_accept_below_seed(tmp_path, monkeypatch):
+    """P1: a directed acceptance lowers best_score below the seed but reports
+    changed=True. _run_post_pipeline must commit that shader, not revert to seed."""
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    cand = CandidateRecord(
+        id="seed_0",
+        source="seed",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.40,
+        selected=True,
+        objective_metrics={"mse": 0.5},
+        quality_router={"final_score": 0.40, "next_action": "accept"},
+    )
+    directed_glsl = "#define DIRECTED 1\n" + glsl
+
+    def fake_loop(*args, **kwargs):
+        # best_score (0.37) < initial (0.40): a goal-driven score drop the judge
+        # accepted. Score-only logic would discard it; changed=True must win.
+        return {
+            "best_glsl": directed_glsl,
+            "best_score": 0.37,
+            "best_metrics": {"mse": 0.6},
+            "best_quality": {"final_score": 0.37, "next_action": "accept"},
+            "best_render_path": None,
+            "history": [{"iteration": 1, "score_after": 0.37, "improved": False,
+                         "accepted": True, "human_goal_override": "accepted_score_drop"}],
+            "stop_reason": "max_iterations",
+            "changed": True,
+        }
+
+    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+
+    result = _run_post_pipeline(
+        {
+            "selected_candidate_id": "seed_0",
+            "candidates": [cand],
+            "run_dir": str(tmp_path),
+            "preprocess": {"palette": ["#ffffff"]},
+            "selected_dsl": None,
+            "selected_glsl": glsl,
+            "selected_metrics": {"mse": 0.5},
+            "selected_quality": {"final_score": 0.40, "next_action": "accept"},
+            "refinement_mode": "on",
+            "max_refinement_iterations": 2,
+            "llm_enabled": False,
+            "glsl_render_enabled": True,
+            "vlm_judge_enabled": False,
+        },
+    )
+
+    assert result["selected_glsl"] == directed_glsl
+    assert result["selected_quality"]["final_score"] == pytest.approx(0.37)
 
 
 def test_pipeline_threads_publish_partial_baseline(tmp_path):

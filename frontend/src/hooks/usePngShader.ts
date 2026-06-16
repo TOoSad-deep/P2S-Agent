@@ -299,6 +299,10 @@ export function usePngShader() {
   const [llmMode, setLlmMode] = useState<LlmMode>("off");
   const [strategy, setStrategy] = useState<StrategyConfig>(FALLBACK_DEFAULT_STRATEGY);
   const [stopPending, setStopPending] = useState(false);
+  // True only while a branch-refine request is in flight. Kept separate from
+  // `loading` (the parent run's lifecycle) so the human-loop panel can branch
+  // from an existing checkpoint while the parent is still running.
+  const [branchPending, setBranchPending] = useState(false);
   const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunRef = useRef<string | null>(null);
 
@@ -657,6 +661,7 @@ export function usePngShader() {
   ): Promise<string | null> => {
     stopPolling();
     setStopPending(false);
+    setBranchPending(true);
     setLoading(true);
     setError(null);
     activeRunRef.current = null;
@@ -698,6 +703,8 @@ export function usePngShader() {
       logFrontendEvent("api_branch_refine_error", { error: err instanceof Error ? err.message : String(err) }, "error");
       setError(err instanceof Error ? err.message : String(err));
       return null;
+    } finally {
+      setBranchPending(false);
     }
   }, [pollStatus, stopPolling]);
 
@@ -729,6 +736,7 @@ export function usePngShader() {
     updateStrategyLive,
     stopRun,
     stopPending,
+    branchPending,
     fetchCheckpoints,
     fetchTimeline,
     fetchBranches,

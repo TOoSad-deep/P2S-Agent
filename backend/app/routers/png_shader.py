@@ -462,6 +462,25 @@ async def get_status(run_id: str) -> dict:
     return result
 
 
+def _load_parent_input_spec(run_dir: "str | None") -> "dict | None":
+    """Read a run's persisted input_spec.json, or None if unavailable.
+
+    Used as the fallback source for branch inheritance when the parent's
+    in-memory store entry no longer carries ``input_spec`` (e.g. a branch of a
+    branch whose record predates the field).
+    """
+    if not run_dir:
+        return None
+    spec_path = Path(run_dir) / "input_spec.json"
+    if not spec_path.exists():
+        return None
+    try:
+        data = json.loads(spec_path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 @router.get("/runs/{run_id}/checkpoints")
 async def get_checkpoints(run_id: str) -> dict:
     """List the branchable checkpoints (candidates / iterations / final) of a run.
@@ -545,8 +564,23 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         "feedback": feedback,
     }
 
-    # Child quality: force the directed closed loop on, at least one iteration.
-    quality = dict(quality_overrides)
+    # Inherit the parent's input spec (target/candidates/quality) so the branch
+    # stays comparable to its parent. A default-built spec would reset target
+    # resolution, max shader chars, candidate config, etc. (P2). The parent
+    # store is the primary source; run_dir/input_spec.json is the fallback.
+    parent_spec = parent.get("input_spec")
+    if not isinstance(parent_spec, dict):
+        parent_spec = _load_parent_input_spec(parent_run_dir) or {}
+    parent_target = parent_spec.get("target")
+    parent_target = dict(parent_target) if isinstance(parent_target, dict) else {}
+    parent_candidates = parent_spec.get("candidates")
+    parent_candidates = dict(parent_candidates) if isinstance(parent_candidates, dict) else {}
+    parent_quality = parent_spec.get("quality")
+    parent_quality = dict(parent_quality) if isinstance(parent_quality, dict) else {}
+
+    # Child quality: inherit the parent's, apply the user's overrides, then force
+    # the directed closed loop on with at least one iteration.
+    quality = {**parent_quality, **quality_overrides}
     quality["refinement_mode"] = "on"
     quality["max_refinement_iterations"] = max(
         int(quality.get("max_refinement_iterations", 0) or 0), 1
@@ -569,7 +603,12 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         # degrades to metric-only acceptance if the VLM is unavailable.
         quality["vlm_judge_enabled"] = 1
 
-    child_input_spec = build_input_spec(str(reference_path), quality=quality)
+    child_input_spec = build_input_spec(
+        str(reference_path),
+        target=parent_target,
+        candidates=parent_candidates,
+        quality=quality,
+    )
     errors = validate_input_spec(child_input_spec)
     if errors:
         raise HTTPException(status_code=422, detail={"input_spec_errors": errors})
@@ -609,6 +648,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         "lineage": lineage,
         "submitted_at": time(),
         "strategy": dict(child_input_spec.get("quality") or quality),
+        "input_spec": child_input_spec,
         "stop_requested": False,
         "strategy_revision": 1,
     }

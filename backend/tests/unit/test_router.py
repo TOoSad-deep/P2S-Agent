@@ -408,6 +408,7 @@ def _fake_branch_pipeline(captured):
         captured["directed_acceptance"] = directed_acceptance
         captured["extra_artifacts"] = extra_artifacts
         captured["image_path"] = str(image_path)
+        captured["input_spec"] = input_spec
         return {
             "run_id": run_id,
             "selected_glsl": seed_glsl or "",
@@ -454,6 +455,101 @@ def test_branch_refine_creates_child_run(tmp_path, monkeypatch):
     assert captured["lineage"]["parent_run_id"] == "run_parent"
     # branch worker must NOT delete the parent reference image
     assert (parent_dir / "reference_input.png").exists()
+
+
+def test_branch_refine_inherits_parent_input_spec(tmp_path, monkeypatch):
+    """P2: the child run must inherit the parent's target/candidates (resolution,
+    max_shader_chars, candidate config) and only overlay forced items + the
+    user's quality, so the branch result is comparable to the parent."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    # Parent ran with a non-default target + candidate config.
+    _run_store["run_parent"]["input_spec"] = {
+        "input_image": "parent.png",
+        "target": {
+            "backend": "glsl",
+            "shader_env": "webgl2",
+            "resolution": [256, 128],
+            "allow_texture": False,
+            "allow_sdf_texture": False,
+            "max_shader_chars": 6000,
+            "max_layers": 24,
+            "max_render_time_ms": 8,
+        },
+        "quality": {"mode": "quality", "refinement_threshold": 0.85},
+        "candidates": {
+            "llm_enabled": True,
+            "llm_implementation": "shadertoy_glsl",
+            "cv_enabled": True,
+            "glsl_render_enabled": True,
+        },
+    }
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "warmer tones",
+            "mode": "refine",
+            "quality": {"refinement_threshold": 0.6},  # user override
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # Persisted on the child so a branch-of-branch can inherit in turn.
+    assert body["input_spec"]["target"]["resolution"] == [256, 128]
+
+    _wait_for_completion(client, body["run_id"])
+    spec = captured["input_spec"]
+    # Inherited target (would otherwise reset to the 512x512 / 12000 defaults).
+    assert spec["target"]["resolution"] == [256, 128]
+    assert spec["target"]["max_shader_chars"] == 6000
+    # Inherited candidates (default glsl_render_enabled is False).
+    assert spec["candidates"]["glsl_render_enabled"] is True
+    assert spec["candidates"]["llm_implementation"] == "shadertoy_glsl"
+    # User quality override wins over the inherited parent value.
+    assert spec["quality"]["refinement_threshold"] == 0.6
+    # Inherited parent quality not overridden by the user is kept.
+    assert spec["quality"]["mode"] == "quality"
+    # V1.2 forced items still applied on top.
+    assert spec["quality"]["refinement_mode"] == "on"
+    assert spec["quality"]["max_refinement_iterations"] >= 1
+    assert spec["quality"]["vlm_judge_enabled"] == 1
+
+
+def test_branch_refine_input_spec_falls_back_to_run_dir_file(tmp_path, monkeypatch):
+    """When the parent store lacks input_spec, the child reads it from the
+    parent run_dir/input_spec.json."""
+    _run_store.clear()
+    parent_dir = _seed_parent(tmp_path)
+    _run_store["run_parent"].pop("input_spec", None)
+    (parent_dir / "input_spec.json").write_text(json.dumps({
+        "input_image": "parent.png",
+        "target": {"backend": "glsl", "resolution": [200, 300], "max_shader_chars": 9000},
+        "quality": {"mode": "balanced"},
+        "candidates": {"llm_enabled": False, "cv_enabled": True,
+                       "glsl_render_enabled": True, "llm_implementation": "auto"},
+    }))
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "x", "mode": "refine"},
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+    spec = captured["input_spec"]
+    assert spec["target"]["resolution"] == [200, 300]
+    assert spec["candidates"]["glsl_render_enabled"] is True
 
 
 def test_branch_refine_404_for_unknown_parent():

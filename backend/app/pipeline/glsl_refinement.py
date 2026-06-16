@@ -98,6 +98,10 @@ def run_glsl_refinement_loop(
     best_quality = dict(initial_quality)
     best_render_path = initial_render_path
     current_render_path = initial_render_path
+    # Whether any revision was accepted as the new best (including a directed
+    # score-drop accept). The pipeline commits the refined shader on this signal
+    # rather than score-improvement alone, so directed acceptance is not lost.
+    changed = False
 
     history: list[dict] = []
     stop_reason = "max_iterations"
@@ -337,6 +341,7 @@ def run_glsl_refinement_loop(
                 entry["human_goal_override"] = "accepted_score_drop"
 
         if accept:
+            changed = True
             best_glsl = revised_glsl
             best_score = new_score
             best_metrics = new_metrics
@@ -384,4 +389,5 @@ def run_glsl_refinement_loop(
         "best_render_path": str(best_render_path) if best_render_path else None,
         "history": history,
         "stop_reason": stop_reason,
+        "changed": changed,
     }

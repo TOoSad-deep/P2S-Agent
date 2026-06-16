@@ -185,6 +185,10 @@ def run_dsl_refinement_loop(
     history: list[dict] = []
     stop_reason = "max_iterations"
     no_improvement_count = 0
+    # Whether any revision was accepted as the new best (including a directed
+    # score-drop accept). The pipeline commits the refined DSL on this signal
+    # rather than score-improvement alone, so directed acceptance is not lost.
+    changed = False
     # Persistent human-goal notes: prepended to every LLM call so a directed
     # branch keeps pursuing the user's intent even after transient feedback
     # resets on an accepted improvement.
@@ -454,6 +458,7 @@ def run_dsl_refinement_loop(
                 entry["human_goal_override"] = "accepted_score_drop"
 
         if accept:
+            changed = True
             best_dsl = revised
             best_score = new_score
             best_metrics = new_metrics
@@ -510,6 +515,7 @@ def run_dsl_refinement_loop(
         "best_quality": best_quality,
         "history": history,
         "stop_reason": stop_reason,
+        "changed": changed,
     }
 
 

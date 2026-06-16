@@ -413,6 +413,9 @@ def test_directed_acceptance_accepts_small_drop_when_judge_picks_b(tmp_path, mon
     assert result["best_score"] == pytest.approx(0.28)
     assert result["history"][0]["human_goal_override"] == "accepted_score_drop"
     assert result["history"][0]["accepted"] is True
+    # P1: a directed accept lowers best_score below the initial; the loop must
+    # still report that the best changed so the pipeline commits it.
+    assert result["changed"] is True
 
 
 def test_directed_acceptance_rejects_drop_beyond_tolerance(tmp_path, monkeypatch):
@@ -471,6 +474,56 @@ def test_directed_acceptance_metric_only_without_judge(tmp_path, monkeypatch):
     )
 
     assert result["best_glsl"] == VALID_GLSL_A  # score drop rejected without a judge
+    assert result["changed"] is False
+
+
+def test_changed_flag_true_on_improvement(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
+    )
+
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r,
+        max_iterations=1,
+        threshold=0.45,
+        high_score_stop=0.92,
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert result["best_score"] == pytest.approx(0.50)
+    assert result["changed"] is True
+
+
+def test_changed_flag_false_when_all_rolled_back(tmp_path, monkeypatch):
+    worse = VALID_GLSL_A.replace("0.30", "0.10")
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": worse, "_io": {}},
+    )
+
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r,
+        max_iterations=3,
+        threshold=0.80,
+        high_score_stop=0.92,
+        no_improvement_patience=2,
+        max_fresh_restarts=0,
+        loop_dir=tmp_path / "loop",
+    )
+
+    assert result["best_glsl"] == VALID_GLSL_A
+    assert result["changed"] is False
 
 
 def test_force_first_overrides_high_score_stop(tmp_path, monkeypatch):
