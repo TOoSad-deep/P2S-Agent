@@ -298,19 +298,6 @@ export default function BranchCanvasWorkspace({
       setSelectedNodeId(id);
       const node = displayNodes.find((n) => n.id === id) ?? null;
       onPreviewNode?.(node);
-      // Toggle collapse for variant_group nodes
-      if (node?.data.type === "variant_group" && node.data.group_id) {
-        const gid = node.data.group_id;
-        setCollapsedGroupIds((prev) => {
-          const next = new Set(prev);
-          if (next.has(gid)) {
-            next.delete(gid);
-          } else {
-            next.add(gid);
-          }
-          return next;
-        });
-      }
     },
     [displayNodes, onPreviewNode],
   );
@@ -318,9 +305,20 @@ export default function BranchCanvasWorkspace({
   const handleNodeDoubleClick = useCallback(
     (id: string) => {
       const node = displayNodes.find((n) => n.id === id);
+      if (!node) return;
+      // Double-click a variant_group: toggle collapse (do NOT also switchRun)
+      if (node.data.type === "variant_group" && node.data.group_id) {
+        const gid = node.data.group_id;
+        setCollapsedGroupIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(gid)) { next.delete(gid); } else { next.add(gid); }
+          return next;
+        });
+        return;
+      }
+      // Double-click a run or variant_run: switch active run
       if (
-        node &&
-        node.data.type === "run" &&
+        (node.data.type === "run" || node.data.type === "variant_run") &&
         node.data.run_id &&
         node.data.run_id !== activeRunId
       ) {
@@ -410,27 +408,24 @@ export default function BranchCanvasWorkspace({
         setSelectedNodeId(null);
         if (resp?.group_id) {
           setActiveVariantGroupId(resp.group_id);
-          if (runId) fetchBranches(runId).then(setBranchInfo).catch(() => {});
+          if (runIdRef.current) fetchBranches(runIdRef.current).then(setBranchInfo).catch(() => {});
         }
       } catch {
         setSubmitError("变体探索失败 / Explore variants failed");
       }
     },
-    [exploreVariants, runId, fetchBranches],
+    [exploreVariants, fetchBranches],
   );
 
   const handleSelectWinner = useCallback(
     async (groupId: string, winnerRunId: string, reason?: string) => {
-      try {
-        await selectVariantWinner(groupId, winnerRunId, reason);
-      } catch {
-        return;
-      }
+      try { await selectVariantWinner(groupId, winnerRunId, reason); } catch { return; }
       switchRun(winnerRunId);
-      if (runId) fetchBranches(runId).then(setBranchInfo).catch(() => {});
+      setActiveVariantGroupId(null);
+      if (runIdRef.current) fetchBranches(runIdRef.current).then(setBranchInfo).catch(() => {});
       fetchVariantGroup(groupId).then(setVariantGroup).catch(() => {});
     },
-    [selectVariantWinner, switchRun, runId, fetchBranches, fetchVariantGroup],
+    [selectVariantWinner, switchRun, fetchBranches, fetchVariantGroup],
   );
 
   const handleStopGroup = useCallback(
@@ -438,6 +433,7 @@ export default function BranchCanvasWorkspace({
     [stopVariantGroup],
   );
 
+  // reason/tags forwarding added in V3-8 when the rating UI lands
   const handleRateVariant = useCallback(
     (groupId: string, rid: string, rating: number) => { rateVariant(groupId, rid, rating); },
     [rateVariant],
@@ -455,7 +451,7 @@ export default function BranchCanvasWorkspace({
         const g = await fetchVariantGroup(activeVariantGroupId);
         if (!alive) return;
         setVariantGroup(g);
-        if (runId) fetchBranches(runId).then((b) => { if (alive) setBranchInfo(b); }).catch(() => {});
+        if (runIdRef.current) fetchBranches(runIdRef.current).then((b) => { if (alive) setBranchInfo(b); }).catch(() => {});
         if (TERMINAL.has(g.status)) return; // stop polling
       } catch {
         // best-effort: keep trying
@@ -467,7 +463,7 @@ export default function BranchCanvasWorkspace({
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [activeVariantGroupId, fetchVariantGroup, fetchBranches, runId]);
+  }, [activeVariantGroupId, fetchVariantGroup, fetchBranches]);
 
   // ── Placeholder when no run ────────────────────────────────────────────────
   if (!runId || !branchInfo) {
