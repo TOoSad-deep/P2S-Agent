@@ -2,7 +2,7 @@
 // Pure presentational. No data fetching. No app state.
 import { memo } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { ChevronDown, ChevronRight, GitBranch, Image, Layers, Loader, Star, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Dices, GitBranch, Image, Layers, Loader, Sparkles, Star, X } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import { fmtScore, truncate } from "../lib/format";
 
@@ -338,6 +338,139 @@ export const VariantRunNode = memo(function VariantRunNode({ data, selected }: N
   );
 });
 
+// ─── 7. DrawSessionNode ───────────────────────────────────────────────────────
+
+export const DrawSessionNode = memo(function DrawSessionNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+  const ringClass = selected ? "ring-2 ring-emerald-500" : "";
+
+  const completedCount = (data.completed_count as number | undefined) ?? 0;
+  const cardCount = (data.card_count as number | undefined) ?? 0;
+  const runningCount = (data.running_count as number | undefined) ?? 0;
+  const failedCount = (data.failed_count as number | undefined) ?? 0;
+
+  return (
+    <div
+      className={`rounded-lg border text-[11px] flex flex-col gap-1 px-2.5 py-2 shadow-sm transition-all ${ringClass}`}
+      style={{
+        width: 190,
+        background: "var(--bg-secondary)",
+        borderColor: selected ? "var(--accent-primary)" : "var(--border-color)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <Handle type="target" position={Position.Top} />
+
+      {/* Header row: gacha icon + label + collapse chevron + status */}
+      <div className="flex items-center gap-1.5">
+        <span title="draw session" className="flex-shrink-0">
+          <Dices className="w-3.5 h-3.5 text-emerald-400" />
+        </span>
+        <span
+          className="flex-1 truncate font-medium"
+          style={{ color: "var(--text-primary)" }}
+          title={data.label}
+        >
+          {data.label}
+        </span>
+        {/* Collapse affordance — purely visual */}
+        {data.collapsed ? (
+          <span title="collapsed" className="flex-shrink-0">
+            <ChevronRight className="w-3.5 h-3.5" style={{ color: "var(--text-muted)" }} />
+          </span>
+        ) : (
+          <span title="expanded" className="flex-shrink-0">
+            <ChevronDown className="w-3.5 h-3.5" style={{ color: "var(--text-muted)" }} />
+          </span>
+        )}
+        <StatusDot status={data.status} />
+      </div>
+
+      {/* Progress line */}
+      <div className="flex items-center gap-1 flex-wrap" style={{ color: "var(--text-muted)" }}>
+        <span>{completedCount}/{cardCount} done</span>
+        {runningCount > 0 && <span>· {runningCount} running</span>}
+        {failedCount > 0 && <span>· {failedCount} failed</span>}
+      </div>
+
+      {/* Winner star */}
+      {!!data.winner_run_id && (
+        <div className="flex items-center gap-1">
+          <Star className="w-3 h-3 text-emerald-400 flex-shrink-0" fill="currentColor" />
+          <span style={{ color: "var(--text-muted)" }}>winner</span>
+        </div>
+      )}
+
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+});
+
+// ─── 8. DrawCardNode ──────────────────────────────────────────────────────────
+
+export const DrawCardNode = memo(function DrawCardNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+  const ringClass = selected ? "ring-2 ring-emerald-500" : "";
+
+  const indexLabel = typeof data.index === "number" ? `#${data.index}` : null;
+  const isWinnerOrFavorite = data.is_winner || data.favorite;
+  const isEliminated = data.eliminated === true;
+
+  return (
+    <div
+      className={`rounded-lg border text-[11px] flex flex-col gap-1 px-2 py-1.5 shadow-sm transition-all ${ringClass} ${isEliminated ? "opacity-50" : ""}`}
+      style={{
+        width: 150,
+        background: "var(--bg-secondary)",
+        borderColor: selected ? "var(--accent-primary)" : "var(--border-color)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <Handle type="target" position={Position.Top} />
+
+      {/* Header row: index badge + label + winner/favorite star */}
+      <div className="flex items-center gap-1.5">
+        {indexLabel !== null && (
+          <span
+            className="font-mono rounded px-0.5 flex-shrink-0 text-[10px]"
+            style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}
+          >
+            {indexLabel}
+          </span>
+        )}
+        <span
+          className={`flex-1 truncate font-medium ${isEliminated ? "line-through" : ""}`}
+          style={{ color: "var(--text-primary)" }}
+          title={data.label}
+        >
+          {data.label}
+        </span>
+        {isWinnerOrFavorite && (
+          <span title={data.is_winner ? "winner" : "favorite"} className="flex-shrink-0">
+            <Star className="w-3 h-3 text-emerald-400" fill="currentColor" />
+          </span>
+        )}
+      </div>
+
+      {/* Status dot + score */}
+      <div className="flex items-center gap-1.5">
+        <StatusDot status={data.status} />
+        {typeof data.final_score === "number" && (
+          <span style={{ color: "var(--text-muted)" }}>
+            {fmtScore(data.final_score)}
+          </span>
+        )}
+        {/* Fusion affordance — visual placeholder for V4.5 */}
+        {!!data.can_use_for_fusion && (
+          <span title="can be used as fusion source" className="flex-shrink-0 ml-auto">
+            <Sparkles className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
+          </span>
+        )}
+      </div>
+
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+});
+
 // ─── Stable nodeTypes export ──────────────────────────────────────────────────
 // Module constant — satisfies React Flow's nodeTypes stability contract.
 
@@ -348,4 +481,6 @@ export const branchCanvasNodeTypes: NodeTypes = {
   branch_action: BranchActionNode,
   variant_group: VariantGroupNode,
   variant_run: VariantRunNode,
+  draw_session: DrawSessionNode,
+  draw_card: DrawCardNode,
 };

@@ -30,13 +30,12 @@ interface RunEntry {
  * - Apply layoutOverrides last: any node id in overrides gets that exact position.
  * - Unknown-type nodes keep their incoming position.
  * - Inputs are not mutated; every returned node is a shallow clone with a new position object.
- * - `_edges` is accepted but currently unused; reserved for future constraint-aware layout.
+ * - `edges` is used by the draw post-pass to resolve draw_from anchor relationships.
  * - Checkpoint nodes whose run_id is absent from the node list keep their incoming position (typically {0,0}).
  */
 export function layoutBranchCanvas(
   nodes: BranchCanvasNode[],
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _edges: BranchCanvasEdge[],
+  edges: BranchCanvasEdge[],
   layoutOverrides: Record<string, { x: number; y: number }>,
 ): BranchCanvasNode[] {
   // ── 1. Partition nodes ───────────────────────────────────────────────────
@@ -46,6 +45,8 @@ export function layoutBranchCanvas(
   const cpByRunId = new Map<string, BranchCanvasNode[]>();
   const variantGroupNodes: BranchCanvasNode[] = [];
   const variantRunNodes: BranchCanvasNode[] = [];
+  const drawSessionNodes: BranchCanvasNode[] = [];
+  const drawCardNodes: BranchCanvasNode[] = [];
 
   for (const node of nodes) {
     const nodeType = (node.data as { type?: string }).type;
@@ -67,6 +68,10 @@ export function layoutBranchCanvas(
       variantGroupNodes.push(node);
     } else if (nodeType === "variant_run") {
       variantRunNodes.push(node);
+    } else if (nodeType === "draw_session") {
+      drawSessionNodes.push(node);
+    } else if (nodeType === "draw_card") {
+      drawCardNodes.push(node);
     }
   }
 
@@ -203,6 +208,93 @@ export function layoutBranchCanvas(
       const existing = resultMap.get(vrNode.id);
       if (existing !== undefined) {
         resultMap.set(vrNode.id, { ...existing, position: { x: vx, y: vy } });
+      }
+    }
+  }
+
+  // ── 4c. Draw post-pass: place draw_session and draw_card nodes ───────────
+  // Step 1: Build drawAnchorOf map from draw_from edges.
+  // Edge: source = anchor node id, target = draw_session node id ("draw:{draw_id}").
+  const drawAnchorOf = new Map<string, string>(); // sessionNodeId → anchorNodeId
+  for (const edge of edges) {
+    const rel = (edge.data as { relation?: string } | undefined)?.relation;
+    if (rel === "draw_from") {
+      drawAnchorOf.set(edge.target, edge.source);
+    }
+  }
+
+  // Step 2: Place draw_session nodes.
+  // Group sessions by anchor id for overlap-avoidance.
+  const sessionsByAnchor = new Map<string, BranchCanvasNode[]>();
+  for (const dsNode of drawSessionNodes) {
+    const anchorId = drawAnchorOf.get(dsNode.id);
+    if (anchorId !== undefined) {
+      let list = sessionsByAnchor.get(anchorId);
+      if (!list) {
+        list = [];
+        sessionsByAnchor.set(anchorId, list);
+      }
+      list.push(dsNode);
+    }
+  }
+
+  for (const [anchorId, sessions] of sessionsByAnchor) {
+    const anchorPos = computedPositions.get(anchorId);
+    if (anchorPos === undefined) continue; // anchor not found — keep incoming positions
+
+    // Sort sessions by node id for determinism when multiple sessions share one anchor
+    const sorted = [...sessions].sort((a, b) =>
+      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    );
+
+    for (let i = 0; i < sorted.length; i++) {
+      const dsNode = sorted[i];
+      const sx = anchorPos.x + COLUMN_WIDTH;
+      const sy = anchorPos.y + i * (ROW_HEIGHT * 2);
+      computedPositions.set(dsNode.id, { x: sx, y: sy });
+      const existing = resultMap.get(dsNode.id);
+      if (existing !== undefined) {
+        resultMap.set(dsNode.id, { ...existing, position: { x: sx, y: sy } });
+      }
+    }
+  }
+
+  // Step 3: Place draw_card nodes grouped by draw_id, stacked by index.
+  const cardsByDrawId = new Map<string, BranchCanvasNode[]>();
+  for (const dcNode of drawCardNodes) {
+    const drawId = (dcNode.data as { draw_id?: string }).draw_id;
+    if (!drawId) continue;
+    const key = `draw:${drawId}`;
+    let list = cardsByDrawId.get(key);
+    if (!list) {
+      list = [];
+      cardsByDrawId.set(key, list);
+    }
+    list.push(dcNode);
+  }
+
+  for (const [sessionNodeId, cards] of cardsByDrawId) {
+    const sessionPos = computedPositions.get(sessionNodeId);
+    // Fallback {0,0} if the session node position is unknown
+    const baseX = sessionPos ? sessionPos.x + COLUMN_WIDTH : 0;
+    const baseY = sessionPos ? sessionPos.y : 0;
+
+    // Sort by index then id (stable)
+    const sorted = [...cards].sort((a, b) => {
+      const ia = (a.data as { index?: number | null }).index ?? 0;
+      const ib = (b.data as { index?: number | null }).index ?? 0;
+      if (ia !== ib) return ia - ib;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+
+    for (let i = 0; i < sorted.length; i++) {
+      const dcNode = sorted[i];
+      const cx = baseX;
+      const cy = baseY + i * ROW_HEIGHT;
+      computedPositions.set(dcNode.id, { x: cx, y: cy });
+      const existing = resultMap.get(dcNode.id);
+      if (existing !== undefined) {
+        resultMap.set(dcNode.id, { ...existing, position: { x: cx, y: cy } });
       }
     }
   }

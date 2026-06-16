@@ -544,4 +544,214 @@ describe("layoutBranchCanvas", () => {
     expect(rootPos.position).toEqual(expectedRoot.position);
     expect(childPos.position).toEqual(expectedChild.position);
   });
+
+  // ─── V3.5 draw post-pass layout tests ─────────────────────────────────────
+
+  function makeDrawSessionNode(
+    drawId: string,
+    overrides: Partial<BranchCanvasNode> = {},
+  ): BranchCanvasNode {
+    return {
+      id: `draw:${drawId}`,
+      type: "draw_session",
+      position: { x: 0, y: 0 },
+      data: {
+        type: "draw_session",
+        label: `Draw ${drawId}`,
+        draw_id: drawId,
+        status: "running",
+        requested_count: 4,
+        completed_count: 2,
+        running_count: 1,
+        failed_count: 0,
+        winner_run_id: null,
+        card_count: 4,
+      },
+      ...overrides,
+    };
+  }
+
+  function makeDrawCardNode(
+    runId: string,
+    drawId: string,
+    index: number,
+    overrides: Partial<BranchCanvasNode> = {},
+  ): BranchCanvasNode {
+    return {
+      id: `drawcard:${runId}`,
+      type: "draw_card",
+      position: { x: 0, y: 0 },
+      data: {
+        type: "draw_card",
+        label: runId,
+        draw_id: drawId,
+        run_id: runId,
+        card_id: `card-${runId}`,
+        group_id: null,
+        index,
+        status: "completed",
+        favorite: false,
+        eliminated: false,
+        final_score: null,
+        replacement_of_run_id: null,
+        can_use_for_fusion: false,
+        is_winner: false,
+      },
+      ...overrides,
+    };
+  }
+
+  function makeDrawFromEdge(
+    anchorNodeId: string,
+    drawId: string,
+  ): BranchCanvasEdge {
+    return {
+      id: `drawfrom:${drawId}`,
+      source: anchorNodeId,
+      target: `draw:${drawId}`,
+      data: { relation: "draw_from" },
+    };
+  }
+
+  // ── D1. draw_session placed one COLUMN_WIDTH right of its anchor ──────────
+  it("places a draw_session node one COLUMN_WIDTH right of its anchor at the anchor's y", () => {
+    const ROOT = "root-draw-001";
+    const DRAW_ID = "draw-001";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeDrawSessionNode(DRAW_ID),
+    ];
+
+    const edges: BranchCanvasEdge[] = [
+      makeDrawFromEdge(`run:${ROOT}`, DRAW_ID),
+    ];
+
+    const result = layoutBranchCanvas(nodes, edges, NO_OVERRIDES);
+
+    const rootNode = result.find((n) => n.id === `run:${ROOT}`)!;
+    const dsNode = result.find((n) => n.id === `draw:${DRAW_ID}`)!;
+
+    expect(dsNode).toBeDefined();
+    expect(dsNode.position.x).toBe(rootNode.position.x + COLUMN_WIDTH);
+    expect(dsNode.position.y).toBe(rootNode.position.y);
+  });
+
+  // ── D2. draw_card nodes placed right of session, stacked by index ─────────
+  it("places two draw_card nodes one COLUMN_WIDTH right of the session, stacked ROW_HEIGHT apart by index", () => {
+    const ROOT = "root-draw-002";
+    const DRAW_ID = "draw-002";
+    const CARD_A = "card-run-a";
+    const CARD_B = "card-run-b";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeDrawSessionNode(DRAW_ID),
+      makeDrawCardNode(CARD_A, DRAW_ID, 0),
+      makeDrawCardNode(CARD_B, DRAW_ID, 1),
+    ];
+
+    const edges: BranchCanvasEdge[] = [
+      makeDrawFromEdge(`run:${ROOT}`, DRAW_ID),
+    ];
+
+    const result = layoutBranchCanvas(nodes, edges, NO_OVERRIDES);
+
+    const dsNode = result.find((n) => n.id === `draw:${DRAW_ID}`)!;
+    const cardA = result.find((n) => n.id === `drawcard:${CARD_A}`)!;
+    const cardB = result.find((n) => n.id === `drawcard:${CARD_B}`)!;
+
+    expect(cardA).toBeDefined();
+    expect(cardB).toBeDefined();
+
+    // Both cards are COLUMN_WIDTH right of the session
+    expect(cardA.position.x).toBe(dsNode.position.x + COLUMN_WIDTH);
+    expect(cardB.position.x).toBe(dsNode.position.x + COLUMN_WIDTH);
+
+    // Stacked by index: index 0 first, index 1 ROW_HEIGHT below
+    expect(cardA.position.y).toBe(dsNode.position.y + 0 * ROW_HEIGHT);
+    expect(cardB.position.y).toBe(dsNode.position.y + 1 * ROW_HEIGHT);
+
+    // Strictly increasing y
+    expect(cardB.position.y).toBeGreaterThan(cardA.position.y);
+  });
+
+  // ── D3. layoutOverrides wins over draw_card computed position ─────────────
+  it("applies layoutOverrides to a draw_card node, overriding the computed position", () => {
+    const ROOT = "root-draw-003";
+    const DRAW_ID = "draw-003";
+    const CARD_A = "card-run-003a";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeDrawSessionNode(DRAW_ID),
+      makeDrawCardNode(CARD_A, DRAW_ID, 0),
+    ];
+
+    const edges: BranchCanvasEdge[] = [
+      makeDrawFromEdge(`run:${ROOT}`, DRAW_ID),
+    ];
+
+    const overrides = { [`drawcard:${CARD_A}`]: { x: 7777, y: 8888 } };
+    const result = layoutBranchCanvas(nodes, edges, overrides);
+
+    const cardA = result.find((n) => n.id === `drawcard:${CARD_A}`)!;
+    expect(cardA.position).toEqual({ x: 7777, y: 8888 });
+  });
+
+  // ── D4. draw_session with missing anchor keeps incoming position (no crash) ─
+  it("keeps the incoming position of a draw_session whose anchor is absent (no crash)", () => {
+    const DRAW_ID = "draw-004";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeDrawSessionNode(DRAW_ID, { position: { x: 42, y: 99 } }),
+    ];
+
+    // No draw_from edge → anchor unknown
+    const result = layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES);
+
+    const dsNode = result.find((n) => n.id === `draw:${DRAW_ID}`)!;
+    expect(dsNode).toBeDefined();
+    // Should not crash; keeps incoming position
+    expect(dsNode.position).toEqual({ x: 42, y: 99 });
+  });
+
+  // ── D5. Two sessions sharing one anchor don't get identical y ─────────────
+  it("offsets two draw_sessions sharing the same anchor so they don't overlap", () => {
+    const ROOT = "root-draw-005";
+    const DRAW_A = "draw-005a";
+    const DRAW_B = "draw-005b";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeDrawSessionNode(DRAW_A),
+      makeDrawSessionNode(DRAW_B),
+    ];
+
+    const edges: BranchCanvasEdge[] = [
+      makeDrawFromEdge(`run:${ROOT}`, DRAW_A),
+      makeDrawFromEdge(`run:${ROOT}`, DRAW_B),
+    ];
+
+    const result = layoutBranchCanvas(nodes, edges, NO_OVERRIDES);
+
+    const dsA = result.find((n) => n.id === `draw:${DRAW_A}`)!;
+    const dsB = result.find((n) => n.id === `draw:${DRAW_B}`)!;
+
+    expect(dsA).toBeDefined();
+    expect(dsB).toBeDefined();
+
+    // Both are COLUMN_WIDTH right of their anchor
+    const runNode = result.find((n) => n.id === `run:${ROOT}`)!;
+    expect(dsA.position.x).toBe(runNode.position.x + COLUMN_WIDTH);
+    expect(dsB.position.x).toBe(runNode.position.x + COLUMN_WIDTH);
+
+    // They must NOT be at the same y
+    expect(dsA.position.y).not.toBe(dsB.position.y);
+  });
 });
