@@ -88,6 +88,7 @@ export default function BranchCanvasWorkspace({
   const [activeTimeline, setActiveTimeline] = useState<CheckpointTimelineEntry[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [branchDraft, setBranchDraft] = useState<{ sourceRunId: string; sourceCheckpointId: string } | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   // TODO(V2.1-8): make stateful when the collapse toggle UI is added
   const collapsedRunIds = useMemo(() => new Set<string>(), []);
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
@@ -95,6 +96,8 @@ export default function BranchCanvasWorkspace({
 
   // ── runId ref: kept in sync so async callbacks read the latest value ──────
   const runIdRef = useRef(runId);
+  // ── Double-submit guard ────────────────────────────────────────────────────
+  const submittingRef = useRef(false);
   useEffect(() => { runIdRef.current = runId; }, [runId]);
 
   // ── Clear selection AND draft on run-switch (I3 + draft cleanup) ──────────
@@ -228,11 +231,9 @@ export default function BranchCanvasWorkspace({
       return n.selected === sel ? n : { ...n, selected: sel };
     });
 
-    if (!branchDraft) return base;
+    if (!branchDraft || !draftSrcNode) return base;
 
-    const pos = draftSrcNode
-      ? { x: draftSrcNode.position.x + COLUMN_WIDTH, y: draftSrcNode.position.y + 40 }
-      : { x: 0, y: 0 };
+    const pos = { x: draftSrcNode.position.x + COLUMN_WIDTH, y: draftSrcNode.position.y + 40 };
 
     const draftNode: BranchCanvasNode = {
       id: "draft",
@@ -327,6 +328,7 @@ export default function BranchCanvasWorkspace({
 
   const handleRefineFromCheckpoint = useCallback(
     (rid: string, checkpointId: string) => {
+      setSubmitError(null);
       setBranchDraft({ sourceRunId: rid, sourceCheckpointId: checkpointId });
       setSelectedNodeId("draft");
     },
@@ -335,6 +337,7 @@ export default function BranchCanvasWorkspace({
 
   const handleContinueFromRun = useCallback(
     (rid: string) => {
+      setSubmitError(null);
       setBranchDraft({ sourceRunId: rid, sourceCheckpointId: "final:selected" });
       setSelectedNodeId("draft");
     },
@@ -343,18 +346,19 @@ export default function BranchCanvasWorkspace({
 
   const handleSubmitBranch = useCallback(
     (_runId: string, request: BranchRefineRequest) => {
-      if (!branchDraft) return;
+      if (!branchDraft || submittingRef.current) return;
+      submittingRef.current = true;
+      setSubmitError(null);
       branchRefine(branchDraft.sourceRunId, request)
-        .then(() => {
-          setBranchDraft(null);
-          setSelectedNodeId(null);
-        })
-        .catch(() => {});
+        .then(() => { setBranchDraft(null); setSelectedNodeId(null); })
+        .catch((err) => { setSubmitError(err instanceof Error ? err.message : "提交失败 / Submit failed"); })
+        .finally(() => { submittingRef.current = false; });
     },
     [branchDraft, branchRefine],
   );
 
   const handleCancelBranch = useCallback(() => {
+    setSubmitError(null);
     setBranchDraft(null);
     setSelectedNodeId(null);
   }, []);
@@ -461,6 +465,7 @@ export default function BranchCanvasWorkspace({
             onContinueFromRun={handleContinueFromRun}
             onSubmitBranch={handleSubmitBranch}
             onCancelBranch={handleCancelBranch}
+            submitError={submitError}
             disabled={disabled}
           />
         </div>

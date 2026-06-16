@@ -33,6 +33,7 @@ interface Props {
   onContinueFromRun: (runId: string) => void;
   onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
   onCancelBranch: () => void;
+  submitError?: string | null;
   disabled?: boolean;
 }
 
@@ -282,10 +283,11 @@ interface BranchActionViewProps {
   node: BranchCanvasNode;
   onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
   onCancelBranch: () => void;
+  submitError?: string | null;
   disabled?: boolean;
 }
 
-function BranchActionView({ node, onSubmitBranch, onCancelBranch, disabled }: BranchActionViewProps) {
+function BranchActionView({ node, onSubmitBranch, onCancelBranch, submitError, disabled }: BranchActionViewProps) {
   const data = node.data;
   const runId = data.run_id!;
 
@@ -369,6 +371,11 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, disabled }: Br
         ))}
       </div>
 
+      {/* Submit error */}
+      {submitError && (
+        <p className="text-[11px] text-red-400">{submitError}</p>
+      )}
+
       {/* Submit / Cancel */}
       <div className="flex gap-1.5 pt-1">
         <button
@@ -412,6 +419,7 @@ export default function BranchCanvasInspector({
   onContinueFromRun,
   onSubmitBranch,
   onCancelBranch,
+  submitError,
   disabled,
 }: Props) {
   // Reset run-node title draft when node identity changes (handled inside RunNodeView too,
@@ -456,6 +464,7 @@ export default function BranchCanvasInspector({
             node={node}
             onSubmitBranch={onSubmitBranch}
             onCancelBranch={onCancelBranch}
+            submitError={submitError}
             disabled={disabled}
           />
         );

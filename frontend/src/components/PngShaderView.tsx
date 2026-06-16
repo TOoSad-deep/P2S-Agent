@@ -439,7 +439,7 @@ export default function PngShaderView({
             <div className="flex flex-col gap-2">
               {/* Segmented toggle */}
               <div className="flex items-center gap-0.5 self-start bg-[var(--bg-tertiary)] rounded-md p-0.5">
-                {(["canvas", "list"] as const).map((view) => (
+                {(["list", "canvas"] as const).map((view) => (
                   <button
                     key={view}
                     onClick={() => setWorkspaceView(view)}
