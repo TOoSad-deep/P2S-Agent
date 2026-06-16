@@ -119,6 +119,29 @@ class TestParseConstraintSpec:
         spec = parse_constraint_spec({"targets": ["bad"]})
         assert spec.targets == {}
 
+    def test_edit_strength_bad_string_falls_back_to_half(self):
+        """parse_constraint_spec must NOT raise on a bad edit_strength string."""
+        spec = parse_constraint_spec({"edit_strength": "bad"})
+        assert spec.edit_strength == 0.5
+
+    def test_region_strength_bad_string_falls_back_to_half(self):
+        """_parse_region must NOT raise on a bad strength string."""
+        payload = {
+            "regions": [
+                {
+                    "id": "r",
+                    "label": "l",
+                    "mode": "modify",
+                    "instruction": "i",
+                    "geometry_type": "rect",
+                    "geometry": {"x": 0, "y": 0, "w": 1, "h": 1},
+                    "strength": "bad",
+                }
+            ]
+        }
+        spec = parse_constraint_spec(payload)
+        assert spec.regions[0].strength == 0.5
+
 
 # ---------------------------------------------------------------------------
 # validate_constraint_spec
@@ -282,6 +305,20 @@ class TestValidateConstraintSpec:
         spec = parse_constraint_spec(None)
         errors = validate_constraint_spec(spec, image_width=1920, image_height=1080)
         assert errors == []
+
+    def test_rect_bounds_float_epsilon_no_false_positive(self):
+        """x=0.1, w=0.9 sums to 1.0 within float error — must NOT produce a bounds error."""
+        region = RegionConstraint(
+            id="r_eps",
+            label="test",
+            mode="modify",
+            instruction="i",
+            geometry_type="rect",
+            geometry={"x": 0.1, "y": 0.0, "w": 0.9, "h": 1.0},
+        )
+        spec = HumanConstraintSpec(regions=[region])
+        errors = validate_constraint_spec(spec)
+        assert not any("r_eps" in e and "exceeds" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------

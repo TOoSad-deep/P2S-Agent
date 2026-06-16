@@ -26,6 +26,16 @@ _VALID_MODES = frozenset({"modify", "protect"})
 _VALID_GEOMETRY_TYPES = frozenset({"rect", "polygon", "mask"})
 _VALID_DIRECTIONS = frozenset({"keep", "increase", "decrease"})
 
+_RECT_BOUND_EPSILON = 1e-9
+
+
+def _safe_float(value: Any, default: float) -> float:
+    """Convert *value* to float, returning *default* on TypeError or ValueError."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 
 @dataclass
 class RegionConstraint:
@@ -67,7 +77,7 @@ def _parse_region(raw: Any) -> RegionConstraint:
         instruction=str(raw.get("instruction", "")),
         geometry_type=str(raw.get("geometry_type", "rect")),
         geometry=raw.get("geometry", {}) if isinstance(raw.get("geometry"), dict) else {},
-        strength=float(raw["strength"]) if "strength" in raw else 0.5,
+        strength=_safe_float(raw.get("strength"), 0.5) if "strength" in raw else 0.5,
     )
 
 
@@ -86,7 +96,7 @@ def parse_constraint_spec(payload: dict | None) -> HumanConstraintSpec:
     raw_targets = payload.get("targets", {})
     targets = raw_targets if isinstance(raw_targets, dict) else {}
 
-    edit_strength = float(payload["edit_strength"]) if "edit_strength" in payload else 0.5
+    edit_strength = _safe_float(payload["edit_strength"], 0.5) if "edit_strength" in payload else 0.5
 
     raw_regions = payload.get("regions", [])
     regions: list[RegionConstraint] = []
@@ -208,11 +218,11 @@ def validate_constraint_spec(
                 errors.append(
                     f"Region {rid!r}: rect h={h} must be > 0."
                 )
-            if x + w > 1.0:
+            if x + w > 1.0 + _RECT_BOUND_EPSILON:
                 errors.append(
                     f"Region {rid!r}: rect x+w={x + w:.4g} exceeds 1.0 (normalised bounds)."
                 )
-            if y + h > 1.0:
+            if y + h > 1.0 + _RECT_BOUND_EPSILON:
                 errors.append(
                     f"Region {rid!r}: rect y+h={y + h:.4g} exceeds 1.0 (normalised bounds)."
                 )
