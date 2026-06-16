@@ -47,4 +47,4 @@ export interface BranchCanvasEdgeData extends Record<string, unknown> {
 export type BranchCanvasNode = Node<BranchCanvasNodeData>;
 export type BranchCanvasEdge = Edge<BranchCanvasEdgeData>;
 
-// buildBranchCanvasModel: added in V2.1-2
+// TODO(V2.1-2): add buildBranchCanvasModel(input) adapter here
