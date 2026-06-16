@@ -1055,6 +1055,90 @@ export function usePngShader() {
     }
   }, []);
 
+  // ─── V4.3 Preference API ─────────────────────────────────────────────────────
+
+  const fetchPreferenceProfile = useCallback(async (): Promise<PreferenceProfile> => {
+    const requestId = makeRequestId("pref-profile");
+    const response = await fetch(`${API_BASE}/png-shader/preferences/profile`, {
+      headers: { "x-request-id": requestId },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_pref_profile_failed", { request_id: requestId, status: response.status }, "warn");
+      throw new Error(`Preference profile failed (${response.status}): ${text}`);
+    }
+    const data: PreferenceProfile = await response.json();
+    return data;
+  }, []);
+
+  const patchPreferenceProfile = useCallback(async (
+    patch: Partial<Pick<PreferenceProfile, "enabled" | "default_locks" | "positive_preferences" | "negative_preferences" | "score_drop_tolerance_hint">>,
+  ): Promise<PreferenceProfile | null> => {
+    const requestId = makeRequestId("pref-patch");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/preferences/profile`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify(patch),
+      });
+      if (!response.ok) {
+        logFrontendEvent("api_pref_patch_failed", { request_id: requestId, status: response.status }, "warn");
+        return null;
+      }
+      const data: PreferenceProfile = await response.json();
+      return data;
+    } catch (err) {
+      logFrontendEvent("api_pref_patch_error", { error: err instanceof Error ? err.message : String(err) }, "warn");
+      return null;
+    }
+  }, []);
+
+  const rebuildPreferences = useCallback(async (): Promise<PreferenceProfile | null> => {
+    const requestId = makeRequestId("pref-rebuild");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/preferences/rebuild`, {
+        method: "POST",
+        headers: { "x-request-id": requestId },
+      });
+      if (!response.ok) {
+        logFrontendEvent("api_pref_rebuild_failed", { request_id: requestId, status: response.status }, "warn");
+        return null;
+      }
+      const data: PreferenceProfile = await response.json();
+      return data;
+    } catch (err) {
+      logFrontendEvent("api_pref_rebuild_error", { error: err instanceof Error ? err.message : String(err) }, "warn");
+      return null;
+    }
+  }, []);
+
+  const clearPreferences = useCallback(async (): Promise<void> => {
+    const requestId = makeRequestId("pref-clear");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/preferences/clear`, {
+        method: "POST",
+        headers: { "x-request-id": requestId },
+      });
+      logFrontendEvent("api_pref_clear", { request_id: requestId, status: response.status }, response.ok ? "info" : "warn");
+    } catch {
+      logFrontendEvent("api_pref_clear_error", {}, "warn");
+    }
+  }, []);
+
+  const postPreferenceEvent = useCallback(async (event: PreferenceEventInput): Promise<void> => {
+    const requestId = makeRequestId("pref-event");
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/preferences/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify(event),
+      });
+      logFrontendEvent("api_pref_event", { request_id: requestId, event_type: event.event_type, status: response.status }, response.ok ? "info" : "warn");
+    } catch {
+      logFrontendEvent("api_pref_event_error", { event_type: event.event_type }, "warn");
+    }
+  }, []);
+
   const clearResult = useCallback(() => {
     stopPolling();
     activeRunRef.current = null;
@@ -1099,7 +1183,38 @@ export function usePngShader() {
     drawMore,
     redrawCard,
     cardEvent,
+    fetchPreferenceProfile,
+    patchPreferenceProfile,
+    rebuildPreferences,
+    clearPreferences,
+    postPreferenceEvent,
   };
 }
 
 export type { StrategyMode, StrategyConfig, RefinementMode } from "../lib/strategy-presets";
+
+// ─── V4.3 Preference types ────────────────────────────────────────────────────
+
+export interface PreferenceProfile {
+  schema_version: number;
+  updated_at: number;
+  enabled: boolean;
+  default_locks: Record<string, boolean>;
+  positive_preferences: string[];
+  negative_preferences: string[];
+  preferred_variant_labels: string[];
+  score_drop_tolerance_hint: number;
+  summary_source_event_count: number;
+}
+
+export interface PreferenceEventInput {
+  event_type?: string;
+  run_id?: string | null;
+  group_id?: string | null;
+  feedback?: string | null;
+  winner_run_id?: string | null;
+  rating?: number | null;
+  reason?: string | null;
+  tags?: string[];
+  context?: Record<string, unknown>;
+}

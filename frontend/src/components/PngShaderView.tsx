@@ -1,6 +1,6 @@
 // PngShaderView.tsx
 import { useRef, useState, useCallback, useEffect } from "react";
-import { Upload, Play, Loader, X, Cpu } from "lucide-react";
+import { Upload, Play, Loader, X, Cpu, SlidersHorizontal } from "lucide-react";
 import type { LlmMode, CandidateEntry } from "../hooks/usePngShader";
 import SceneGraphPanel from "./SceneGraphPanel";
 import CandidateScoreboard from "./CandidateScoreboard";
@@ -12,6 +12,7 @@ import PngShaderParamPanel from "./PngShaderParamPanel";
 import HumanLoopPanel from "./HumanLoopPanel";
 import BranchWorkspacePanel from "./BranchWorkspacePanel";
 import BranchCanvasWorkspace from "./BranchCanvasWorkspace";
+import PreferencePanel from "./PreferencePanel";
 import type {
   PngShaderResult,
   BranchRefineRequest,
@@ -30,6 +31,7 @@ import type {
   DrawMoreResponse,
   RedrawCardResponse,
   DrawCardEventType,
+  PreferenceProfile,
 } from "../hooks/usePngShader";
 import StrategyControlPanel from "./StrategyControlPanel";
 import ModelSelectorPanel from "./ModelSelectorPanel";
@@ -75,6 +77,10 @@ interface Props {
   drawMore: (drawId: string, request: DrawMoreRequest) => Promise<DrawMoreResponse | null>;
   redrawCard: (drawId: string, runId: string, opts?: { reason?: string; diversity?: string }) => Promise<RedrawCardResponse | null>;
   cardEvent: (drawId: string, runId: string, eventType: DrawCardEventType, opts?: { value?: unknown; reason?: string; tags?: string[] }) => Promise<void>;
+  fetchPreferenceProfile: () => Promise<PreferenceProfile>;
+  patchPreferenceProfile: (patch: Partial<Pick<PreferenceProfile, "enabled" | "default_locks" | "positive_preferences" | "negative_preferences" | "score_drop_tolerance_hint">>) => Promise<PreferenceProfile | null>;
+  rebuildPreferences: () => Promise<PreferenceProfile | null>;
+  clearPreferences: () => Promise<void>;
 }
 
 /** Mirror of backend list_checkpoints: candidates with GLSL, iteration
@@ -168,11 +174,16 @@ export default function PngShaderView({
   drawMore,
   redrawCard,
   cardEvent,
+  fetchPreferenceProfile,
+  patchPreferenceProfile,
+  rebuildPreferences,
+  clearPreferences,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
   const [branchCheckpointId, setBranchCheckpointId] = useState<string | null>(null);
   const [workspaceView, setWorkspaceView] = useState<"list" | "canvas">("list");
+  const [showPreferences, setShowPreferences] = useState(false);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [seedEnabled, setSeedEnabled] = useState(false);
@@ -450,6 +461,33 @@ export default function PngShaderView({
             stopPending={stopPending}
             paramMeta={strategyConfig?.params}
           />
+
+          {/* Preferences toggle + panel */}
+          <div>
+            <button
+              onClick={() => setShowPreferences((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
+                showPreferences
+                  ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-400"
+                  : "bg-[var(--bg-secondary)] border-[var(--border-color)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-hover)]"
+              }`}
+              title="偏好配置 / Preferences"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              偏好 Preferences
+            </button>
+            {showPreferences && (
+              <div className="mt-2">
+                <PreferencePanel
+                  fetchPreferenceProfile={fetchPreferenceProfile}
+                  patchPreferenceProfile={patchPreferenceProfile}
+                  rebuildPreferences={rebuildPreferences}
+                  clearPreferences={clearPreferences}
+                  onClose={() => setShowPreferences(false)}
+                />
+              </div>
+            )}
+          </div>
 
           {/* Human-in-loop directed branch refinement */}
           {result && (

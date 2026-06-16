@@ -35,6 +35,10 @@ export default function App() {
     drawMore,
     redrawCard,
     cardEvent,
+    fetchPreferenceProfile,
+    patchPreferenceProfile,
+    rebuildPreferences,
+    clearPreferences,
   } = usePngShader()
 
   const models = useModels()
@@ -195,6 +199,10 @@ export default function App() {
           drawMore={drawMore}
           redrawCard={redrawCard}
           cardEvent={cardEvent}
+          fetchPreferenceProfile={fetchPreferenceProfile}
+          patchPreferenceProfile={patchPreferenceProfile}
+          rebuildPreferences={rebuildPreferences}
+          clearPreferences={clearPreferences}
         />
       </main>
 
