@@ -2,7 +2,7 @@
 // Pure presentational. No data fetching. No app state.
 import { memo } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { ChevronDown, ChevronRight, Dices, GitBranch, Image, Layers, Loader, Sparkles, Star, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Crop, Dices, GitBranch, Image, Layers, Loader, Sparkles, Star, X } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import { fmtScore, truncate } from "../lib/format";
 
@@ -471,6 +471,72 @@ export const DrawCardNode = memo(function DrawCardNode({ data, selected }: NodeP
   );
 });
 
+// ─── 9. RegionConstraintNode ─────────────────────────────────────────────────
+
+export const RegionConstraintNode = memo(function RegionConstraintNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+  const ringClass = selected ? "ring-2 ring-emerald-500" : "";
+  const mode = data.mode as string | undefined;
+  const isProtect = mode === "protect";
+  const modeBgClass = isProtect ? "bg-amber-500/20 text-amber-400" : "bg-emerald-500/20 text-emerald-400";
+  const strength = typeof data.strength === "number" ? data.strength : null;
+  const instruction = typeof data.instruction === "string" ? data.instruction : "";
+
+  return (
+    <div
+      className={`rounded-lg border text-[11px] flex flex-col gap-1 px-2 py-1.5 shadow-sm transition-all ${ringClass}`}
+      style={{
+        width: 160,
+        background: "var(--bg-secondary)",
+        borderColor: selected ? "var(--accent-primary)" : "var(--border-color)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <Handle type="target" position={Position.Top} />
+
+      {/* Header row: icon + label + mode badge */}
+      <div className="flex items-center gap-1.5">
+        <Crop
+          className="w-3 h-3 flex-shrink-0"
+          style={{ color: "var(--accent-primary)" }}
+        />
+        <span
+          className="flex-1 truncate font-medium"
+          style={{ color: "var(--text-primary)" }}
+          title={data.label}
+        >
+          {data.label}
+        </span>
+        {mode && (
+          <span className={`text-[10px] px-1 rounded font-medium flex-shrink-0 ${modeBgClass}`}>
+            {mode}
+          </span>
+        )}
+      </div>
+
+      {/* Strength */}
+      {strength !== null && (
+        <div className="flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
+          <span>strength</span>
+          <span className="font-mono" style={{ color: "var(--text-secondary)" }}>
+            {strength.toFixed(2)}
+          </span>
+        </div>
+      )}
+
+      {/* Instruction (truncated) */}
+      {instruction && (
+        <div
+          className="truncate italic text-[10px]"
+          style={{ color: "var(--text-muted)" }}
+          title={instruction}
+        >
+          {truncate(instruction, 36)}
+        </div>
+      )}
+    </div>
+  );
+});
+
 // ─── Stable nodeTypes export ──────────────────────────────────────────────────
 // Module constant — satisfies React Flow's nodeTypes stability contract.
 
@@ -483,4 +549,5 @@ export const branchCanvasNodeTypes: NodeTypes = {
   variant_run: VariantRunNode,
   draw_session: DrawSessionNode,
   draw_card: DrawCardNode,
+  region_constraint: RegionConstraintNode,
 };

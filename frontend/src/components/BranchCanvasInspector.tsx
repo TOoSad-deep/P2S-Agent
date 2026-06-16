@@ -15,6 +15,7 @@ import type {
   DrawMoreRequest,
   DrawCardEventType,
   HumanConstraintSpec,
+  RegionConstraint,
 } from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
 import DrawSessionInspector from "./DrawSessionInspector";
@@ -70,6 +71,8 @@ interface Props {
   fusionEnabled?: boolean;
   submitError?: string | null;
   disabled?: boolean;
+  // V4.2 region canvas overlay
+  onRegionsChange?: (anchorNodeId: string, regions: RegionConstraint[]) => void;
 }
 
 // ─── Panel wrapper ────────────────────────────────────────────────────────────
@@ -340,6 +343,8 @@ interface BranchActionViewProps {
   disabled?: boolean;
   // V4.2 region editor backdrop
   imageUrl?: string | null;
+  // V4.2 region canvas overlay reporter
+  onRegionsReport?: (regions: RegionConstraint[]) => void;
 }
 
 function BranchActionView({
@@ -357,6 +362,7 @@ function BranchActionView({
   submitError,
   disabled,
   imageUrl,
+  onRegionsReport,
 }: BranchActionViewProps) {
   const data = node.data;
   const runId = data.run_id!;
@@ -583,7 +589,10 @@ function BranchActionView({
           <div className="px-2 pb-2 pt-1 border-t border-[var(--border-color)] bg-[var(--bg-tertiary)]">
             <FineControlPanel
               value={constraintSpec}
-              onChange={setConstraintSpec}
+              onChange={(next) => {
+                setConstraintSpec(next);
+                onRegionsReport?.(next.regions);
+              }}
               disabled={disabled}
               imageUrl={imageUrl}
             />
@@ -1080,6 +1089,7 @@ export default function BranchCanvasInspector({
   fusionEnabled,
   disabled,
   submitError,
+  onRegionsChange,
 }: Props) {
   // Reset run-node title draft when node identity changes (handled inside RunNodeView too,
   // but the key prop on RunNodeView ensures full remount on node switch).
@@ -1121,6 +1131,8 @@ export default function BranchCanvasInspector({
         const branchImageUrl = branchRunId
           ? `/png-shader/runs/${branchRunId}/artifacts/selected_render`
           : null;
+        // Anchor for region overlay: the run the draft branches from
+        const branchAnchorNodeId = branchRunId ? `run:${branchRunId}` : null;
         return (
           <BranchActionView
             key={node.id}
@@ -1138,6 +1150,11 @@ export default function BranchCanvasInspector({
             submitError={submitError}
             disabled={disabled}
             imageUrl={branchImageUrl}
+            onRegionsReport={
+              onRegionsChange && branchAnchorNodeId
+                ? (regions) => onRegionsChange(branchAnchorNodeId, regions)
+                : undefined
+            }
           />
         );
       }

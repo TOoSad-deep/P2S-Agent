@@ -2,11 +2,12 @@ import { describe, it, expect } from "vitest";
 import {
   buildBranchCanvasModel,
   buildDrawSessionModel,
+  buildRegionConstraintModel,
   MAX_EXPANDED_RUNS,
   MAX_VISIBLE_CHECKPOINTS_PER_RUN,
   type BuildBranchCanvasInput,
 } from "./branchCanvasModel";
-import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, DrawCardStatus } from "../hooks/usePngShader";
+import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, DrawCardStatus, RegionConstraint } from "../hooks/usePngShader";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -1209,5 +1210,137 @@ describe("buildDrawSessionModel", () => {
     expect(dcNode.data.final_score).toBe(0.85);
     expect(dcNode.data.can_use_for_fusion).toBe(true);
     expect(dcNode.position).toEqual({ x: 0, y: 0 });
+  });
+});
+
+// ─── buildRegionConstraintModel tests ────────────────────────────────────────
+
+function makeRegion(overrides: Partial<RegionConstraint> & { id: string }): RegionConstraint {
+  return {
+    label: `Region ${overrides.id}`,
+    mode: "modify",
+    instruction: `Instruction for ${overrides.id}`,
+    geometry_type: "rect",
+    geometry: { x: 0.1, y: 0.1, w: 0.3, h: 0.3 },
+    strength: 0.7,
+    ...overrides,
+  };
+}
+
+describe("buildRegionConstraintModel", () => {
+  const ANCHOR = "run:run-root-0001";
+
+  // ── RC-1. empty regions → empty output ──────────────────────────────────────
+  it("empty regions array → empty nodes and edges", () => {
+    const { nodes, edges } = buildRegionConstraintModel([], { anchorNodeId: ANCHOR });
+    expect(nodes).toEqual([]);
+    expect(edges).toEqual([]);
+  });
+
+  // ── RC-2. N regions → N nodes + N constraint_applies edges ─────────────────
+  it("3 regions → 3 region_constraint nodes + 3 constraint_applies edges", () => {
+    const regions = [
+      makeRegion({ id: "r1", label: "Sky", mode: "protect" }),
+      makeRegion({ id: "r2", label: "Water", mode: "modify" }),
+      makeRegion({ id: "r3", label: "Ground", mode: "protect" }),
+    ];
+
+    const { nodes, edges } = buildRegionConstraintModel(regions, { anchorNodeId: ANCHOR });
+
+    expect(nodes).toHaveLength(3);
+    expect(edges).toHaveLength(3);
+
+    // Correct node ids
+    expect(nodes.map((n) => n.id)).toEqual(["region:r1", "region:r2", "region:r3"]);
+    // Correct edge ids
+    expect(edges.map((e) => e.id)).toEqual(["applies:r1", "applies:r2", "applies:r3"]);
+  });
+
+  // ── RC-3. edges have correct source/target ───────────────────────────────────
+  it("each constraint_applies edge has source=anchorNodeId and target=region:{id}", () => {
+    const CUSTOM_ANCHOR = "cp:run-abc:candidate:selected";
+    const regions = [
+      makeRegion({ id: "rx" }),
+      makeRegion({ id: "ry" }),
+    ];
+
+    const { edges } = buildRegionConstraintModel(regions, { anchorNodeId: CUSTOM_ANCHOR });
+
+    for (const edge of edges) {
+      expect(edge.source).toBe(CUSTOM_ANCHOR);
+      expect(edge.data?.relation).toBe("constraint_applies");
+    }
+    expect(edges[0].target).toBe("region:rx");
+    expect(edges[1].target).toBe("region:ry");
+  });
+
+  // ── RC-4. node data carries all region fields ────────────────────────────────
+  it("node data carries region_id, label, mode, instruction, strength, geometry", () => {
+    const region = makeRegion({
+      id: "detail-r",
+      label: "Detailed Region",
+      mode: "protect",
+      instruction: "Keep this area unchanged",
+      strength: 0.9,
+      geometry: { x: 0.2, y: 0.3, w: 0.4, h: 0.5 },
+    });
+
+    const { nodes } = buildRegionConstraintModel([region], { anchorNodeId: ANCHOR });
+    const node = nodes[0];
+
+    expect(node.id).toBe("region:detail-r");
+    expect(node.type).toBe("region_constraint");
+    expect(node.data.type).toBe("region_constraint");
+    expect(node.data.region_id).toBe("detail-r");
+    expect(node.data.label).toBe("Detailed Region");
+    expect(node.data.mode).toBe("protect");
+    expect(node.data.instruction).toBe("Keep this area unchanged");
+    expect(node.data.strength).toBe(0.9);
+    expect(node.data.geometry).toEqual({ x: 0.2, y: 0.3, w: 0.4, h: 0.5 });
+    expect(node.position).toEqual({ x: 0, y: 0 });
+  });
+
+  // ── RC-5. mode badge distinction (modify vs protect) ─────────────────────────
+  it("correctly carries mode=modify and mode=protect on separate nodes", () => {
+    const regions = [
+      makeRegion({ id: "mod-1", mode: "modify", label: "Modify zone", strength: 0.5 }),
+      makeRegion({ id: "prot-1", mode: "protect", label: "Protect zone", strength: 1.0 }),
+    ];
+
+    const { nodes } = buildRegionConstraintModel(regions, { anchorNodeId: ANCHOR });
+
+    const modNode = nodes.find((n) => n.id === "region:mod-1");
+    const protNode = nodes.find((n) => n.id === "region:prot-1");
+
+    expect(modNode).toBeDefined();
+    expect(modNode!.data.mode).toBe("modify");
+    expect(modNode!.data.strength).toBe(0.5);
+
+    expect(protNode).toBeDefined();
+    expect(protNode!.data.mode).toBe("protect");
+    expect(protNode!.data.strength).toBe(1.0);
+  });
+
+  // ── RC-6. deterministic: same input → same output ───────────────────────────
+  it("is deterministic: two calls with identical input produce deeply-equal output", () => {
+    const regions = [
+      makeRegion({ id: "det-1" }),
+      makeRegion({ id: "det-2" }),
+    ];
+
+    const a = buildRegionConstraintModel(regions, { anchorNodeId: ANCHOR });
+    const b = buildRegionConstraintModel(regions, { anchorNodeId: ANCHOR });
+    expect(a).toEqual(b);
+  });
+
+  // ── RC-7. ordering is preserved (array order) ────────────────────────────────
+  it("preserves array order in emitted nodes/edges", () => {
+    const ids = ["z-last", "a-first", "m-mid"];
+    const regions = ids.map((id) => makeRegion({ id }));
+
+    const { nodes, edges } = buildRegionConstraintModel(regions, { anchorNodeId: ANCHOR });
+
+    expect(nodes.map((n) => n.id)).toEqual(ids.map((id) => `region:${id}`));
+    expect(edges.map((e) => e.id)).toEqual(ids.map((id) => `applies:${id}`));
   });
 });

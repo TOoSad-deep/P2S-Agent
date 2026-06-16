@@ -159,6 +159,15 @@ export function layoutBranchCanvas(
     });
   }
 
+  // ── 4a. Collect region_constraint nodes for region post-pass ────────────────
+  const regionConstraintNodes: BranchCanvasNode[] = [];
+  for (const node of nodes) {
+    const nodeType = (node.data as { type?: string }).type;
+    if (nodeType === "region_constraint") {
+      regionConstraintNodes.push(node);
+    }
+  }
+
   // ── 4b. Variant post-pass: place variant_group and variant_run nodes ───────
   // Group nodes: one COLUMN_WIDTH right of their parent run.
   for (const vgNode of variantGroupNodes) {
@@ -295,6 +304,49 @@ export function layoutBranchCanvas(
       const existing = resultMap.get(dcNode.id);
       if (existing !== undefined) {
         resultMap.set(dcNode.id, { ...existing, position: { x: cx, y: cy } });
+      }
+    }
+  }
+
+  // ── 4d. Region constraint post-pass: place region_constraint nodes ──────────
+  // Step 1: Build anchorOf map from constraint_applies edges.
+  // Edge: source = anchor node id, target = region node id ("region:{region_id}").
+  const regionAnchorOf = new Map<string, string>(); // regionNodeId → anchorNodeId
+  for (const edge of edges) {
+    const rel = (edge.data as { relation?: string } | undefined)?.relation;
+    if (rel === "constraint_applies") {
+      regionAnchorOf.set(edge.target, edge.source);
+    }
+  }
+
+  // Step 2: Group region nodes by their anchor node id, preserving input order.
+  const regionsByAnchor = new Map<string, BranchCanvasNode[]>();
+  for (const rcNode of regionConstraintNodes) {
+    const anchorId = regionAnchorOf.get(rcNode.id);
+    if (anchorId !== undefined) {
+      let list = regionsByAnchor.get(anchorId);
+      if (!list) {
+        list = [];
+        regionsByAnchor.set(anchorId, list);
+      }
+      list.push(rcNode);
+    }
+  }
+
+  // Step 3: Place region nodes one COLUMN_WIDTH right and stacked ROW_HEIGHT down.
+  for (const [anchorId, regionNodes] of regionsByAnchor) {
+    const anchorPos = computedPositions.get(anchorId);
+    if (anchorPos === undefined) continue; // anchor not found — keep incoming positions
+
+    // Preserve input array order (deterministic: order mirrors regions array).
+    for (let i = 0; i < regionNodes.length; i++) {
+      const rcNode = regionNodes[i];
+      const rx = anchorPos.x + COLUMN_WIDTH;
+      const ry = anchorPos.y + i * ROW_HEIGHT;
+      computedPositions.set(rcNode.id, { x: rx, y: ry });
+      const existing = resultMap.get(rcNode.id);
+      if (existing !== undefined) {
+        resultMap.set(rcNode.id, { ...existing, position: { x: rx, y: ry } });
       }
     }
   }

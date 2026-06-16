@@ -19,10 +19,12 @@ import type {
   DrawMoreResponse,
   RedrawCardResponse,
   DrawCardEventType,
+  RegionConstraint,
 } from "../hooks/usePngShader";
 import {
   buildBranchCanvasModel,
   buildDrawSessionModel,
+  buildRegionConstraintModel,
   type BranchCanvasNode,
   type BranchCanvasEdge,
 } from "../lib/branchCanvasModel";
@@ -130,6 +132,7 @@ export default function BranchCanvasWorkspace({
   const [collapsedDrawIds, setCollapsedDrawIds] = useState<Set<string>>(new Set());
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [regionDraft, setRegionDraft] = useState<{ anchorNodeId: string; regions: RegionConstraint[] } | null>(null);
 
   // ── runId ref: kept in sync so async callbacks read the latest value ──────
   const runIdRef = useRef(runId);
@@ -230,7 +233,7 @@ export default function BranchCanvasWorkspace({
     [activeRunId, result?.status, result?.quality_router?.final_score],
   );
 
-  // ── Derived: canvas model (base branch model + optional draw-session merge) ─
+  // ── Derived: canvas model (base branch model + optional draw-session + region merge) ─
   const model = useMemo(() => {
     const base = buildBranchCanvasModel({
       activeRunId,
@@ -241,16 +244,28 @@ export default function BranchCanvasWorkspace({
       favoriteRunIds,
       collapsedGroupIds,
     });
-    if (!drawSession) return base;
-    const drawModel = buildDrawSessionModel(drawSession, {
-      anchorNodeId: `run:${drawSession.parent_run_id}`,
-      collapsed: collapsedDrawIds.has(drawSession.draw_id),
-    });
-    return {
-      nodes: [...base.nodes, ...drawModel.nodes],
-      edges: [...base.edges, ...drawModel.edges],
-    };
-  }, [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds, drawSession, collapsedDrawIds]);
+    let merged = base;
+    if (drawSession) {
+      const drawModel = buildDrawSessionModel(drawSession, {
+        anchorNodeId: `run:${drawSession.parent_run_id}`,
+        collapsed: collapsedDrawIds.has(drawSession.draw_id),
+      });
+      merged = {
+        nodes: [...merged.nodes, ...drawModel.nodes],
+        edges: [...merged.edges, ...drawModel.edges],
+      };
+    }
+    if (regionDraft) {
+      const regionModel = buildRegionConstraintModel(regionDraft.regions, {
+        anchorNodeId: regionDraft.anchorNodeId,
+      });
+      merged = {
+        nodes: [...merged.nodes, ...regionModel.nodes],
+        edges: [...merged.edges, ...regionModel.edges],
+      };
+    }
+    return merged;
+  }, [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds, drawSession, collapsedDrawIds, regionDraft]);
 
   // ── Derived: positioned nodes (layout only; no selection) ─────────────────
   const positionedNodes = useMemo(
@@ -435,6 +450,14 @@ export default function BranchCanvasWorkspace({
     setBranchDraft(null);
     setSelectedNodeId(null);
   }, []);
+
+  // ── Region draft callback (V4.2) ───────────────────────────────────────────
+  const handleRegionsChange = useCallback(
+    (anchorNodeId: string, regions: RegionConstraint[]) => {
+      setRegionDraft(regions.length > 0 ? { anchorNodeId, regions } : null);
+    },
+    [],
+  );
 
   // ── Variant exploration handlers ───────────────────────────────────────────
 
@@ -725,6 +748,7 @@ export default function BranchCanvasWorkspace({
             fusionEnabled={false}
             submitError={submitError}
             disabled={disabled}
+            onRegionsChange={handleRegionsChange}
           />
         </div>
       </div>

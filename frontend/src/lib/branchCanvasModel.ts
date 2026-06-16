@@ -1,5 +1,5 @@
 import type { Node, Edge } from "@xyflow/react";
-import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus } from "../hooks/usePngShader";
+import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, RegionConstraint } from "../hooks/usePngShader";
 import { truncate } from "./format";
 
 export type BranchCanvasNodeType =
@@ -585,6 +585,55 @@ export function buildDrawSessionModel(
         data: { relation: "replacement_of" },
       });
     }
+  }
+
+  return { nodes, edges };
+}
+
+// ─── Region Constraint Model ──────────────────────────────────────────────────
+
+export interface BuildRegionConstraintOptions {
+  anchorNodeId: string;  // canvas node id the "constraint_applies" edge originates from
+}
+
+/**
+ * Pure function: converts an array of RegionConstraints into React-Flow canvas
+ * nodes/edges. Each region emits one region_constraint node + one constraint_applies
+ * edge from anchorNodeId → region node. Deterministic (array order). No Date/random.
+ */
+export function buildRegionConstraintModel(
+  regions: RegionConstraint[],
+  opts: BuildRegionConstraintOptions,
+): { nodes: BranchCanvasNode[]; edges: BranchCanvasEdge[] } {
+  if (regions.length === 0) return { nodes: [], edges: [] };
+
+  const nodes: BranchCanvasNode[] = [];
+  const edges: BranchCanvasEdge[] = [];
+
+  for (const region of regions) {
+    const nodeId = `region:${region.id}`;
+
+    nodes.push({
+      id: nodeId,
+      type: "region_constraint",
+      position: { x: 0, y: 0 },
+      data: {
+        type: "region_constraint",
+        region_id: region.id,
+        label: region.label,
+        mode: region.mode,
+        instruction: region.instruction,
+        strength: region.strength,
+        geometry: region.geometry,
+      },
+    });
+
+    edges.push({
+      id: `applies:${region.id}`,
+      source: opts.anchorNodeId,
+      target: nodeId,
+      data: { relation: "constraint_applies" },
+    });
   }
 
   return { nodes, edges };
