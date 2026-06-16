@@ -2,7 +2,7 @@
 // Switches content by selected node type: null / input / run / checkpoint / branch_action / variant_group / variant_run / reserved.
 // Presentational + callbacks only; branch-draft form owns local state. No data fetching.
 import { useState, useEffect } from "react";
-import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle, Layers2 } from "lucide-react";
+import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle, Layers2, ChevronDown, ChevronRight } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import type {
   BranchMode,
@@ -14,9 +14,11 @@ import type {
   CreateDrawSessionRequest,
   DrawMoreRequest,
   DrawCardEventType,
+  HumanConstraintSpec,
 } from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
 import DrawSessionInspector from "./DrawSessionInspector";
+import FineControlPanel, { DEFAULT_CONSTRAINT_SPEC, isMeaningfulConstraint } from "./FineControlPanel";
 
 // ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
 
@@ -363,6 +365,8 @@ function BranchActionView({
   const [drawMode, setDrawMode] = useState(false);
   const [variantCount, setVariantCount] = useState<VariantCount>(4);
   const [diversity, setDiversity] = useState<Diversity>("medium");
+  const [constraintSpec, setConstraintSpec] = useState<HumanConstraintSpec>(DEFAULT_CONSTRAINT_SPEC);
+  const [fineControlOpen, setFineControlOpen] = useState(false);
 
   const sourceCheckpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
 
@@ -404,6 +408,7 @@ function BranchActionView({
   const handleSubmit = () => {
     if (!canSubmit) return;
     const checkpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
+    const constraintsPayload = isMeaningfulConstraint(constraintSpec) ? constraintSpec : undefined;
     if (exploreMode && onExploreVariants) {
       onExploreVariants(runId, {
         checkpoint_id: checkpointId,
@@ -411,6 +416,7 @@ function BranchActionView({
         variant_count: variantCount,
         diversity,
         mode: "explore",
+        ...(constraintsPayload !== undefined ? { constraints: constraintsPayload } : {}),
       });
     } else {
       onSubmitBranch(runId, {
@@ -418,6 +424,7 @@ function BranchActionView({
         feedback: feedback.trim(),
         mode,
         locks,
+        ...(constraintsPayload !== undefined ? { constraints: constraintsPayload } : {}),
       });
     }
   };
@@ -553,6 +560,31 @@ function BranchActionView({
           </div>
         </>
       )}
+
+      {/* Fine controls (collapsible) */}
+      <div className="border border-[var(--border-color)] rounded-md overflow-hidden">
+        <button
+          onClick={() => setFineControlOpen((prev) => !prev)}
+          disabled={disabled}
+          className="flex items-center gap-1.5 w-full px-2 py-1.5 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {fineControlOpen ? (
+            <ChevronDown className="w-3 h-3 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" />
+          )}
+          精细控制 / Fine controls
+        </button>
+        {fineControlOpen && (
+          <div className="px-2 pb-2 pt-1 border-t border-[var(--border-color)] bg-[var(--bg-tertiary)]">
+            <FineControlPanel
+              value={constraintSpec}
+              onChange={setConstraintSpec}
+              disabled={disabled}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Submit error */}
       {submitError && (

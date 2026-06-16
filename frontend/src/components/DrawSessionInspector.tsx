@@ -1,16 +1,18 @@
 // DrawSessionInspector.tsx — draw-session panel (V3.5 Batch Draw).
 // Pure presentational; no data fetching. Shows start form or active session card grid.
 import { useState } from "react";
-import { Layers2, StopCircle, RotateCcw, Star } from "lucide-react";
+import { Layers2, StopCircle, RotateCcw, Star, ChevronDown, ChevronRight } from "lucide-react";
 import type {
   DrawSessionStatus,
   DrawCardStatus,
   DrawCardEventType,
   CreateDrawSessionRequest,
   DrawMoreRequest,
+  HumanConstraintSpec,
 } from "../hooks/usePngShader";
 import { fmtScore, truncate } from "../lib/format";
 import DrawCard from "./DrawCard";
+import FineControlPanel, { DEFAULT_CONSTRAINT_SPEC, isMeaningfulConstraint } from "./FineControlPanel";
 
 // ─── statusDot (local copy) ────────────────────────────────────────────────────
 
@@ -121,16 +123,20 @@ function StartForm({ parentRunId, checkpointId, onStartDraw, disabled }: StartFo
   const [feedback, setFeedback] = useState("");
   const [cardCount, setCardCount] = useState<number>(8);
   const [diversity, setDiversity] = useState<Diversity>("medium");
+  const [constraintSpec, setConstraintSpec] = useState<HumanConstraintSpec>(DEFAULT_CONSTRAINT_SPEC);
+  const [fineControlOpen, setFineControlOpen] = useState(false);
 
   const canSubmit = !disabled && feedback.trim().length > 0;
 
   const handleStart = () => {
     if (!canSubmit) return;
+    const constraintsPayload = isMeaningfulConstraint(constraintSpec) ? constraintSpec : undefined;
     onStartDraw(parentRunId, {
       checkpoint_id: checkpointId ?? "final:selected",
       feedback: feedback.trim(),
       card_count: cardCount,
       diversity,
+      ...(constraintsPayload !== undefined ? { constraints: constraintsPayload } : {}),
     });
   };
 
@@ -186,6 +192,31 @@ function StartForm({ parentRunId, checkpointId, onStartDraw, disabled }: StartFo
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Fine controls (collapsible) */}
+      <div className="border border-[var(--border-color)] rounded-md overflow-hidden">
+        <button
+          onClick={() => setFineControlOpen((prev) => !prev)}
+          disabled={disabled}
+          className="flex items-center gap-1.5 w-full px-2 py-1.5 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {fineControlOpen ? (
+            <ChevronDown className="w-3 h-3 shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 shrink-0" />
+          )}
+          精细控制 / Fine controls
+        </button>
+        {fineControlOpen && (
+          <div className="px-2 pb-2 pt-1 border-t border-[var(--border-color)] bg-[var(--bg-tertiary)]">
+            <FineControlPanel
+              value={constraintSpec}
+              onChange={setConstraintSpec}
+              disabled={disabled}
+            />
+          </div>
+        )}
       </div>
 
       {/* Submit */}

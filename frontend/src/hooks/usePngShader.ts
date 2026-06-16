@@ -238,6 +238,14 @@ export interface RunMetadataRecord {
   [key: string]: unknown;
 }
 
+export interface HumanConstraintSpec {
+  locks: Record<string, boolean>;
+  targets: Record<string, "keep" | "increase" | "decrease">;
+  edit_strength: number;           // 0..1
+  regions: unknown[];              // V4.2 fills this; keep [] for V4.1
+  use_preferences: boolean;
+}
+
 export interface BranchRefineRequest {
   checkpoint_id: string;
   feedback: string;
@@ -245,6 +253,7 @@ export interface BranchRefineRequest {
   locks?: Record<string, boolean>;
   stop_parent?: boolean;
   quality?: Partial<StrategyConfig>;
+  constraints?: HumanConstraintSpec;
 }
 
 export interface ExploreVariantsRequest {
@@ -255,6 +264,7 @@ export interface ExploreVariantsRequest {
   mode?: string;                // "explore"
   quality?: Partial<StrategyConfig>;
   stop_parent?: boolean;
+  constraints?: HumanConstraintSpec;
 }
 
 export interface ExploreVariantsResponse {
@@ -330,7 +340,7 @@ export interface CreateDrawSessionRequest {
   card_count?: number;       // 2..12, default 8
   diversity?: string;        // "low" | "medium" | "high"
   quality?: Record<string, unknown>;
-  constraints?: { locks?: Record<string, boolean> };
+  constraints?: HumanConstraintSpec;
   mode?: string;
   stop_parent?: boolean;
 }
@@ -346,6 +356,7 @@ export interface DrawMoreRequest {
   card_count?: number;       // default 4
   diversity?: string;
   quality?: Record<string, unknown>;
+  constraints?: HumanConstraintSpec;
 }
 export interface DrawMoreResponse {
   draw_id: string;
