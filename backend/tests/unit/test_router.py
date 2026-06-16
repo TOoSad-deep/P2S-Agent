@@ -1540,3 +1540,344 @@ def test_variant_concurrency_peak_le_2(tmp_path, monkeypatch):
         _wait_for_variant_completion(client, cid, timeout_seconds=15.0)
 
     assert peak[0] <= 2, f"Peak concurrency {peak[0]} exceeded _MAX_VARIANT_CONCURRENCY=2"
+
+
+# ---------------------------------------------------------------------------
+# V3-4: variant-group status / stop / winner / ratings endpoints
+# ---------------------------------------------------------------------------
+
+def _seed_group(vg_root, group_id="group_x", children=None):
+    """Seed a VariantGroupRecord + child entries in _run_store directly."""
+    from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
+    children = children or []
+    rec = VariantGroupRecord(
+        group_id=group_id,
+        root_run_id="run_parent",
+        parent_run_id="run_parent",
+        source_checkpoint_id="final:selected",
+        feedback="make it brighter",
+        mode="explore",
+        variant_count=len(children),
+        diversity="medium",
+        status="running",
+        child_run_ids=[c["run_id"] for c in children],
+        created_at=1.0,
+    )
+    _save_group(rec, root=vg_root)
+    for c in children:
+        _run_store[c["run_id"]] = {"run_id": c["run_id"], **c}
+    return rec
+
+
+def test_get_variant_group_aggregates_and_sorts(tmp_path, monkeypatch):
+    """GET /variant-groups/{id} returns correct aggregate status and sorted variants."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    children = [
+        {
+            "run_id": "v_comp",
+            "status": "completed",
+            "variant_index": 0,
+            "variant_label": "conservative",
+            "quality_router": {"final_score": 0.7},
+            "selected_glsl": "void main(){}",
+            "refinement_history": [{"changes_summary": "improved brightness"}],
+        },
+        {
+            "run_id": "v_run",
+            "status": "running",
+            "variant_index": 1,
+            "variant_label": "semantic",
+            "quality_router": {"final_score": 0.5},
+            "selected_glsl": None,
+            "refinement_history": [],
+        },
+        {
+            "run_id": "v_fail",
+            "status": "failed",
+            "variant_index": 2,
+            "variant_label": "alt_technique",
+            "quality_router": {},
+            "selected_glsl": None,
+            "refinement_history": [],
+            "error": "pipeline crashed",
+        },
+    ]
+    _seed_group(vg_root, group_id="group_sort", children=children)
+    client = _client()
+    resp = client.get("/png-shader/variant-groups/group_sort")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # Aggregate status: one running → "running"
+    assert body["status"] == "running"
+    assert body["group_id"] == "group_sort"
+    assert body["parent_run_id"] == "run_parent"
+
+    variants = body["variants"]
+    assert len(variants) == 3
+
+    # Ordering: completed(0) < running(1) < failed(4)
+    assert variants[0]["run_id"] == "v_comp"
+    assert variants[1]["run_id"] == "v_run"
+    assert variants[2]["run_id"] == "v_fail"
+
+    # Check required fields present on each variant.
+    for v in variants:
+        assert "run_id" in v
+        assert "label" in v
+        assert "status" in v
+        assert "thumbnail_url" in v
+        assert v["thumbnail_url"] == f"/png-shader/runs/{v['run_id']}/artifacts/selected_render"
+
+    # completed variant details
+    comp = variants[0]
+    assert comp["final_score"] == 0.7
+    assert comp["selected_glsl"] == "void main(){}"
+    assert comp["changes_summary"] == "improved brightness"
+
+    # running variant: current_score set, final_score None
+    run_v = variants[1]
+    assert run_v["final_score"] is None
+    assert run_v["current_score"] == 0.5
+
+    # failed variant: error exposed
+    fail_v = variants[2]
+    assert fail_v["error"] == "pipeline crashed"
+
+
+def test_get_variant_group_404_unknown(tmp_path, monkeypatch):
+    """GET /variant-groups/{id} returns 404 for unknown group_id."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    client = _client()
+    resp = client.get("/png-shader/variant-groups/ghost_group")
+    assert resp.status_code == 404
+
+
+def test_stop_variant_group_sets_stop_requested(tmp_path, monkeypatch):
+    """POST /variant-groups/{id}/stop sets stop_requested on queued/running children
+    but not on completed ones."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    children = [
+        {"run_id": "s_queued", "status": "queued", "stop_requested": False,
+         "variant_index": 0, "variant_label": "A"},
+        {"run_id": "s_running", "status": "running", "stop_requested": False,
+         "variant_index": 1, "variant_label": "B"},
+        {"run_id": "s_done", "status": "completed", "stop_requested": False,
+         "variant_index": 2, "variant_label": "C"},
+    ]
+    _seed_group(vg_root, group_id="group_stop", children=children)
+    client = _client()
+
+    resp = client.post("/png-shader/variant-groups/group_stop/stop")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["stopping"] is True
+    assert body["group_id"] == "group_stop"
+
+    # Queued and running must have stop_requested set.
+    assert _run_store["s_queued"]["stop_requested"] is True
+    assert _run_store["s_running"]["stop_requested"] is True
+    # Completed must remain untouched.
+    assert _run_store["s_done"]["stop_requested"] is False
+
+
+def test_stop_variant_group_404_unknown(tmp_path, monkeypatch):
+    """POST /variant-groups/{id}/stop returns 404 for unknown group."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    client = _client()
+    resp = client.post("/png-shader/variant-groups/ghost_grp/stop")
+    assert resp.status_code == 404
+
+
+def test_winner_marks_group_and_favorite(tmp_path, monkeypatch):
+    """POST /variant-groups/{id}/winner updates winner_run_id in the group record
+    and sets favorite=True in the store entry."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    children = [
+        {"run_id": "w_a", "status": "completed", "variant_index": 0, "variant_label": "A",
+         "quality_router": {"final_score": 0.8}},
+        {"run_id": "w_b", "status": "completed", "variant_index": 1, "variant_label": "B",
+         "quality_router": {"final_score": 0.6}},
+    ]
+    _seed_group(vg_root, group_id="group_win", children=children)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/variant-groups/group_win/winner",
+        json={"winner_run_id": "w_a", "reason": "best score"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["group_id"] == "group_win"
+    assert body["winner_run_id"] == "w_a"
+
+    # Group record must be updated on disk.
+    from app.pipeline.variant_groups import load_group as _load_group
+    rec = _load_group("group_win", root=vg_root)
+    assert rec is not None
+    assert rec.winner_run_id == "w_a"
+
+    # Store entry must have favorite=True.
+    assert _run_store["w_a"]["favorite"] is True
+
+    # Other child must not be marked favorite.
+    assert _run_store["w_b"].get("favorite", False) is False
+
+
+def test_winner_422_non_member_run_id(tmp_path, monkeypatch):
+    """POST /winner with a run_id not in child_run_ids returns 422."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    children = [{"run_id": "w_only", "status": "completed", "variant_index": 0, "variant_label": "A"}]
+    _seed_group(vg_root, group_id="group_422w", children=children)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/variant-groups/group_422w/winner",
+        json={"winner_run_id": "foreign_run"},
+    )
+    assert resp.status_code == 422
+
+
+def test_winner_404_unknown_group(tmp_path, monkeypatch):
+    """POST /winner for unknown group returns 404."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    client = _client()
+    resp = client.post("/png-shader/variant-groups/ghost/winner", json={"winner_run_id": "x"})
+    assert resp.status_code == 404
+
+
+def test_ratings_appends_event(tmp_path, monkeypatch):
+    """POST /ratings appends a rating event that is readable via load_group_events."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    children = [
+        {"run_id": "r_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
+    ]
+    _seed_group(vg_root, group_id="group_rate", children=children)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/variant-groups/group_rate/ratings",
+        json={"run_id": "r_a", "rating": 1, "reason": "looks great", "tags": ["color"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["group_id"] == "group_rate"
+    assert body["run_id"] == "r_a"
+    assert body["rating"] == 1
+
+    # Verify event was appended.
+    from app.pipeline.variant_groups import load_group_events
+    events = load_group_events("group_rate", root=vg_root)
+    rating_events = [e for e in events if e.get("event") == "rating"]
+    assert len(rating_events) == 1
+    ev = rating_events[0]
+    assert ev["run_id"] == "r_a"
+    assert ev["rating"] == 1
+    assert ev["reason"] == "looks great"
+    assert "color" in ev["tags"]
+
+
+def test_ratings_422_non_member_run_id(tmp_path, monkeypatch):
+    """POST /ratings with a run_id not in child_run_ids returns 422."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    children = [{"run_id": "r_only", "status": "completed", "variant_index": 0, "variant_label": "A"}]
+    _seed_group(vg_root, group_id="group_422r", children=children)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/variant-groups/group_422r/ratings",
+        json={"run_id": "foreign_run", "rating": 1},
+    )
+    assert resp.status_code == 422
+
+
+def test_ratings_422_invalid_rating(tmp_path, monkeypatch):
+    """POST /ratings with rating outside {-1, 0, 1} returns 422."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    children = [{"run_id": "r_val", "status": "completed", "variant_index": 0, "variant_label": "A"}]
+    _seed_group(vg_root, group_id="group_422rv", children=children)
+    client = _client()
+
+    # rating=5 is invalid
+    resp = client.post(
+        "/png-shader/variant-groups/group_422rv/ratings",
+        json={"run_id": "r_val", "rating": 5},
+    )
+    assert resp.status_code == 422
+
+    # rating=2 is also invalid
+    resp2 = client.post(
+        "/png-shader/variant-groups/group_422rv/ratings",
+        json={"run_id": "r_val", "rating": 2},
+    )
+    assert resp2.status_code == 422
+
+
+def test_get_variant_group_winner_sorted_first(tmp_path, monkeypatch):
+    """When winner_run_id is set, that variant appears first in sorted output."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+
+    # Build group with 3 completed children; set winner to the one with lowest score.
+    from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
+    children = [
+        {"run_id": "ws_a", "status": "completed", "variant_index": 0, "variant_label": "A",
+         "quality_router": {"final_score": 0.9}},
+        {"run_id": "ws_b", "status": "completed", "variant_index": 1, "variant_label": "B",
+         "quality_router": {"final_score": 0.5}},
+        {"run_id": "ws_c", "status": "completed", "variant_index": 2, "variant_label": "C",
+         "quality_router": {"final_score": 0.7}},
+    ]
+    rec = VariantGroupRecord(
+        group_id="group_ws",
+        root_run_id="run_parent",
+        parent_run_id="run_parent",
+        source_checkpoint_id="final:selected",
+        feedback="test",
+        mode="explore",
+        variant_count=3,
+        diversity="medium",
+        status="completed",
+        child_run_ids=["ws_a", "ws_b", "ws_c"],
+        winner_run_id="ws_b",  # winner has lowest score but must sort first
+        created_at=1.0,
+    )
+    _save_group(rec, root=vg_root)
+    for c in children:
+        _run_store[c["run_id"]] = {"run_id": c["run_id"], **c}
+
+    client = _client()
+    resp = client.get("/png-shader/variant-groups/group_ws")
+    assert resp.status_code == 200
+    variants = resp.json()["variants"]
+    assert variants[0]["run_id"] == "ws_b", "Winner must appear first regardless of score"

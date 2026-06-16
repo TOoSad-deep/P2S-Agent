@@ -36,8 +36,10 @@ from app.pipeline.checkpoints import (
 )
 from app.pipeline.variant_groups import (
     VariantGroupRecord,
+    aggregate_group_status,
     append_group_event,
     build_variant_strategies,
+    load_group,
     save_group,
 )
 from app.pipeline.graph import run_png_shader_pipeline
@@ -1446,3 +1448,242 @@ async def stop_run(run_id: str) -> dict:
         stored["stop_requested"] = True
         _run_store[run_id] = stored
         return {"stopping": True}
+
+
+# ---------------------------------------------------------------------------
+# V3.1: Variant-group read/aggregate + action endpoints
+# ---------------------------------------------------------------------------
+
+_STATUS_RANK = {"completed": 0, "running": 1, "queued": 2, "cancelled": 3, "failed": 4}
+
+
+@router.get("/variant-groups/{group_id}")
+async def get_variant_group(group_id: str) -> dict:
+    """Return aggregated status + sorted variants for a variant group."""
+    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+
+    # Build per-child variant dicts.
+    index_records = load_run_index(path=_RUN_INDEX_PATH)
+    variants = []
+    with _run_store_lock:
+        for position, run_id in enumerate(record.child_run_ids):
+            stored = _run_store.get(run_id)
+            if stored is not None:
+                # Prefer store entry.
+                vi = stored.get("variant_index")
+                if vi is None:
+                    lineage = stored.get("lineage") or {}
+                    vi = lineage.get("variant_index", position)
+                status = stored.get("status") or "queued"
+                qr = stored.get("quality_router") or {}
+                final_score = qr.get("final_score") if status == "completed" else None
+                current_score = qr.get("final_score") if status == "running" else None
+                rh = stored.get("refinement_history") or []
+                changes_summary = rh[-1].get("changes_summary") if rh else None
+                # Favorite: run index has priority, then store, then default False.
+                idx_rec = index_records.get(run_id)
+                if idx_rec is not None:
+                    favorite = bool(idx_rec.favorite)
+                else:
+                    favorite = bool(stored.get("favorite", False))
+                variant = {
+                    "run_id": run_id,
+                    "variant_index": vi,
+                    "label": stored.get("variant_label") or "variant",
+                    "status": status,
+                    "final_score": final_score,
+                    "current_score": current_score,
+                    "selected_glsl": stored.get("selected_glsl") or None,
+                    "thumbnail_url": f"/png-shader/runs/{run_id}/artifacts/selected_render",
+                    "changes_summary": changes_summary,
+                    "error": stored.get("error") or None,
+                    "favorite": favorite,
+                }
+            else:
+                # Evicted — best-effort from run index.
+                idx_rec = index_records.get(run_id)
+                if idx_rec is not None:
+                    status = idx_rec.status or "queued"
+                    variant = {
+                        "run_id": run_id,
+                        "variant_index": idx_rec.variant_index if idx_rec.variant_index is not None else position,
+                        "label": idx_rec.variant_label or "variant",
+                        "status": status,
+                        "final_score": idx_rec.final_score if status == "completed" else None,
+                        "current_score": None,
+                        "selected_glsl": None,
+                        "thumbnail_url": f"/png-shader/runs/{run_id}/artifacts/selected_render",
+                        "changes_summary": None,
+                        "error": None,
+                        "favorite": bool(idx_rec.favorite),
+                    }
+                else:
+                    # Completely unknown — minimal stub.
+                    variant = {
+                        "run_id": run_id,
+                        "variant_index": position,
+                        "label": "variant",
+                        "status": "queued",
+                        "final_score": None,
+                        "current_score": None,
+                        "selected_glsl": None,
+                        "thumbnail_url": f"/png-shader/runs/{run_id}/artifacts/selected_render",
+                        "changes_summary": None,
+                        "error": None,
+                        "favorite": False,
+                    }
+            variants.append(variant)
+
+    # Sort: winner first, then status rank, then final_score desc (None last), then variant_index.
+    winner = record.winner_run_id
+
+    def _sort_key(v: dict):
+        is_winner = 0 if v["run_id"] == winner else 1
+        rank = _STATUS_RANK.get(v["status"], 99)
+        score = v["final_score"]
+        score_key = (0, -(score)) if score is not None else (1, 0.0)
+        return (is_winner, rank, score_key, v["variant_index"])
+
+    variants.sort(key=_sort_key)
+
+    status = aggregate_group_status([v["status"] for v in variants])
+
+    return {
+        "group_id": record.group_id,
+        "parent_run_id": record.parent_run_id,
+        "source_checkpoint_id": record.source_checkpoint_id,
+        "feedback": record.feedback,
+        "status": status,
+        "winner_run_id": record.winner_run_id,
+        "variants": variants,
+    }
+
+
+@router.post("/variant-groups/{group_id}/stop")
+async def stop_variant_group(group_id: str) -> dict:
+    """Signal all queued/running children of a variant group to stop."""
+    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+
+    with _run_store_lock:
+        for run_id in record.child_run_ids:
+            stored = _run_store.get(run_id)
+            if stored is not None and stored.get("status") in ("queued", "running"):
+                stored["stop_requested"] = True
+
+    try:
+        append_group_event(
+            group_id,
+            {"event": "stopped", "at": time()},
+            root=_VARIANT_GROUPS_ROOT,
+        )
+    except Exception:
+        logger.warning("append_group_event failed for group_id=%s", group_id, exc_info=True)
+
+    return {"stopping": True, "group_id": group_id}
+
+
+@router.post("/variant-groups/{group_id}/winner")
+async def set_variant_winner(group_id: str, payload: dict) -> dict:
+    """Mark one variant child as the winner of its group."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+
+    winner_run_id = payload.get("winner_run_id")
+    if not winner_run_id or winner_run_id not in record.child_run_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="winner_run_id is required and must be a member of this group's child_run_ids",
+        )
+
+    record.winner_run_id = winner_run_id
+    try:
+        save_group(record, root=_VARIANT_GROUPS_ROOT)
+    except Exception:
+        logger.warning("save_group failed for group_id=%s", group_id, exc_info=True)
+
+    # Mark the winner favorite in the run index (best-effort).
+    try:
+        update_run_metadata(winner_run_id, {"favorite": True}, path=_RUN_INDEX_PATH)
+    except RunIndexError:
+        pass  # Run not in the index yet — silently ignore.
+    except Exception:
+        logger.warning(
+            "update_run_metadata(favorite) failed for run_id=%s", winner_run_id, exc_info=True
+        )
+
+    # Mirror into the in-memory store (best-effort).
+    with _run_store_lock:
+        stored = _run_store.get(winner_run_id)
+        if stored is not None:
+            stored["favorite"] = True
+
+    try:
+        append_group_event(
+            group_id,
+            {
+                "event": "winner",
+                "run_id": winner_run_id,
+                "reason": payload.get("reason"),
+                "at": time(),
+            },
+            root=_VARIANT_GROUPS_ROOT,
+        )
+    except Exception:
+        logger.warning("append_group_event failed for group_id=%s", group_id, exc_info=True)
+
+    log_event(logger, "variant_winner_selected", group_id=group_id, run_id=winner_run_id)
+
+    return {"group_id": group_id, "winner_run_id": winner_run_id}
+
+
+@router.post("/variant-groups/{group_id}/ratings")
+async def rate_variant(group_id: str, payload: dict) -> dict:
+    """Append a rating event to a variant group."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
+
+    run_id = payload.get("run_id")
+    if not run_id or run_id not in record.child_run_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="run_id is required and must be a member of this group's child_run_ids",
+        )
+
+    rating = payload.get("rating")
+    if rating not in (-1, 0, 1):
+        raise HTTPException(
+            status_code=422,
+            detail="rating must be an integer in {-1, 0, 1}",
+        )
+
+    try:
+        append_group_event(
+            group_id,
+            {
+                "event": "rating",
+                "run_id": run_id,
+                "rating": rating,
+                "reason": payload.get("reason"),
+                "tags": payload.get("tags") or [],
+                "at": time(),
+            },
+            root=_VARIANT_GROUPS_ROOT,
+        )
+    except Exception:
+        logger.warning("append_group_event failed for group_id=%s", group_id, exc_info=True)
+
+    log_event(logger, "variant_rated", group_id=group_id, run_id=run_id, rating=rating)
+
+    return {"group_id": group_id, "run_id": run_id, "rating": rating}
