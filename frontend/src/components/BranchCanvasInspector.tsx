@@ -2,10 +2,21 @@
 // Switches content by selected node type: null / input / run / checkpoint / branch_action / variant_group / variant_run / reserved.
 // Presentational + callbacks only; branch-draft form owns local state. No data fetching.
 import { useState, useEffect } from "react";
-import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle } from "lucide-react";
+import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle, Layers2 } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
-import type { BranchMode, BranchRefineRequest, ExploreVariantsRequest, VariantGroupStatus, VariantStatusEntry } from "../hooks/usePngShader";
+import type {
+  BranchMode,
+  BranchRefineRequest,
+  ExploreVariantsRequest,
+  VariantGroupStatus,
+  VariantStatusEntry,
+  DrawSessionStatus,
+  CreateDrawSessionRequest,
+  DrawMoreRequest,
+  DrawCardEventType,
+} from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
+import DrawSessionInspector from "./DrawSessionInspector";
 
 // ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
 
@@ -39,6 +50,22 @@ interface Props {
   onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
   onStopGroup?: (groupId: string) => void;
   onRateVariant?: (groupId: string, runId: string, rating: number) => void;
+  // V3.5 draw-session props
+  drawSession?: DrawSessionStatus | null;
+  onStartDraw?: (parentRunId: string, request: CreateDrawSessionRequest) => void;
+  onDrawMore?: (drawId: string, request: DrawMoreRequest) => void;
+  onRedrawCard?: (drawId: string, runId: string) => void;
+  onCardEvent?: (
+    drawId: string,
+    runId: string,
+    eventType: DrawCardEventType,
+    opts?: { value?: unknown; reason?: string; tags?: string[] },
+  ) => void;
+  onPreviewCard?: (runId: string) => void;
+  onContinueCard?: (runId: string) => void;
+  onSelectDrawWinner?: (drawId: string, runId: string) => void;
+  onStopDraw?: (drawId: string) => void;
+  fusionEnabled?: boolean;
   submitError?: string | null;
   disabled?: boolean;
 }
@@ -294,11 +321,38 @@ interface BranchActionViewProps {
   onSubmitBranch: (runId: string, request: BranchRefineRequest) => void;
   onCancelBranch: () => void;
   onExploreVariants?: (parentRunId: string, request: ExploreVariantsRequest) => void;
+  // V3.5 batch-draw entry (start form rendered when drawMode is active)
+  onStartDraw?: (parentRunId: string, request: CreateDrawSessionRequest) => void;
+  onDrawMore?: (drawId: string, request: DrawMoreRequest) => void;
+  onRedrawCard?: (drawId: string, runId: string) => void;
+  onCardEvent?: (
+    drawId: string,
+    runId: string,
+    eventType: DrawCardEventType,
+    opts?: { value?: unknown; reason?: string; tags?: string[] },
+  ) => void;
+  onPreviewCard?: (runId: string) => void;
+  onContinueCard?: (runId: string) => void;
+  fusionEnabled?: boolean;
   submitError?: string | null;
   disabled?: boolean;
 }
 
-function BranchActionView({ node, onSubmitBranch, onCancelBranch, onExploreVariants, submitError, disabled }: BranchActionViewProps) {
+function BranchActionView({
+  node,
+  onSubmitBranch,
+  onCancelBranch,
+  onExploreVariants,
+  onStartDraw,
+  onDrawMore,
+  onRedrawCard,
+  onCardEvent,
+  onPreviewCard,
+  onContinueCard,
+  fusionEnabled,
+  submitError,
+  disabled,
+}: BranchActionViewProps) {
   const data = node.data;
   const runId = data.run_id!;
 
@@ -306,8 +360,40 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, onExploreVaria
   const [mode, setMode] = useState<BranchMode>("refine");
   const [locks, setLocks] = useState<Record<string, boolean>>({});
   const [exploreMode, setExploreMode] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
   const [variantCount, setVariantCount] = useState<VariantCount>(4);
   const [diversity, setDiversity] = useState<Diversity>("medium");
+
+  const sourceCheckpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
+
+  // Batch-draw mode hands the whole start form to DrawSessionInspector (session=null).
+  if (drawMode && onStartDraw) {
+    return (
+      <div className="flex flex-col gap-2">
+        <DrawSessionInspector
+          parentRunId={runId}
+          checkpointId={sourceCheckpointId}
+          session={null}
+          fusionEnabled={fusionEnabled}
+          onStartDraw={onStartDraw}
+          onDrawMore={onDrawMore ?? (() => {})}
+          onRedrawCard={onRedrawCard ?? (() => {})}
+          onCardEvent={onCardEvent ?? (() => {})}
+          onPreviewCard={onPreviewCard ?? (() => {})}
+          onContinueCard={onContinueCard ?? (() => {})}
+          disabled={disabled}
+          error={submitError}
+        />
+        <button
+          onClick={() => setDrawMode(false)}
+          disabled={disabled}
+          className="px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          返回分支 / Back to branch
+        </button>
+      </div>
+    );
+  }
 
   const feedbackRequired = exploreMode || mode === "refine" || mode === "polish";
   const canSubmit = !disabled && (!feedbackRequired || feedback.trim().length > 0);
@@ -367,6 +453,18 @@ function BranchActionView({ node, onSubmitBranch, onCancelBranch, onExploreVaria
         />
         探索多个变体 / Explore variants
       </label>
+
+      {/* Batch draw entry */}
+      {onStartDraw && (
+        <button
+          onClick={() => setDrawMode(true)}
+          disabled={disabled}
+          className="flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] rounded-md transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+        >
+          <Layers2 className="w-3 h-3" />
+          批量抽卡 / Batch Draw
+        </button>
+      )}
 
       {exploreMode ? (
         /* Explore controls */
@@ -838,6 +936,69 @@ function VariantRunDetailView({
   );
 }
 
+// ─── DrawSessionDetailView (V3.5) ─────────────────────────────────────────────
+
+interface DrawSessionDetailViewProps {
+  drawSession: DrawSessionStatus | null | undefined;
+  fusionEnabled?: boolean;
+  onStartDraw?: (parentRunId: string, request: CreateDrawSessionRequest) => void;
+  onDrawMore?: (drawId: string, request: DrawMoreRequest) => void;
+  onRedrawCard?: (drawId: string, runId: string) => void;
+  onCardEvent?: (
+    drawId: string,
+    runId: string,
+    eventType: DrawCardEventType,
+    opts?: { value?: unknown; reason?: string; tags?: string[] },
+  ) => void;
+  onPreviewCard?: (runId: string) => void;
+  onContinueCard?: (runId: string) => void;
+  onSelectDrawWinner?: (drawId: string, runId: string) => void;
+  onStopDraw?: (drawId: string) => void;
+  disabled?: boolean;
+}
+
+function DrawSessionDetailView({
+  drawSession,
+  fusionEnabled,
+  onStartDraw,
+  onDrawMore,
+  onRedrawCard,
+  onCardEvent,
+  onPreviewCard,
+  onContinueCard,
+  onSelectDrawWinner,
+  onStopDraw,
+  disabled,
+}: DrawSessionDetailViewProps) {
+  if (!drawSession) {
+    return (
+      <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
+        加载抽卡中…
+        <br />
+        <span className="opacity-70">Loading draw session…</span>
+      </p>
+    );
+  }
+
+  return (
+    <DrawSessionInspector
+      parentRunId={drawSession.parent_run_id ?? ""}
+      checkpointId={drawSession.source_checkpoint_id}
+      session={drawSession}
+      fusionEnabled={fusionEnabled}
+      onStartDraw={onStartDraw ?? (() => {})}
+      onDrawMore={onDrawMore ?? (() => {})}
+      onRedrawCard={onRedrawCard ?? (() => {})}
+      onCardEvent={onCardEvent ?? (() => {})}
+      onPreviewCard={onPreviewCard ?? (() => {})}
+      onContinueCard={onContinueCard ?? (() => {})}
+      onSelectWinner={onSelectDrawWinner}
+      onStopDraw={onStopDraw}
+      disabled={disabled}
+    />
+  );
+}
+
 function ReservedNodeView() {
   return (
     <p className="text-[11px] text-[var(--text-muted)] py-4 text-center">
@@ -864,6 +1025,16 @@ export default function BranchCanvasInspector({
   onSelectWinner,
   onStopGroup,
   onRateVariant,
+  drawSession,
+  onStartDraw,
+  onDrawMore,
+  onRedrawCard,
+  onCardEvent,
+  onPreviewCard,
+  onContinueCard,
+  onSelectDrawWinner,
+  onStopDraw,
+  fusionEnabled,
   disabled,
   submitError,
 }: Props) {
@@ -910,6 +1081,13 @@ export default function BranchCanvasInspector({
             onSubmitBranch={onSubmitBranch}
             onCancelBranch={onCancelBranch}
             onExploreVariants={onExploreVariants}
+            onStartDraw={onStartDraw}
+            onDrawMore={onDrawMore}
+            onRedrawCard={onRedrawCard}
+            onCardEvent={onCardEvent}
+            onPreviewCard={onPreviewCard}
+            onContinueCard={onContinueCard}
+            fusionEnabled={fusionEnabled}
             submitError={submitError}
             disabled={disabled}
           />
@@ -942,6 +1120,26 @@ export default function BranchCanvasInspector({
             onRefineFromCheckpoint={onRefineFromCheckpoint}
             onSelectWinner={onSelectWinner}
             onRateVariant={onRateVariant}
+            disabled={disabled}
+          />
+        );
+
+      // V3.5 draw-session detail (a selected draw_card shows the whole session grid)
+      case "draw_session":
+      case "draw_card":
+        return (
+          <DrawSessionDetailView
+            key={node.id}
+            drawSession={drawSession}
+            fusionEnabled={fusionEnabled}
+            onStartDraw={onStartDraw}
+            onDrawMore={onDrawMore}
+            onRedrawCard={onRedrawCard}
+            onCardEvent={onCardEvent}
+            onPreviewCard={onPreviewCard}
+            onContinueCard={onContinueCard}
+            onSelectDrawWinner={onSelectDrawWinner}
+            onStopDraw={onStopDraw}
             disabled={disabled}
           />
         );

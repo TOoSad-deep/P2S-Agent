@@ -23,6 +23,13 @@ import type {
   ExploreVariantsRequest,
   ExploreVariantsResponse,
   VariantGroupStatus,
+  CreateDrawSessionRequest,
+  CreateDrawSessionResponse,
+  DrawSessionStatus,
+  DrawMoreRequest,
+  DrawMoreResponse,
+  RedrawCardResponse,
+  DrawCardEventType,
 } from "../hooks/usePngShader";
 import StrategyControlPanel from "./StrategyControlPanel";
 import ModelSelectorPanel from "./ModelSelectorPanel";
@@ -63,6 +70,11 @@ interface Props {
   stopVariantGroup: (groupId: string) => Promise<void>;
   selectVariantWinner: (groupId: string, runId: string, reason?: string) => Promise<void>;
   rateVariant: (groupId: string, runId: string, rating: number, reason?: string, tags?: string[]) => Promise<void>;
+  createDrawSession: (parentRunId: string, request: CreateDrawSessionRequest) => Promise<CreateDrawSessionResponse | null>;
+  fetchDrawSession: (drawId: string) => Promise<DrawSessionStatus>;
+  drawMore: (drawId: string, request: DrawMoreRequest) => Promise<DrawMoreResponse | null>;
+  redrawCard: (drawId: string, runId: string, opts?: { reason?: string; diversity?: string }) => Promise<RedrawCardResponse | null>;
+  cardEvent: (drawId: string, runId: string, eventType: DrawCardEventType, opts?: { value?: unknown; reason?: string; tags?: string[] }) => Promise<void>;
 }
 
 /** Mirror of backend list_checkpoints: candidates with GLSL, iteration
@@ -151,6 +163,11 @@ export default function PngShaderView({
   stopVariantGroup,
   selectVariantWinner,
   rateVariant,
+  createDrawSession,
+  fetchDrawSession,
+  drawMore,
+  redrawCard,
+  cardEvent,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
@@ -481,6 +498,11 @@ export default function PngShaderView({
                   stopVariantGroup={stopVariantGroup}
                   selectVariantWinner={selectVariantWinner}
                   rateVariant={rateVariant}
+                  createDrawSession={createDrawSession}
+                  fetchDrawSession={fetchDrawSession}
+                  drawMore={drawMore}
+                  redrawCard={redrawCard}
+                  cardEvent={cardEvent}
                   disabled={loading}
                 />
               ) : (

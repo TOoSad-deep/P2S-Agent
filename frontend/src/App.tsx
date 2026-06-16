@@ -30,6 +30,11 @@ export default function App() {
     stopVariantGroup,
     selectVariantWinner,
     rateVariant,
+    createDrawSession,
+    fetchDrawSession,
+    drawMore,
+    redrawCard,
+    cardEvent,
   } = usePngShader()
 
   const models = useModels()
@@ -185,6 +190,11 @@ export default function App() {
           stopVariantGroup={stopVariantGroup}
           selectVariantWinner={selectVariantWinner}
           rateVariant={rateVariant}
+          createDrawSession={createDrawSession}
+          fetchDrawSession={fetchDrawSession}
+          drawMore={drawMore}
+          redrawCard={redrawCard}
+          cardEvent={cardEvent}
         />
       </main>
 

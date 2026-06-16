@@ -1,7 +1,7 @@
 // DrawSessionInspector.tsx — draw-session panel (V3.5 Batch Draw).
 // Pure presentational; no data fetching. Shows start form or active session card grid.
 import { useState } from "react";
-import { Layers2, StopCircle, RotateCcw } from "lucide-react";
+import { Layers2, StopCircle, RotateCcw, Star } from "lucide-react";
 import type {
   DrawSessionStatus,
   DrawCardStatus,
@@ -279,7 +279,7 @@ export default function DrawSessionInspector({
   onCardEvent,
   onPreviewCard,
   onContinueCard,
-  onSelectWinner: _onSelectWinner,
+  onSelectWinner,
   onStopDraw,
   disabled = false,
   error,
@@ -409,34 +409,54 @@ export default function DrawSessionInspector({
       {/* Card grid */}
       {visibleCards.length > 0 ? (
         <div className="grid grid-cols-2 gap-2">
-          {visibleCards.map((card) => (
-            <DrawCard
-              key={card.run_id}
-              card={card}
-              isWinner={card.run_id === session.winner_run_id}
-              fusionEnabled={fusionEnabled}
-              onPreview={onPreviewCard}
-              onFavorite={(rid, next) =>
-                onCardEvent(session.draw_id, rid, "favorite", { value: next })
-              }
-              onEliminate={(rid, next) =>
-                onCardEvent(session.draw_id, rid, "eliminate", { value: next })
-              }
-              onRedraw={(rid) => onRedrawCard(session.draw_id, rid)}
-              onContinue={onContinueCard}
-              onUseAsBase={
-                fusionEnabled
-                  ? (rid) => onCardEvent(session.draw_id, rid, "use_as_fusion_base")
-                  : undefined
-              }
-              onUseRegion={
-                fusionEnabled
-                  ? (rid) => onCardEvent(session.draw_id, rid, "use_as_region_source")
-                  : undefined
-              }
-              disabled={disabled}
-            />
-          ))}
+          {visibleCards.map((card) => {
+            const isWinner = card.run_id === session.winner_run_id;
+            return (
+              <div key={card.run_id} className="flex flex-col gap-1 min-w-0">
+                <DrawCard
+                  card={card}
+                  isWinner={isWinner}
+                  fusionEnabled={fusionEnabled}
+                  onPreview={onPreviewCard}
+                  onFavorite={(rid, next) =>
+                    onCardEvent(session.draw_id, rid, "favorite", { value: next })
+                  }
+                  onEliminate={(rid, next) =>
+                    onCardEvent(session.draw_id, rid, "eliminate", { value: next })
+                  }
+                  onRedraw={(rid) => onRedrawCard(session.draw_id, rid)}
+                  onContinue={onContinueCard}
+                  onUseAsBase={
+                    fusionEnabled
+                      ? (rid) => onCardEvent(session.draw_id, rid, "use_as_fusion_base")
+                      : undefined
+                  }
+                  onUseRegion={
+                    fusionEnabled
+                      ? (rid) => onCardEvent(session.draw_id, rid, "use_as_region_source")
+                      : undefined
+                  }
+                  disabled={disabled}
+                />
+                {/* Winner action — completed, non-winner cards only */}
+                {onSelectWinner && card.status === "completed" && (
+                  <button
+                    onClick={() => onSelectWinner(session.draw_id, card.run_id)}
+                    disabled={disabled || isWinner}
+                    title="设为胜出 Set as winner"
+                    className={`flex items-center justify-center gap-1 px-1.5 py-0.5 text-[10px] rounded transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                      isWinner
+                        ? "bg-emerald-500/10 text-emerald-400"
+                        : "bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                    }`}
+                  >
+                    <Star className={`w-3 h-3 ${isWinner ? "fill-current" : ""}`} />
+                    {isWinner ? "已胜出 Winner" : "设为胜出 Winner"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       ) : (
         <p className="text-[11px] text-[var(--text-muted)] py-3 text-center">

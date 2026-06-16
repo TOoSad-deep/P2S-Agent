@@ -12,9 +12,17 @@ import type {
   ExploreVariantsRequest,
   ExploreVariantsResponse,
   VariantGroupStatus,
+  CreateDrawSessionRequest,
+  CreateDrawSessionResponse,
+  DrawSessionStatus,
+  DrawMoreRequest,
+  DrawMoreResponse,
+  RedrawCardResponse,
+  DrawCardEventType,
 } from "../hooks/usePngShader";
 import {
   buildBranchCanvasModel,
+  buildDrawSessionModel,
   type BranchCanvasNode,
   type BranchCanvasEdge,
 } from "../lib/branchCanvasModel";
@@ -38,6 +46,11 @@ interface Props {
   stopVariantGroup: (groupId: string) => Promise<void>;
   selectVariantWinner: (groupId: string, runId: string, reason?: string) => Promise<void>;
   rateVariant: (groupId: string, runId: string, rating: number, reason?: string, tags?: string[]) => Promise<void>;
+  createDrawSession: (parentRunId: string, request: CreateDrawSessionRequest) => Promise<CreateDrawSessionResponse | null>;
+  fetchDrawSession: (drawId: string) => Promise<DrawSessionStatus>;
+  drawMore: (drawId: string, request: DrawMoreRequest) => Promise<DrawMoreResponse | null>;
+  redrawCard: (drawId: string, runId: string, opts?: { reason?: string; diversity?: string }) => Promise<RedrawCardResponse | null>;
+  cardEvent: (drawId: string, runId: string, eventType: DrawCardEventType, opts?: { value?: unknown; reason?: string; tags?: string[] }) => Promise<void>;
   // optional preview callback (wired by parent if desired)
   onPreviewNode?: (node: BranchCanvasNode | null) => void;
   disabled?: boolean;
@@ -93,6 +106,11 @@ export default function BranchCanvasWorkspace({
   stopVariantGroup,
   selectVariantWinner,
   rateVariant,
+  createDrawSession,
+  fetchDrawSession,
+  drawMore,
+  redrawCard,
+  cardEvent,
   onPreviewNode,
   disabled,
 }: Props) {
@@ -107,6 +125,9 @@ export default function BranchCanvasWorkspace({
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(new Set());
   const [activeVariantGroupId, setActiveVariantGroupId] = useState<string | null>(null);
   const [variantGroup, setVariantGroup] = useState<VariantGroupStatus | null>(null);
+  const [activeDrawId, setActiveDrawId] = useState<string | null>(null);
+  const [drawSession, setDrawSession] = useState<DrawSessionStatus | null>(null);
+  const [collapsedDrawIds, setCollapsedDrawIds] = useState<Set<string>>(new Set());
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -209,20 +230,27 @@ export default function BranchCanvasWorkspace({
     [activeRunId, result?.status, result?.quality_router?.final_score],
   );
 
-  // ── Derived: canvas model ──────────────────────────────────────────────────
-  const model = useMemo(
-    () =>
-      buildBranchCanvasModel({
-        activeRunId,
-        branchTree: branchInfo?.tree ?? null,
-        timelinesByRunId,
-        statusesByRunId,
-        collapsedRunIds,
-        favoriteRunIds,
-        collapsedGroupIds,
-      }),
-    [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds],
-  );
+  // ── Derived: canvas model (base branch model + optional draw-session merge) ─
+  const model = useMemo(() => {
+    const base = buildBranchCanvasModel({
+      activeRunId,
+      branchTree: branchInfo?.tree ?? null,
+      timelinesByRunId,
+      statusesByRunId,
+      collapsedRunIds,
+      favoriteRunIds,
+      collapsedGroupIds,
+    });
+    if (!drawSession) return base;
+    const drawModel = buildDrawSessionModel(drawSession, {
+      anchorNodeId: `run:${drawSession.parent_run_id}`,
+      collapsed: collapsedDrawIds.has(drawSession.draw_id),
+    });
+    return {
+      nodes: [...base.nodes, ...drawModel.nodes],
+      edges: [...base.edges, ...drawModel.edges],
+    };
+  }, [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds, drawSession, collapsedDrawIds]);
 
   // ── Derived: positioned nodes (layout only; no selection) ─────────────────
   const positionedNodes = useMemo(
@@ -312,6 +340,16 @@ export default function BranchCanvasWorkspace({
         setCollapsedGroupIds((prev) => {
           const next = new Set(prev);
           if (next.has(gid)) { next.delete(gid); } else { next.add(gid); }
+          return next;
+        });
+        return;
+      }
+      // Double-click a draw_session: toggle collapse (do NOT also switchRun)
+      if (node.data.type === "draw_session" && typeof node.data.draw_id === "string") {
+        const did = node.data.draw_id;
+        setCollapsedDrawIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(did)) { next.delete(did); } else { next.add(did); }
           return next;
         });
         return;
@@ -439,6 +477,83 @@ export default function BranchCanvasWorkspace({
     [rateVariant],
   );
 
+  // ── Draw-session handlers (V3.5) ───────────────────────────────────────────
+
+  const handleStartDraw = useCallback(
+    async (parentRunId: string, request: CreateDrawSessionRequest) => {
+      const resp = await createDrawSession(parentRunId, request);
+      if (resp) {
+        setDrawSession(null);
+        setActiveDrawId(resp.draw_id);
+        setBranchDraft(null);
+        setSelectedNodeId(null);
+        if (runIdRef.current) fetchBranches(runIdRef.current).then(setBranchInfo).catch(() => {});
+      }
+    },
+    [createDrawSession, fetchBranches],
+  );
+
+  const handleDrawMore = useCallback(
+    async (drawId: string, request: DrawMoreRequest) => {
+      await drawMore(drawId, request);
+      fetchDrawSession(drawId).then(setDrawSession).catch(() => {});
+    },
+    [drawMore, fetchDrawSession],
+  );
+
+  const handleRedrawCard = useCallback(
+    async (drawId: string, rid: string) => {
+      await redrawCard(drawId, rid);
+      fetchDrawSession(drawId).then(setDrawSession).catch(() => {});
+      if (runIdRef.current) fetchBranches(runIdRef.current).then(setBranchInfo).catch(() => {});
+    },
+    [redrawCard, fetchDrawSession, fetchBranches],
+  );
+
+  const handleCardEvent = useCallback(
+    async (
+      drawId: string,
+      rid: string,
+      eventType: DrawCardEventType,
+      opts?: { value?: unknown; reason?: string; tags?: string[] },
+    ) => {
+      await cardEvent(drawId, rid, eventType, opts);
+      fetchDrawSession(drawId).then(setDrawSession).catch(() => {});
+    },
+    [cardEvent, fetchDrawSession],
+  );
+
+  const handlePreviewCard = useCallback(
+    (rid: string) => { switchRun(rid); },
+    [switchRun],
+  );
+
+  // Continue from a card: open a branch draft on its final result (mirrors the
+  // variant Continue, which calls onRefineFromCheckpoint(run_id, "final:selected")).
+  const handleContinueCard = useCallback(
+    (rid: string) => { handleRefineFromCheckpoint(rid, "final:selected"); },
+    [handleRefineFromCheckpoint],
+  );
+
+  const handleSelectDrawWinner = useCallback(
+    async (drawId: string, rid: string) => {
+      const card = drawSession?.cards.find((c) => c.run_id === rid);
+      if (card?.group_id) {
+        await selectVariantWinner(card.group_id, rid);
+        fetchDrawSession(drawId).then(setDrawSession).catch(() => {});
+        if (runIdRef.current) fetchBranches(runIdRef.current).then(setBranchInfo).catch(() => {});
+      }
+    },
+    [drawSession, selectVariantWinner, fetchDrawSession, fetchBranches],
+  );
+
+  const handleStopDraw = useCallback(
+    (_drawId: string) => {
+      (drawSession?.group_ids ?? []).forEach((gid) => { stopVariantGroup(gid); });
+    },
+    [drawSession, stopVariantGroup],
+  );
+
   // ── Group polling (2s, stops on terminal status) ───────────────────────────
   useEffect(() => {
     if (!activeVariantGroupId) return;
@@ -464,6 +579,33 @@ export default function BranchCanvasWorkspace({
       if (timer) clearTimeout(timer);
     };
   }, [activeVariantGroupId, fetchVariantGroup, fetchBranches]);
+
+  // ── Draw-session polling (2s, stops on terminal status) ────────────────────
+  useEffect(() => {
+    if (!activeDrawId) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // partial_failed IS terminal for a draw session.
+    const TERMINAL = new Set(["completed", "failed", "partial_failed", "cancelled"]);
+    const poll = async () => {
+      if (!alive) return;
+      try {
+        const s = await fetchDrawSession(activeDrawId);
+        if (!alive) return;
+        setDrawSession(s);
+        if (runIdRef.current) fetchBranches(runIdRef.current).then((b) => { if (alive) setBranchInfo(b); }).catch(() => {});
+        if (TERMINAL.has(s.status)) return; // stop polling
+      } catch {
+        // best-effort: keep trying
+      }
+      timer = setTimeout(poll, 2000);
+    };
+    poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeDrawId, fetchDrawSession, fetchBranches]);
 
   // ── Placeholder when no run ────────────────────────────────────────────────
   if (!runId || !branchInfo) {
@@ -571,6 +713,16 @@ export default function BranchCanvasWorkspace({
             onSelectWinner={handleSelectWinner}
             onStopGroup={handleStopGroup}
             onRateVariant={handleRateVariant}
+            drawSession={drawSession}
+            onStartDraw={handleStartDraw}
+            onDrawMore={handleDrawMore}
+            onRedrawCard={handleRedrawCard}
+            onCardEvent={handleCardEvent}
+            onPreviewCard={handlePreviewCard}
+            onContinueCard={handleContinueCard}
+            onSelectDrawWinner={handleSelectDrawWinner}
+            onStopDraw={handleStopDraw}
+            fusionEnabled={false}
             submitError={submitError}
             disabled={disabled}
           />
