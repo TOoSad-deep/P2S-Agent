@@ -32,6 +32,10 @@ def _isolate_run_index(tmp_path, monkeypatch):
         "app.routers.png_shader._VARIANT_GROUPS_ROOT",
         str(tmp_path / "vg"),
     )
+    monkeypatch.setattr(
+        "app.routers.png_shader._DRAW_SESSIONS_ROOT",
+        str(tmp_path / "ds"),
+    )
 
 FastAPI = fastapi.FastAPI
 TestClient = testclient.TestClient
@@ -2034,3 +2038,496 @@ def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
     assert v["status"] == "completed", f"expected 'completed', got {v['status']!r}"
     assert v["final_score"] == 0.72, f"expected 0.72, got {v['final_score']!r}"
     assert v["favorite"] is True, "run-index favorite must be reflected in evicted child"
+
+
+# ---------------------------------------------------------------------------
+# V3.5-B4: draw-session endpoints
+#   POST   /runs/{run_id}/draw-session
+#   GET    /draw-sessions/{draw_id}
+#   POST   /draw-sessions/{draw_id}/draw-more
+#   POST   /draw-sessions/{draw_id}/redraw
+#   POST   /draw-sessions/{draw_id}/cards/{run_id}/event
+# ---------------------------------------------------------------------------
+
+
+def _ds_root(tmp_path) -> str:
+    """The draw-sessions root the autouse fixture monkeypatched onto the router."""
+    return str(tmp_path / "ds")
+
+
+def test_draw_session_create_8_two_groups(tmp_path, monkeypatch):
+    """POST /draw-session card_count=8 -> 2 groups, 8 card_run_ids, persisted record;
+    all cards complete after workers drain."""
+    _run_store.clear()
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "draw me some bold neon variants", "card_count": 8},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "running"
+    assert body["parent_run_id"] == "run_parent"
+    assert body["source_checkpoint_id"] == "final:selected"
+    draw_id = body["draw_id"]
+    assert draw_id.startswith("draw_")
+    assert len(body["group_ids"]) == 2
+    assert len(body["card_run_ids"]) == 8
+    assert len(set(body["card_run_ids"])) == 8
+
+    # Record round-trips with parent / feedback / group_ids / card_run_ids.
+    from app.pipeline.draw_sessions import load_session
+    rec = load_session(draw_id, root=_ds_root(tmp_path))
+    assert rec is not None
+    assert rec.parent_run_id == "run_parent"
+    assert rec.feedback == "draw me some bold neon variants"
+    assert rec.requested_count == 8
+    assert list(rec.group_ids) == list(body["group_ids"])
+    assert list(rec.card_run_ids) == list(body["card_run_ids"])
+
+    for cid in body["card_run_ids"]:
+        result = _wait_for_variant_completion(client, cid, timeout_seconds=20.0)
+        assert result["status"] == "completed", f"{cid} ended {result['status']}"
+
+
+def test_draw_session_create_12_batches_6_6(tmp_path, monkeypatch):
+    """card_count=12 -> batches [6,6] => 2 groups of 6, 12 cards."""
+    _run_store.clear()
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "twelve please", "card_count": 12},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["group_ids"]) == 2
+    assert len(body["card_run_ids"]) == 12
+
+    from app.pipeline.variant_groups import load_group
+    sizes = sorted(
+        len(load_group(gid, root=str(tmp_path / "vg")).child_run_ids)
+        for gid in body["group_ids"]
+    )
+    assert sizes == [6, 6]
+
+
+def test_draw_session_create_4_one_group(tmp_path, monkeypatch):
+    """card_count=4 -> a single group of 4 cards."""
+    _run_store.clear()
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "four cards", "card_count": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["group_ids"]) == 1
+    assert len(body["card_run_ids"]) == 4
+
+
+def test_draw_session_create_card_count_out_of_range(tmp_path):
+    """card_count of 1 and 13 both 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    low = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "x", "card_count": 1},
+    )
+    assert low.status_code == 422
+
+    high = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "x", "card_count": 13},
+    )
+    assert high.status_code == 422
+
+
+def test_draw_session_create_404_unknown_parent():
+    """Unknown parent run -> 404."""
+    _run_store.clear()
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/ghost/draw-session",
+        json={"feedback": "x"},
+    )
+    assert resp.status_code == 404
+
+
+def test_draw_session_create_422_empty_feedback(tmp_path):
+    """Blank feedback -> 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "   "},
+    )
+    assert resp.status_code == 422
+
+
+def test_draw_session_create_422_bad_checkpoint(tmp_path):
+    """Unresolvable checkpoint_id -> 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "x", "checkpoint_id": "refinement:iter:99"},
+    )
+    assert resp.status_code == 422
+
+
+def _seed_draw_session(tmp_path, *, draw_id="draw_test1", card_run_ids, feedback="brighten",
+                       requested_count=None, group_ids=None):
+    """Persist a DrawSessionRecord directly (no worker spawn)."""
+    from app.pipeline.draw_sessions import DrawSessionRecord, save_session
+    rec = DrawSessionRecord(
+        draw_id=draw_id,
+        root_run_id="run_parent",
+        parent_run_id="run_parent",
+        source_checkpoint_id="final:selected",
+        feedback=feedback,
+        status="running",
+        requested_count=requested_count if requested_count is not None else len(card_run_ids),
+        diversity="medium",
+        mode="batch_draw",
+        group_ids=group_ids if group_ids is not None else ["group_seed"],
+        card_run_ids=list(card_run_ids),
+        created_at=1.0,
+        metadata={"locks": {}, "quality": {}, "mode": "batch_draw"},
+    )
+    save_session(rec, root=_ds_root(tmp_path))
+    return rec
+
+
+def test_get_draw_session_mixed_statuses(tmp_path):
+    """GET /draw-sessions/{id} aggregates counts + status from mixed child statuses."""
+    _run_store.clear()
+    _run_store["c_done"] = {
+        "run_id": "c_done", "status": "completed", "variant_index": 0,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {"final_score": 0.81}, "refinement_history": [],
+    }
+    _run_store["c_fail"] = {
+        "run_id": "c_fail", "status": "failed", "variant_index": 1,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {}, "refinement_history": [], "error": "boom",
+    }
+    _seed_draw_session(tmp_path, draw_id="draw_mix", card_run_ids=["c_done", "c_fail"])
+
+    client = _client()
+    resp = client.get("/png-shader/draw-sessions/draw_mix")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["draw_id"] == "draw_mix"
+    assert body["parent_run_id"] == "run_parent"
+    assert body["source_checkpoint_id"] == "final:selected"
+    assert body["completed_count"] == 1
+    assert body["failed_count"] == 1
+    assert body["running_count"] == 0
+    # one completed + one failed -> partial_failed
+    assert body["status"] == "partial_failed"
+
+    cards = body["cards"]
+    assert len(cards) == 2
+    by_run = {c["run_id"]: c for c in cards}
+    done = by_run["c_done"]
+    assert done["card_id"] == "c_done"
+    assert done["status"] == "completed"
+    assert done["final_score"] == 0.81
+    assert done["can_use_for_fusion"] is True
+    assert done["thumbnail_url"] == "/png-shader/runs/c_done/artifacts/selected_render"
+    assert done["feedback"] == "brighten"
+    fail = by_run["c_fail"]
+    assert fail["status"] == "failed"
+    assert fail["error"] == "boom"
+    assert fail["can_use_for_fusion"] is False
+
+
+def test_get_draw_session_running_counts(tmp_path):
+    """running + queued cards count toward running_count; aggregate -> running."""
+    _run_store.clear()
+    _run_store["c_run"] = {
+        "run_id": "c_run", "status": "running", "variant_index": 0,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {"final_score": 0.4}, "refinement_history": [],
+    }
+    _run_store["c_q"] = {
+        "run_id": "c_q", "status": "queued", "variant_index": 1,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {}, "refinement_history": [],
+    }
+    _seed_draw_session(tmp_path, draw_id="draw_run", card_run_ids=["c_run", "c_q"])
+    client = _client()
+    resp = client.get("/png-shader/draw-sessions/draw_run")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["running_count"] == 2
+    assert body["completed_count"] == 0
+    assert body["status"] == "running"
+    by_run = {c["run_id"]: c for c in body["cards"]}
+    assert by_run["c_run"]["current_score"] == 0.4
+    assert by_run["c_run"]["final_score"] is None
+
+
+def test_get_draw_session_404_unknown():
+    """Unknown draw_id -> 404."""
+    _run_store.clear()
+    client = _client()
+    resp = client.get("/png-shader/draw-sessions/ghost")
+    assert resp.status_code == 404
+
+
+def test_draw_session_draw_more_extends_record(tmp_path, monkeypatch):
+    """draw-more keeps the original group, grows card_run_ids, adds distinct group."""
+    _run_store.clear()
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "first draw", "card_count": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    created = resp.json()
+    draw_id = created["draw_id"]
+    orig_groups = list(created["group_ids"])
+    orig_cards = list(created["card_run_ids"])
+
+    more = client.post(
+        f"/png-shader/draw-sessions/{draw_id}/draw-more",
+        json={"card_count": 4},
+    )
+    assert more.status_code == 200, more.text
+    mbody = more.json()
+    assert mbody["draw_id"] == draw_id
+    assert len(mbody["group_ids"]) == 1
+    new_gid = mbody["group_ids"][0]
+    assert new_gid not in orig_groups
+    assert len(mbody["card_run_ids"]) == 4
+
+    from app.pipeline.draw_sessions import load_session
+    rec = load_session(draw_id, root=_ds_root(tmp_path))
+    assert rec is not None
+    # original group still present
+    for gid in orig_groups:
+        assert gid in rec.group_ids
+    assert new_gid in rec.group_ids
+    # card_run_ids grew
+    assert len(rec.card_run_ids) == len(orig_cards) + 4
+    for c in orig_cards:
+        assert c in rec.card_run_ids
+
+
+def test_draw_session_draw_more_404_unknown():
+    """draw-more on unknown draw_id -> 404."""
+    _run_store.clear()
+    client = _client()
+    resp = client.post(
+        "/png-shader/draw-sessions/ghost/draw-more",
+        json={"card_count": 4},
+    )
+    assert resp.status_code == 404
+
+
+def test_draw_session_draw_more_409_parent_gone(tmp_path):
+    """draw-more when parent run is no longer in the store -> 409."""
+    _run_store.clear()  # parent absent
+    _seed_draw_session(tmp_path, draw_id="draw_orphan", card_run_ids=["c1"])
+    client = _client()
+    resp = client.post(
+        "/png-shader/draw-sessions/draw_orphan/draw-more",
+        json={"card_count": 4},
+    )
+    assert resp.status_code == 409
+
+
+def test_draw_session_redraw_links_replacement(tmp_path, monkeypatch):
+    """redraw spawns 1 replacement card, links replacement_of_run_id, eliminates
+    original (kept in record), and logs a draw_card_redrawn event."""
+    _run_store.clear()
+    idx = str(tmp_path / "run_index.jsonl")  # matches autouse fixture path
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "draw set", "card_count": 4},
+    )
+    assert resp.status_code == 200, resp.text
+    created = resp.json()
+    draw_id = created["draw_id"]
+    original = created["card_run_ids"][0]
+
+    redraw = client.post(
+        f"/png-shader/draw-sessions/{draw_id}/redraw",
+        json={"run_id": original, "reason": "too dark"},
+    )
+    assert redraw.status_code == 200, redraw.text
+    rbody = redraw.json()
+    assert rbody["replaced_run_id"] == original
+    new_run_id = rbody["replacement_run_id"]
+    assert new_run_id and new_run_id != original
+    assert rbody["group_id"]
+
+    # replacement's run-index record points back to the original.
+    from app.pipeline.run_index import load_run_index
+    records = load_run_index(path=idx)
+    assert new_run_id in records
+    assert records[new_run_id].replacement_of_run_id == original
+
+    # original still tracked in the record's card_run_ids.
+    from app.pipeline.draw_sessions import load_session, load_session_events
+    rec = load_session(draw_id, root=_ds_root(tmp_path))
+    assert original in rec.card_run_ids
+    assert new_run_id in rec.card_run_ids
+
+    # a draw_card_redrawn event exists.
+    events = load_session_events(draw_id, root=_ds_root(tmp_path))
+    redrawn = [e for e in events if e.get("event") == "draw_card_redrawn"]
+    assert any(
+        e.get("run_id") == original and e.get("replacement_run_id") == new_run_id
+        for e in redrawn
+    )
+
+
+def test_draw_session_redraw_422_non_member(tmp_path):
+    """redraw with run_id not in the record -> 422."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    _seed_draw_session(tmp_path, draw_id="draw_rd", card_run_ids=["c_known"])
+    client = _client()
+    resp = client.post(
+        "/png-shader/draw-sessions/draw_rd/redraw",
+        json={"run_id": "not_a_member"},
+    )
+    assert resp.status_code == 422
+
+
+def test_draw_session_card_event_favorite(tmp_path, monkeypatch):
+    """favorite=true writes a session event, mirrors to run-index favorite, and a
+    subsequent GET shows that card favorite:true."""
+    _run_store.clear()
+    idx = str(tmp_path / "run_index.jsonl")
+    # seed a run-index 'created' record so update_run_metadata can patch it.
+    from app.pipeline.run_index import RunLineageRecord, append_run_created
+    append_run_created(
+        RunLineageRecord(
+            run_id="c_fav", root_run_id="run_parent", parent_run_id="run_parent",
+            source_checkpoint_id="final:selected", source_checkpoint_label="final",
+            mode="batch_draw", feedback="brighten", title=None,
+            status="completed", run_dir=None, created_at=1.0,
+            variant_group_id="group_seed", variant_index=0, variant_label="card",
+        ),
+        path=idx,
+    )
+    _run_store["c_fav"] = {
+        "run_id": "c_fav", "status": "completed", "variant_index": 0,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {"final_score": 0.6}, "refinement_history": [],
+    }
+    _seed_draw_session(tmp_path, draw_id="draw_fav", card_run_ids=["c_fav"])
+    client = _client()
+
+    ev = client.post(
+        "/png-shader/draw-sessions/draw_fav/cards/c_fav/event",
+        json={"event_type": "favorite", "value": True},
+    )
+    assert ev.status_code == 200, ev.text
+    assert ev.json()["ok"] is True
+
+    # session event written
+    from app.pipeline.draw_sessions import load_session_events
+    events = load_session_events(draw_id="draw_fav", root=_ds_root(tmp_path))
+    assert any(e.get("event") == "favorite" and e.get("run_id") == "c_fav" for e in events)
+
+    # run-index favorite mirrored
+    from app.pipeline.run_index import load_run_index
+    assert load_run_index(path=idx)["c_fav"].favorite is True
+
+    # GET reflects favorite
+    body = client.get("/png-shader/draw-sessions/draw_fav").json()
+    fav_card = next(c for c in body["cards"] if c["run_id"] == "c_fav")
+    assert fav_card["favorite"] is True
+
+
+def test_draw_session_card_event_eliminate_and_tag(tmp_path):
+    """eliminate=true and tag events are reflected by a subsequent GET overlay."""
+    _run_store.clear()
+    _run_store["c_x"] = {
+        "run_id": "c_x", "status": "completed", "variant_index": 0,
+        "variant_label": "card", "variant_group_id": "group_seed",
+        "quality_router": {"final_score": 0.5}, "refinement_history": [],
+    }
+    _seed_draw_session(tmp_path, draw_id="draw_et", card_run_ids=["c_x"])
+    client = _client()
+
+    elim = client.post(
+        "/png-shader/draw-sessions/draw_et/cards/c_x/event",
+        json={"event_type": "eliminate", "value": True},
+    )
+    assert elim.status_code == 200, elim.text
+    tag = client.post(
+        "/png-shader/draw-sessions/draw_et/cards/c_x/event",
+        json={"event_type": "tag", "tags": ["keep-color"]},
+    )
+    assert tag.status_code == 200, tag.text
+
+    body = client.get("/png-shader/draw-sessions/draw_et").json()
+    card = next(c for c in body["cards"] if c["run_id"] == "c_x")
+    assert card["eliminated"] is True
+    assert "keep-color" in card["tags"]
+
+
+def test_draw_session_card_event_422_invalid_type(tmp_path):
+    """Unknown event_type -> 422."""
+    _run_store.clear()
+    _run_store["c_y"] = {"run_id": "c_y", "status": "completed", "variant_group_id": "group_seed"}
+    _seed_draw_session(tmp_path, draw_id="draw_inv", card_run_ids=["c_y"])
+    client = _client()
+    resp = client.post(
+        "/png-shader/draw-sessions/draw_inv/cards/c_y/event",
+        json={"event_type": "bogus"},
+    )
+    assert resp.status_code == 422
+
+
+def test_draw_session_card_event_422_non_member(tmp_path):
+    """Event for a run_id not in the record -> 422."""
+    _run_store.clear()
+    _seed_draw_session(tmp_path, draw_id="draw_nm", card_run_ids=["c_member"])
+    client = _client()
+    resp = client.post(
+        "/png-shader/draw-sessions/draw_nm/cards/c_outsider/event",
+        json={"event_type": "favorite", "value": True},
+    )
+    assert resp.status_code == 422

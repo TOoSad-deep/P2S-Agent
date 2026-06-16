@@ -42,6 +42,15 @@ from app.pipeline.variant_groups import (
     load_group,
     save_group,
 )
+from app.pipeline.draw_sessions import (
+    DrawSessionRecord,
+    aggregate_draw_status,
+    append_session_event,
+    load_session,
+    load_session_events,
+    plan_draw_batches,
+    save_session,
+)
 from app.pipeline.graph import run_png_shader_pipeline
 from app.pipeline.human_feedback import (
     MODES,
@@ -85,6 +94,12 @@ _MAX_VARIANT_COUNT = 6
 _MAX_VARIANT_CONCURRENCY = 2
 _variant_worker_semaphore = threading.Semaphore(_MAX_VARIANT_CONCURRENCY)
 _VARIANT_GROUPS_ROOT: Optional[str] = None  # tests override to isolate
+_DRAW_SESSIONS_ROOT: Optional[str] = None  # tests override to isolate
+
+# Draw-session (V3.5 batch draw) card-event vocabulary.
+_DRAW_CARD_EVENT_TYPES: frozenset[str] = frozenset({
+    "favorite", "eliminate", "tag", "note", "use_as_fusion_base", "use_as_region_source",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -1039,6 +1054,583 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
         "source_checkpoint_id": checkpoint_id,
         "child_run_ids": child_run_ids,
     }
+
+
+# ---------------------------------------------------------------------------
+# V3.5 draw-session (gacha-style batch draw) helpers + endpoints
+# ---------------------------------------------------------------------------
+
+
+def _resolve_draw_checkpoint(parent: dict, checkpoint_id: str):
+    """Resolve a draw-session checkpoint + reference image from a parent run.
+
+    Mirrors explore_variants' pre-checks. Returns ``(checkpoint, reference_path)``.
+
+    Raises:
+        HTTPException(409): no branchable checkpoint / no run_dir / no reference.
+        HTTPException(422): checkpoint_id cannot be resolved.
+    """
+    if not list_checkpoints(parent):
+        raise HTTPException(status_code=409, detail="no branchable checkpoint yet")
+    try:
+        checkpoint = resolve_checkpoint(parent, checkpoint_id)
+    except CheckpointError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    parent_run_dir = parent.get("run_dir")
+    if not parent_run_dir:
+        raise HTTPException(status_code=409, detail="parent run_dir is not available yet")
+    reference_path = Path(parent_run_dir) / "reference_input.png"
+    if not reference_path.exists():
+        raise HTTPException(status_code=409, detail="parent reference image is not available")
+    return checkpoint, reference_path
+
+
+def _prevalidate_draw_quality(reference_path: Path, quality: dict) -> None:
+    """Validate ONCE up-front, before any child run is created, to avoid leaving
+    orphaned/partial groups behind when an input-spec error would otherwise fire
+    mid-loop inside ``_create_variant_group``.
+
+    Builds the same probe quality dict the helper applies per child.
+
+    Raises:
+        HTTPException(422): when the probe input-spec has validation errors.
+    """
+    probe = {
+        **quality,
+        "refinement_mode": "on",
+        "max_refinement_iterations": max(int(quality.get("max_refinement_iterations", 0) or 0), 1),
+        "vlm_judge_enabled": 1,
+    }
+    probe_spec = build_input_spec(str(reference_path), quality=probe)
+    errors = validate_input_spec(probe_spec)
+    if errors:
+        raise HTTPException(status_code=422, detail={"input_spec_errors": errors})
+
+
+def _create_draw_groups(
+    *,
+    parent_run_id: str,
+    root_run_id: str,
+    checkpoint,
+    checkpoint_id: str,
+    reference_path: Path,
+    feedback: str,
+    mode: str,
+    diversity: str,
+    quality: dict,
+    request_locks: dict,
+    draw_id: str,
+    card_count: int,
+    on_group=None,
+) -> tuple[list[str], list[str]]:
+    """Plan *card_count* into batches and create one variant group per batch.
+
+    Each strategy gets request_locks merged in. ``on_group(gid, cids)`` (if given)
+    is invoked after each successful group so callers can incrementally persist —
+    a mid-loop failure then still leaves a consistent record of what succeeded.
+
+    Returns ``(group_ids, card_run_ids)`` across all batches.
+    """
+    group_ids: list[str] = []
+    card_run_ids: list[str] = []
+    for batch in plan_draw_batches(card_count):
+        strategies = build_variant_strategies(
+            feedback=feedback, count=batch, diversity=diversity, mode=mode,
+        )
+        for s in strategies:
+            s["locks"] = {**(s.get("locks") or {}), **request_locks}
+        gid, cids = _create_variant_group(
+            parent_run_id=parent_run_id,
+            root_run_id=root_run_id,
+            checkpoint=checkpoint,
+            checkpoint_id=checkpoint_id,
+            reference_path=reference_path,
+            feedback=feedback,
+            mode=mode,
+            diversity=diversity,
+            strategies=strategies,
+            quality_overrides=quality,
+            draw_session_id=draw_id,
+        )
+        group_ids.append(gid)
+        card_run_ids.extend(cids)
+        if on_group is not None:
+            on_group(gid, cids)
+    return group_ids, card_run_ids
+
+
+@router.post("/runs/{run_id}/draw-session")
+async def create_draw_session(run_id: str, payload: dict) -> dict:
+    """Start a gacha-style batch draw: fan one checkpoint into N cards across
+    one or more variant groups (each a different exploration strategy).
+
+    Body: { checkpoint_id?, feedback (required), card_count?=8, diversity?="medium",
+            quality?={}, constraints?={"locks":{...}}, mode?="batch_draw",
+            stop_parent?=false }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    with _run_store_lock:
+        parent = _run_store.get(run_id)
+    if parent is None:
+        raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
+
+    feedback = str(payload.get("feedback") or "")
+    if not feedback.strip():
+        raise HTTPException(status_code=422, detail="feedback is required for draw-session")
+
+    card_count = int(payload.get("card_count") or 8)
+    if card_count < 2 or card_count > 12:
+        raise HTTPException(
+            status_code=422, detail=f"card_count must be between 2 and 12, got {card_count}"
+        )
+
+    quality = payload.get("quality") or {}
+    if not isinstance(quality, dict):
+        raise HTTPException(status_code=422, detail="quality must be an object")
+
+    diversity = str(payload.get("diversity") or "medium")
+    mode = str(payload.get("mode") or "batch_draw")
+    checkpoint_id_raw = payload.get("checkpoint_id")
+    checkpoint_id = str(checkpoint_id_raw) if checkpoint_id_raw is not None else "final:selected"
+    request_locks = (payload.get("constraints") or {}).get("locks") or {}
+
+    checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
+    # Pre-validate ONCE up-front so a bad spec can't leave partial groups behind.
+    _prevalidate_draw_quality(reference_path, quality)
+
+    draw_id = "draw_" + uuid4().hex[:8]
+    root_run_id = (parent.get("lineage") or {}).get("root_run_id") or run_id
+
+    group_ids, card_run_ids = _create_draw_groups(
+        parent_run_id=run_id,
+        root_run_id=root_run_id,
+        checkpoint=checkpoint,
+        checkpoint_id=checkpoint_id,
+        reference_path=reference_path,
+        feedback=feedback,
+        mode=mode,
+        diversity=diversity,
+        quality=quality,
+        request_locks=request_locks,
+        draw_id=draw_id,
+        card_count=card_count,
+    )
+
+    # Persist the session record + creation event best-effort (I/O must not 500).
+    record = DrawSessionRecord(
+        draw_id=draw_id,
+        root_run_id=root_run_id,
+        parent_run_id=run_id,
+        source_checkpoint_id=checkpoint_id,
+        feedback=feedback,
+        status="running",
+        requested_count=card_count,
+        diversity=diversity,
+        mode=mode,
+        group_ids=group_ids,
+        card_run_ids=card_run_ids,
+        created_at=time(),
+        metadata={"locks": request_locks, "quality": quality, "mode": mode},
+    )
+    try:
+        save_session(record, root=_DRAW_SESSIONS_ROOT)
+        append_session_event(
+            draw_id,
+            {"event": "draw_session_created", "card_run_ids": card_run_ids,
+             "group_ids": group_ids, "at": time()},
+            root=_DRAW_SESSIONS_ROOT,
+        )
+    except Exception:
+        logger.warning("draw session persist failed for draw_id=%s", draw_id, exc_info=True)
+
+    if stop_parent := bool(payload.get("stop_parent")):
+        with _run_store_lock:
+            stored_parent = _run_store.get(run_id)
+            if stored_parent is not None and stored_parent.get("status") == "running":
+                stored_parent["stop_requested"] = True
+
+    log_event(
+        logger, "draw_session_created",
+        run_id=run_id, draw_id=draw_id, card_count=card_count, groups=len(group_ids),
+    )
+
+    return {
+        "draw_id": draw_id,
+        "status": "running",
+        "parent_run_id": run_id,
+        "source_checkpoint_id": checkpoint_id,
+        "group_ids": group_ids,
+        "card_run_ids": card_run_ids,
+    }
+
+
+def _fold_draw_overlay(draw_id: str) -> dict[str, dict]:
+    """Fold a draw session's events into a per-run overlay map.
+
+    Tracks (later events override earlier):
+    - ``favorite`` (event "favorite" -> bool(value))
+    - ``eliminated`` (event "eliminate"/"draw_card_eliminated" -> bool(value, default True);
+      an "eliminate" with value False clears it)
+    - ``tags`` (event "tag" -> union of any ``tags`` list on the event)
+    """
+    overlay: dict[str, dict] = {}
+    for ev in load_session_events(draw_id, root=_DRAW_SESSIONS_ROOT):
+        run_id = ev.get("run_id")
+        if not run_id:
+            continue
+        cur = overlay.setdefault(run_id, {})
+        etype = ev.get("event")
+        if etype == "favorite":
+            cur["favorite"] = bool(ev.get("value"))
+        elif etype in ("eliminate", "draw_card_eliminated"):
+            value = ev.get("value", True)
+            cur["eliminated"] = bool(value)
+        elif etype == "tag":
+            tags = ev.get("tags") or []
+            if tags:
+                existing = cur.get("tags") or []
+                merged = list(existing)
+                for t in tags:
+                    if t not in merged:
+                        merged.append(t)
+                cur["tags"] = merged
+    return overlay
+
+
+@router.get("/draw-sessions/{draw_id}")
+async def get_draw_session(draw_id: str) -> dict:
+    """Return a draw session's aggregated status + per-card details."""
+    record = load_session(draw_id, root=_DRAW_SESSIONS_ROOT)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"draw_id '{draw_id}' not found")
+
+    overlay = _fold_draw_overlay(draw_id)
+    index_records = load_run_index(path=_RUN_INDEX_PATH)
+
+    cards: list[dict] = []
+    with _run_store_lock:
+        for position, run_id in enumerate(record.card_run_ids):
+            ov = overlay.get(run_id, {})
+            idx_rec = index_records.get(run_id)
+            stored = _run_store.get(run_id)
+            if stored is not None:
+                lineage = stored.get("lineage") or {}
+                gid = stored.get("variant_group_id") or lineage.get("variant_group_id")
+                vi = stored.get("variant_index")
+                if vi is None:
+                    vi = lineage.get("variant_index", position)
+                status = stored.get("status") or "queued"
+                label = stored.get("variant_label") or "card"
+                qr = stored.get("quality_router") or {}
+                final_score = qr.get("final_score") if status == "completed" else None
+                current_score = qr.get("final_score") if status == "running" else None
+                error = stored.get("error") or None
+            elif idx_rec is not None:
+                gid = idx_rec.variant_group_id
+                vi = idx_rec.variant_index if idx_rec.variant_index is not None else position
+                status = idx_rec.status or "queued"
+                label = idx_rec.variant_label or "card"
+                final_score = idx_rec.final_score if status == "completed" else None
+                current_score = None
+                error = None
+            else:
+                gid = None
+                vi = position
+                status = "queued"
+                label = "card"
+                final_score = None
+                current_score = None
+                error = None
+
+            # Favorite: run-index OR overlay. Tags: overlay OR run-index OR [].
+            idx_favorite = bool(idx_rec.favorite) if idx_rec is not None else False
+            favorite = idx_favorite or bool(ov.get("favorite", False))
+            if "tags" in ov:
+                tags = ov["tags"]
+            elif idx_rec is not None and idx_rec.tags:
+                tags = list(idx_rec.tags)
+            else:
+                tags = []
+            replacement_of = idx_rec.replacement_of_run_id if idx_rec is not None else None
+
+            cards.append({
+                "card_id": run_id,
+                "run_id": run_id,
+                "group_id": gid,
+                "index": vi,
+                "status": status,
+                "label": label,
+                "strategy_label": label,
+                "final_score": final_score,
+                "current_score": current_score,
+                "thumbnail_url": f"/png-shader/runs/{run_id}/artifacts/selected_render",
+                "feedback": record.feedback,
+                "favorite": favorite,
+                "eliminated": bool(ov.get("eliminated", False)),
+                "tags": tags,
+                "replacement_of_run_id": replacement_of,
+                "can_use_for_fusion": status == "completed",
+                "error": error,
+            })
+
+    statuses = [c["status"] for c in cards]
+    completed_count = sum(1 for s in statuses if s == "completed")
+    failed_count = sum(1 for s in statuses if s == "failed")
+    running_count = sum(1 for s in statuses if s in ("running", "queued"))
+    status = aggregate_draw_status(statuses)
+
+    return {
+        "draw_id": record.draw_id,
+        "parent_run_id": record.parent_run_id,
+        "source_checkpoint_id": record.source_checkpoint_id,
+        "feedback": record.feedback,
+        "status": status,
+        "requested_count": record.requested_count,
+        "completed_count": completed_count,
+        "running_count": running_count,
+        "failed_count": failed_count,
+        "winner_run_id": record.winner_run_id,
+        "group_ids": record.group_ids,
+        "cards": cards,
+    }
+
+
+def _load_draw_session_or_404(draw_id: str) -> DrawSessionRecord:
+    record = load_session(draw_id, root=_DRAW_SESSIONS_ROOT)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"draw_id '{draw_id}' not found")
+    return record
+
+
+def _draw_parent_or_409(record: DrawSessionRecord) -> dict:
+    with _run_store_lock:
+        parent = _run_store.get(record.parent_run_id)
+    if parent is None:
+        raise HTTPException(status_code=409, detail="parent run no longer available")
+    return parent
+
+
+@router.post("/draw-sessions/{draw_id}/draw-more")
+async def draw_more(draw_id: str, payload: dict) -> dict:
+    """Append more cards to an existing draw session, inheriting its feedback,
+    locks, mode, and (by default) quality.
+
+    Body: { card_count?=4, diversity?, quality?={} }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    record = _load_draw_session_or_404(draw_id)
+    parent = _draw_parent_or_409(record)
+
+    card_count = int(payload.get("card_count") or 4)
+    if card_count < 2 or card_count > 12:
+        raise HTTPException(
+            status_code=422, detail=f"card_count must be between 2 and 12, got {card_count}"
+        )
+
+    quality = payload.get("quality")
+    if quality is None:
+        quality = record.metadata.get("quality") or {}
+    if not isinstance(quality, dict):
+        raise HTTPException(status_code=422, detail="quality must be an object")
+
+    feedback = record.feedback
+    mode = record.metadata.get("mode", "batch_draw")
+    request_locks = record.metadata.get("locks") or {}
+    diversity = str(payload.get("diversity") or record.diversity)
+    checkpoint_id = record.source_checkpoint_id
+
+    checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
+    _prevalidate_draw_quality(reference_path, quality)
+
+    new_group_ids: list[str] = []
+    new_card_ids: list[str] = []
+
+    def _commit(gid: str, cids: list[str]) -> None:
+        # After EACH successful group, persist progress so a mid-way failure
+        # still leaves a consistent record of what succeeded.
+        new_group_ids.append(gid)
+        new_card_ids.extend(cids)
+        record.group_ids.append(gid)
+        record.card_run_ids.extend(cids)
+        try:
+            save_session(record, root=_DRAW_SESSIONS_ROOT)
+        except Exception:
+            logger.warning("draw-more incremental save failed for draw_id=%s", draw_id, exc_info=True)
+
+    _create_draw_groups(
+        parent_run_id=record.parent_run_id,
+        root_run_id=record.root_run_id,
+        checkpoint=checkpoint,
+        checkpoint_id=checkpoint_id,
+        reference_path=reference_path,
+        feedback=feedback,
+        mode=mode,
+        diversity=diversity,
+        quality=quality,
+        request_locks=request_locks,
+        draw_id=draw_id,
+        card_count=card_count,
+        on_group=_commit,
+    )
+
+    record.status = "running"
+    record.updated_at = time()
+    try:
+        save_session(record, root=_DRAW_SESSIONS_ROOT)
+        append_session_event(
+            draw_id,
+            {"event": "draw_more_requested", "card_count": card_count,
+             "group_ids": new_group_ids, "card_run_ids": new_card_ids, "at": time()},
+            root=_DRAW_SESSIONS_ROOT,
+        )
+    except Exception:
+        logger.warning("draw-more persist failed for draw_id=%s", draw_id, exc_info=True)
+
+    log_event(logger, "draw_more", draw_id=draw_id, card_count=card_count, groups=len(new_group_ids))
+
+    return {
+        "draw_id": draw_id,
+        "status": "running",
+        "group_ids": new_group_ids,
+        "card_run_ids": new_card_ids,
+    }
+
+
+@router.post("/draw-sessions/{draw_id}/redraw")
+async def redraw_card(draw_id: str, payload: dict) -> dict:
+    """Replace one card with a single freshly-drawn card; auto-eliminate the
+    original (it is NOT deleted) and link the replacement back to it.
+
+    Body: { run_id (required, in record.card_run_ids), reason?, diversity?="medium" }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    record = _load_draw_session_or_404(draw_id)
+
+    target_run_id = payload.get("run_id")
+    if not target_run_id or target_run_id not in record.card_run_ids:
+        raise HTTPException(status_code=422, detail="run_id must be a card in this draw session")
+
+    parent = _draw_parent_or_409(record)
+    diversity = str(payload.get("diversity") or "medium")
+    feedback = record.feedback
+    mode = record.metadata.get("mode", "batch_draw")
+    request_locks = record.metadata.get("locks") or {}
+    quality = record.metadata.get("quality") or {}
+    checkpoint_id = record.source_checkpoint_id
+
+    checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
+    _prevalidate_draw_quality(reference_path, quality)
+
+    # Build a ONE-element strategies list.
+    strategies = build_variant_strategies(
+        feedback=feedback, count=2, diversity=diversity, mode=mode,
+    )[:1]
+    for s in strategies:
+        s["locks"] = {**(s.get("locks") or {}), **request_locks}
+
+    gid, cids = _create_variant_group(
+        parent_run_id=record.parent_run_id,
+        root_run_id=record.root_run_id,
+        checkpoint=checkpoint,
+        checkpoint_id=checkpoint_id,
+        reference_path=reference_path,
+        feedback=feedback,
+        mode=mode,
+        diversity=diversity,
+        strategies=strategies,
+        quality_overrides=quality,
+        draw_session_id=draw_id,
+    )
+    new_run_id = cids[0]
+
+    # Link replacement -> original (best-effort).
+    _index_updated(new_run_id, {"replacement_of_run_id": target_run_id})
+    with _run_store_lock:
+        stored_new = _run_store.get(new_run_id)
+        if stored_new is not None:
+            stored_new["replacement_of_run_id"] = target_run_id
+
+    record.group_ids.append(gid)
+    record.card_run_ids.extend(cids)
+    record.updated_at = time()
+    try:
+        save_session(record, root=_DRAW_SESSIONS_ROOT)
+        append_session_event(
+            draw_id,
+            {"event": "draw_card_eliminated", "run_id": target_run_id,
+             "value": True, "auto": True, "at": time()},
+            root=_DRAW_SESSIONS_ROOT,
+        )
+        append_session_event(
+            draw_id,
+            {"event": "draw_card_redrawn", "run_id": target_run_id,
+             "replacement_run_id": new_run_id, "reason": payload.get("reason"), "at": time()},
+            root=_DRAW_SESSIONS_ROOT,
+        )
+    except Exception:
+        logger.warning("redraw persist failed for draw_id=%s", draw_id, exc_info=True)
+
+    log_event(logger, "draw_card_redrawn", draw_id=draw_id, run_id=target_run_id,
+              replacement_run_id=new_run_id)
+
+    return {
+        "draw_id": draw_id,
+        "group_id": gid,
+        "replaced_run_id": target_run_id,
+        "replacement_run_id": new_run_id,
+    }
+
+
+@router.post("/draw-sessions/{draw_id}/cards/{run_id}/event")
+async def draw_card_event(draw_id: str, run_id: str, payload: dict) -> dict:
+    """Record a per-card review event (favorite/eliminate/tag/note/use_as_*).
+
+    Body: { event_type (required), value?, reason?, tags?=[] }
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="payload must be a JSON object")
+
+    record = _load_draw_session_or_404(draw_id)
+    if run_id not in record.card_run_ids:
+        raise HTTPException(status_code=422, detail="run_id must be a card in this draw session")
+
+    event_type = payload.get("event_type")
+    if event_type not in _DRAW_CARD_EVENT_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"event_type must be one of {sorted(_DRAW_CARD_EVENT_TYPES)}",
+        )
+
+    append_session_event(
+        draw_id,
+        {"event": event_type, "run_id": run_id, "value": payload.get("value"),
+         "reason": payload.get("reason"), "tags": payload.get("tags") or [], "at": time()},
+        root=_DRAW_SESSIONS_ROOT,
+    )
+
+    if event_type == "favorite":
+        favorite = bool(payload.get("value", True))
+        try:
+            update_run_metadata(run_id, {"favorite": favorite}, path=_RUN_INDEX_PATH)
+        except RunIndexError:
+            pass
+        except Exception:
+            logger.warning("draw favorite mirror failed for run_id=%s", run_id, exc_info=True)
+        with _run_store_lock:
+            stored = _run_store.get(run_id)
+            if stored is not None:
+                stored["favorite"] = favorite
+
+    log_event(logger, "draw_card_event", draw_id=draw_id, run_id=run_id, event_type=event_type)
+
+    return {"draw_id": draw_id, "run_id": run_id, "event_type": event_type, "ok": True}
 
 
 @router.post("/refine/{run_id}")
