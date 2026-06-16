@@ -559,3 +559,84 @@ def test_build_branch_tree_non_draw_session_node_has_none_draw_fields(tmp_path):
     assert child_node["draw_session_id"] is None
     assert child_node["draw_card_index"] is None
     assert child_node["replacement_of_run_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# V4.5 fusion lineage fields: RunLineageRecord, fold, and branch tree
+# ---------------------------------------------------------------------------
+
+
+def test_fusion_lineage_fields_survive_created_fold(tmp_path):
+    """A record with all three fusion lineage fields folds back correctly."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record(
+        "fusion-run-1",
+        fusion_id="fusion_abc123",
+        base_run_id="run_base",
+        source_run_ids=["run_src_a", "run_src_b"],
+    )
+    append_run_created(rec, path=idx)
+
+    index = load_run_index(path=idx)
+    assert "fusion-run-1" in index
+    r = index["fusion-run-1"]
+    assert r.fusion_id == "fusion_abc123"
+    assert r.base_run_id == "run_base"
+    assert r.source_run_ids == ["run_src_a", "run_src_b"]
+
+
+def test_fusion_lineage_defaults_when_absent(tmp_path):
+    """A plain record (no fusion fields) folds with None / empty list defaults."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record("plain-fusion-run")
+    append_run_created(rec, path=idx)
+
+    index = load_run_index(path=idx)
+    r = index["plain-fusion-run"]
+    assert r.fusion_id is None
+    assert r.base_run_id is None
+    assert r.source_run_ids == []
+
+
+def test_build_branch_tree_fusion_node_fields(tmp_path):
+    """build_branch_tree node for a fusion child surfaces all three fusion fields."""
+    idx = tmp_path / "idx.jsonl"
+    t = 6_000_000.0
+    root = _record("f-root", root_run_id="f-root", parent_run_id=None, created_at=t)
+    fusion_child = _record(
+        "f-child-1",
+        root_run_id="f-root",
+        parent_run_id="f-root",
+        created_at=t + 10,
+        fusion_id="fusion_abc123",
+        base_run_id="f-root",
+        source_run_ids=["run_src_a", "run_src_b"],
+    )
+    for rec in [root, fusion_child]:
+        append_run_created(rec, path=idx)
+
+    records = load_run_index(path=idx)
+    tree = build_branch_tree(records, "f-root")
+
+    child_node = next(c for c in tree["children"] if c["run_id"] == "f-child-1")
+    assert child_node["fusion_id"] == "fusion_abc123"
+    assert child_node["base_run_id"] == "f-root"
+    assert child_node["source_run_ids"] == ["run_src_a", "run_src_b"]
+
+
+def test_build_branch_tree_non_fusion_node_has_default_fusion_fields(tmp_path):
+    """build_branch_tree node for a non-fusion run has None / empty fusion fields."""
+    idx = tmp_path / "idx.jsonl"
+    t = 7_000_000.0
+    root = _record("nf-root", root_run_id="nf-root", parent_run_id=None, created_at=t)
+    child = _record("nf-child", root_run_id="nf-root", parent_run_id="nf-root", created_at=t + 5)
+    for rec in [root, child]:
+        append_run_created(rec, path=idx)
+
+    records = load_run_index(path=idx)
+    tree = build_branch_tree(records, "nf-root")
+
+    child_node = next(c for c in tree["children"] if c["run_id"] == "nf-child")
+    assert child_node["fusion_id"] is None
+    assert child_node["base_run_id"] is None
+    assert child_node["source_run_ids"] == []

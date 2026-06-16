@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -40,6 +41,10 @@ def _isolate_run_index(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.routers.png_shader._PREFERENCES_ROOT",
         str(tmp_path / "prefs"),
+    )
+    monkeypatch.setattr(
+        "app.routers.png_shader._FUSIONS_ROOT",
+        str(tmp_path / "fusions_root"),
     )
 
 FastAPI = fastapi.FastAPI
@@ -3422,3 +3427,292 @@ def test_get_variant_group_preference_ranking_disabled(tmp_path, monkeypatch):
     v = body["variants"][0]
     assert v["recommended"] is False
     assert v["preference_score"] == 0.0
+
+
+# ===========================================================================
+# V4.5 fusion endpoints
+# ===========================================================================
+
+
+def _seed_fusion_run(tmp_path, run_id, *, with_render=True, with_glsl=True):
+    """Seed a run in _run_store with a run_dir, reference image, optional selected
+    GLSL, and an optional candidates/llm_0_render.png render PNG (mirrors the
+    region-mask render setup). Returns the run_dir Path."""
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (32, 32), (180, 80, 40, 255)).save(run_dir / "reference_input.png")
+    if with_render:
+        cands_dir = run_dir / "candidates"
+        cands_dir.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (32, 32), (40, 120, 200, 255)).save(cands_dir / "llm_0_render.png")
+    _run_store[run_id] = {
+        "run_id": run_id,
+        "status": "completed",
+        "run_dir": str(run_dir),
+        "selected_glsl": _BRANCH_GLSL if with_glsl else None,
+        "quality_router": {"final_score": 0.7},
+        "scoreboard": {
+            "selected_id": "llm_0",
+            "candidates": [{
+                "id": "llm_0",
+                "source": "llm",
+                "selected": True,
+                "previewable": True,
+                "compile_glsl": _BRANCH_GLSL,
+                "final_score": 0.7,
+            }],
+        },
+        "refinement_history": [],
+        "strategy": {"refinement_threshold": 0.8},
+        "stop_requested": False,
+        "strategy_revision": 1,
+    }
+    return run_dir
+
+
+def _fusion_body(base_run_id="run_base", source_run_id="run_src",
+                 *, region_geometry=None):
+    return {
+        "base_run_id": base_run_id,
+        "feedback": "blend the water reflection from the source into the base",
+        "source_run_ids": [source_run_id],
+        "regions": [{
+            "id": "region_water",
+            "label": "water",
+            "source_run_id": source_run_id,
+            "instruction": "borrow the crisp water reflection",
+            "geometry_type": "rect",
+            "geometry": region_geometry or {"x": 0.05, "y": 0.55, "w": 0.9, "h": 0.4},
+            "strength": 0.6,
+            "blend_mode": "soft",
+            "feather": 0.08,
+        }],
+    }
+
+
+def test_create_fusion_draft_200(tmp_path, monkeypatch):
+    """POST /fusions → 200 {fusion_id, status:"draft"}; plan persisted with
+    base/source/regions."""
+    from app.pipeline.fusion_plans import load_plan
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    fusions_root = str(tmp_path / "fusions_root")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+
+    client = _client()
+    resp = client.post("/png-shader/fusions", json=_fusion_body())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "draft"
+    fusion_id = body["fusion_id"]
+    assert fusion_id.startswith("fusion_")
+
+    record = load_plan(fusion_id, root=fusions_root)
+    assert record is not None
+    assert record.base_run_id == "run_base"
+    assert "run_src" in record.source_run_ids
+    assert len(record.regions) == 1
+    assert record.regions[0].id == "region_water"
+
+
+def test_create_fusion_source_missing_render_422(tmp_path, monkeypatch):
+    """A source run with no render → 422 naming that run_id."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src", with_render=False)
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+
+    client = _client()
+    resp = client.post("/png-shader/fusions", json=_fusion_body())
+    assert resp.status_code == 422, resp.text
+    assert "run_src" in resp.text
+
+
+def test_create_fusion_base_missing_glsl_422(tmp_path, monkeypatch):
+    """A base run lacking selected_glsl → 422."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base", with_glsl=False)
+    _seed_fusion_run(tmp_path, "run_src")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+
+    client = _client()
+    resp = client.post("/png-shader/fusions", json=_fusion_body())
+    assert resp.status_code == 422, resp.text
+
+
+def test_create_fusion_unknown_base_404(tmp_path, monkeypatch):
+    """Unknown base run → 404."""
+    _run_store.clear()
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+    client = _client()
+    resp = client.post("/png-shader/fusions",
+                       json=_fusion_body(base_run_id="ghost_base"))
+    assert resp.status_code == 404, resp.text
+
+
+def test_create_fusion_missing_base_run_id_422(tmp_path, monkeypatch):
+    """Missing base_run_id → 422."""
+    _run_store.clear()
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+    client = _client()
+    resp = client.post("/png-shader/fusions", json={"feedback": "x", "regions": []})
+    assert resp.status_code == 422, resp.text
+
+
+def test_create_fusion_out_of_bounds_region_422(tmp_path, monkeypatch):
+    """Out-of-bounds region rect → 422 with fusion_errors."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+
+    client = _client()
+    body = _fusion_body(region_geometry={"x": 0.8, "y": 0.0, "w": 0.5, "h": 0.5})
+    resp = client.post("/png-shader/fusions", json=body)
+    assert resp.status_code == 422, resp.text
+    assert "fusion_errors" in resp.json()["detail"]
+
+
+def test_get_fusion_status_shape(tmp_path, monkeypatch):
+    """GET /fusions/{id} → FusionStatus shape; composite_target_url null before composite."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+
+    client = _client()
+    fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
+
+    resp = client.get(f"/png-shader/fusions/{fusion_id}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["fusion_id"] == fusion_id
+    assert body["status"] == "draft"
+    assert body["base_run_id"] == "run_base"
+    assert "run_src" in body["source_run_ids"]
+    assert body["output_run_id"] is None
+    assert body["composite_target_url"] is None
+    assert isinstance(body["regions"], list) and len(body["regions"]) == 1
+
+
+def test_get_fusion_unknown_404(tmp_path, monkeypatch):
+    _run_store.clear()
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+    client = _client()
+    assert client.get("/png-shader/fusions/fusion_ghost").status_code == 404
+
+
+def test_composite_target_creates_png_and_url(tmp_path, monkeypatch):
+    """POST composite-target → 200 status "target_ready"; composite_target.png
+    written; GET now has composite_target_url; artifacts serves the PNG bytes."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    fusions_root = str(tmp_path / "fusions_root")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+
+    client = _client()
+    fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
+
+    resp = client.post(f"/png-shader/fusions/{fusion_id}/composite-target")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "target_ready"
+    assert body["composite_target_url"] == f"/png-shader/fusions/{fusion_id}/artifacts/composite_target"
+
+    composite_png = Path(fusions_root) / "fusions" / fusion_id / "composite_target.png"
+    assert composite_png.exists(), f"composite not written: {composite_png}"
+
+    # GET now reports the composite_target_url.
+    status = client.get(f"/png-shader/fusions/{fusion_id}").json()
+    assert status["composite_target_url"] == f"/png-shader/fusions/{fusion_id}/artifacts/composite_target"
+
+    # Artifacts endpoint serves the PNG bytes.
+    art = client.get(f"/png-shader/fusions/{fusion_id}/artifacts/composite_target")
+    assert art.status_code == 200, art.text
+    assert art.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_fusion_run_creates_child(tmp_path, monkeypatch):
+    """POST /fusions/{id}/run → 200 {output_run_id, status:"running"}; the output
+    run's run-index record has fusion_id/base_run_id/source_run_ids; base & source
+    runs unchanged; after the fake worker completes the output run reaches completed."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    fusions_root = str(tmp_path / "fusions_root")
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    captures: list[dict] = []
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline(captures),
+    )
+
+    client = _client()
+    fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
+    # composite target first (mirrors the real flow producing a target_ready plan).
+    client.post(f"/png-shader/fusions/{fusion_id}/composite-target")
+
+    resp = client.post(f"/png-shader/fusions/{fusion_id}/run", json={})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "running"
+    output_run_id = body["output_run_id"]
+    assert output_run_id.startswith("run_")
+
+    # Output run reaches completed (fake worker).
+    final = _wait_for_completion(client, output_run_id)
+    assert final["status"] == "completed"
+
+    # Run-index record carries fusion lineage fields.
+    from app.pipeline.run_index import load_run_index
+    records = load_run_index(path=idx)
+    assert output_run_id in records
+    rec = records[output_run_id]
+    assert rec.fusion_id == fusion_id
+    assert rec.base_run_id == "run_base"
+    assert "run_src" in rec.source_run_ids
+    assert rec.mode == "fusion"
+
+    # The fake pipeline received the fusion notes + directed_acceptance.
+    cap = next(c for c in captures if c["run_id"] == output_run_id)
+    assert cap["directed_acceptance"]["mode"] == "fusion"
+    assert cap["directed_acceptance"]["fusion_id"] == fusion_id
+    assert any("FUSION GOAL" in n for n in cap["human_feedback_notes"])
+
+    # Base & source runs are never overwritten.
+    assert _run_store["run_base"]["selected_glsl"] == _BRANCH_GLSL
+    assert _run_store["run_src"]["run_dir"].endswith("run_src")
+    assert _run_store["run_base"]["status"] == "completed"
+
+
+def test_fusion_run_unknown_404(tmp_path, monkeypatch):
+    _run_store.clear()
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+    client = _client()
+    assert client.post("/png-shader/fusions/fusion_ghost/run", json={}).status_code == 404
+
+
+def test_fusion_artifacts_traversal_422(tmp_path, monkeypatch):
+    """region_mask:../etc artifact id → 422 (bad region_id)."""
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+                        str(tmp_path / "fusions_root"))
+
+    client = _client()
+    fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
+    resp = client.get(f"/png-shader/fusions/{fusion_id}/artifacts/region_mask:../etc")
+    assert resp.status_code == 422, resp.text

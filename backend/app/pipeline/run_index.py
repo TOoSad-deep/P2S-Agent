@@ -85,6 +85,9 @@ class RunLineageRecord:
     draw_session_id: str | None = None
     draw_card_index: int | None = None
     replacement_of_run_id: str | None = None
+    fusion_id: str | None = None
+    base_run_id: str | None = None
+    source_run_ids: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +140,9 @@ def _dict_to_record(d: dict[str, Any]) -> RunLineageRecord:
         draw_session_id=d.get("draw_session_id"),
         draw_card_index=int(d["draw_card_index"]) if d.get("draw_card_index") is not None else None,
         replacement_of_run_id=d.get("replacement_of_run_id"),
+        fusion_id=d.get("fusion_id"),
+        base_run_id=d.get("base_run_id"),
+        source_run_ids=list(d.get("source_run_ids") or []),
     )
 
 
@@ -291,6 +297,9 @@ def build_branch_tree(
             "draw_session_id": rec.draw_session_id,
             "draw_card_index": rec.draw_card_index,
             "replacement_of_run_id": rec.replacement_of_run_id,
+            "fusion_id": rec.fusion_id,
+            "base_run_id": rec.base_run_id,
+            "source_run_ids": rec.source_run_ids,
             "children": children,
         }
 
