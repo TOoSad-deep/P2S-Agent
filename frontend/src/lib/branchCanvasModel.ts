@@ -58,6 +58,7 @@ export interface BuildBranchCanvasInput {
   statusesByRunId: Record<string, { status?: string; final_score?: number | null } | null>;
   collapsedRunIds: Set<string>;
   favoriteRunIds?: Set<string>;
+  collapsedGroupIds?: Set<string>;
 }
 
 export interface BuildBranchCanvasOutput {
@@ -140,6 +141,28 @@ function capTimeline(
   return entries.filter((e) => mustKeepIds.has(e.id) || fillIds.has(e.id));
 }
 
+// ─── Variant group helpers ───────────────────────────────────────────────────
+
+/**
+ * Aggregate status for a variant group from its member statuses.
+ * Rules:
+ *   - all "completed"            → "completed"
+ *   - any "running" or "queued"  → "running"
+ *   - any "completed" but not all → "partial_failed"
+ *   - else                       → "failed"
+ */
+function aggregateVariantStatus(statuses: string[]): string {
+  if (statuses.length === 0) return "failed";
+  const all = statuses;
+  const hasRunning = all.some((s) => s === "running" || s === "queued");
+  if (hasRunning) return "running";
+  const allCompleted = all.every((s) => s === "completed");
+  if (allCompleted) return "completed";
+  const anyCompleted = all.some((s) => s === "completed");
+  if (anyCompleted) return "partial_failed";
+  return "failed";
+}
+
 /**
  * Pure adapter: converts V2 branch/timeline/status data into React-Flow
  * canvas nodes/edges. All nodes get position {x:0,y:0} — layout is V2.1-3.
@@ -155,6 +178,7 @@ export function buildBranchCanvasModel(
     statusesByRunId,
     collapsedRunIds,
     favoriteRunIds = new Set(),
+    collapsedGroupIds = new Set(),
   } = input;
 
   if (branchTree === null) return { nodes: [], edges: [] };
@@ -162,7 +186,23 @@ export function buildBranchCanvasModel(
   const allTreeNodes = flattenTree(branchTree);
   const rootRunId = branchTree.run_id;
 
-  // ── Compute expandedRunIds ──────────────────────────────────────────────────
+  // ── Identify variant run_ids (those with a variant_group_id) ──────────────
+  const variantRunIds = new Set<string>();
+  // Map from group_id → ordered list of tree nodes (DFS order, first-encounter)
+  const variantGroupMap = new Map<string, BranchTreeNode[]>();
+  for (const node of allTreeNodes) {
+    if (node.variant_group_id) {
+      variantRunIds.add(node.run_id);
+      let members = variantGroupMap.get(node.variant_group_id);
+      if (!members) {
+        members = [];
+        variantGroupMap.set(node.variant_group_id, members);
+      }
+      members.push(node);
+    }
+  }
+
+  // ── Compute expandedRunIds (only non-variant runs participate) ─────────────
   // Priority: active first, then favorites in DFS order. Cap at MAX_EXPANDED_RUNS.
   // Then remove any id in collapsedRunIds (explicit collapse always wins).
   const candidateIds: string[] = [];
@@ -190,6 +230,15 @@ export function buildBranchCanvasModel(
   // key = "cp:{run_id}:{checkpoint_id}" → true
   const emittedCpNodeIds = new Set<string>();
 
+  // ── Track which run nodes were emitted as variant_group nodes ─────────────
+  // Maps run_id → "vg:{group_id}" for variant runs
+  const variantRunToGroupNodeId = new Map<string, string>();
+  for (const [groupId, members] of variantGroupMap) {
+    for (const m of members) {
+      variantRunToGroupNodeId.set(m.run_id, `vg:${groupId}`);
+    }
+  }
+
   const nodes: BranchCanvasNode[] = [];
   const edges: BranchCanvasEdge[] = [];
 
@@ -209,9 +258,13 @@ export function buildBranchCanvasModel(
     data: { relation: "timeline_next" },
   });
 
-  // ── Run nodes + checkpoint nodes (DFS order) ───────────────────────────────
+  // ── Regular run nodes + checkpoint nodes (DFS order, skipping variant runs) ─
   for (const treeNode of allTreeNodes) {
     const { run_id } = treeNode;
+
+    // Skip variant runs — they are handled in the variant group pass below
+    if (variantRunIds.has(run_id)) continue;
+
     const statusOverride = statusesByRunId[run_id];
     const status =
       statusOverride?.status ?? treeNode.status;
@@ -286,11 +339,112 @@ export function buildBranchCanvasModel(
     }
   }
 
-  // ── branch_from edges for non-root runs ────────────────────────────────────
+  // ── Variant group nodes + variant_run child nodes (in first-encounter order) ─
+  for (const [groupId, members] of variantGroupMap) {
+    // Take parent info from the first member (all share the same parent + source checkpoint)
+    const firstMember = members[0];
+    const parentRunId = firstMember.parent_run_id ?? null;
+    const sourceCheckpointId = firstMember.source_checkpoint_id ?? null;
+
+    // Aggregate status from member tree nodes
+    const memberStatuses = members.map((m) => {
+      const ov = statusesByRunId[m.run_id];
+      return ov?.status ?? m.status;
+    });
+    const groupStatus = aggregateVariantStatus(memberStatuses);
+
+    const isGroupCollapsed = collapsedGroupIds.has(groupId);
+    const groupNodeId = `vg:${groupId}`;
+
+    nodes.push({
+      id: groupNodeId,
+      type: "variant_group",
+      position: { x: 0, y: 0 },
+      data: {
+        type: "variant_group",
+        group_id: groupId,
+        label: `Variants (${members.length})`,
+        parent_run_id: parentRunId,
+        source_checkpoint_id: sourceCheckpointId,
+        status: groupStatus,
+        collapsed: isGroupCollapsed,
+      },
+    });
+
+    // branch_from edge: source = cp: node if emitted, else run: node
+    const cpNodeId =
+      sourceCheckpointId && parentRunId
+        ? `cp:${parentRunId}:${sourceCheckpointId}`
+        : null;
+
+    const groupSourceId =
+      cpNodeId && emittedCpNodeIds.has(cpNodeId)
+        ? cpNodeId
+        : parentRunId
+          ? `run:${parentRunId}`
+          : "input";
+
+    edges.push({
+      id: `vg-branch:${groupId}`,
+      source: groupSourceId,
+      target: groupNodeId,
+      data: { relation: "branch_from" },
+    });
+
+    // If not collapsed: emit variant_run child nodes + variant_child edges
+    if (!isGroupCollapsed) {
+      // Sort by variant_index then id for stable ordering
+      const sortedMembers = [...members].sort((a, b) => {
+        const ia = a.variant_index ?? 0;
+        const ib = b.variant_index ?? 0;
+        if (ia !== ib) return ia - ib;
+        return a.run_id < b.run_id ? -1 : a.run_id > b.run_id ? 1 : 0;
+      });
+
+      for (const member of sortedMembers) {
+        const { run_id: memberId } = member;
+        const memberStatusOverride = statusesByRunId[memberId];
+        const memberStatus = memberStatusOverride?.status ?? member.status;
+        const memberScore =
+          memberStatusOverride !== undefined && memberStatusOverride !== null && "final_score" in memberStatusOverride
+            ? (memberStatusOverride.final_score ?? null)
+            : (member.final_score ?? null);
+
+        nodes.push({
+          id: `run:${memberId}`,
+          type: "variant_run",
+          position: { x: 0, y: 0 },
+          data: {
+            type: "variant_run",
+            run_id: memberId,
+            variant_group_id: groupId,
+            variant_index: member.variant_index ?? null,
+            variant_label: member.variant_label ?? null,
+            label: member.variant_label ?? memberId.slice(-8),
+            status: memberStatus,
+            score: memberScore,
+            favorite: member.favorite ?? false,
+          },
+        });
+
+        edges.push({
+          id: `vc:${memberId}`,
+          source: groupNodeId,
+          target: `run:${memberId}`,
+          data: { relation: "variant_child" },
+        });
+      }
+    }
+  }
+
+  // ── branch_from edges for non-root, non-variant runs ──────────────────────
   for (const treeNode of allTreeNodes) {
     if (!treeNode.parent_run_id) continue; // root — no branch edge
+    if (variantRunIds.has(treeNode.run_id)) continue; // variant runs handled above
 
     const { run_id, parent_run_id, source_checkpoint_id } = treeNode;
+
+    // Parent might be a variant run (no cp nodes) — fallback to run: node always works
     const cpNodeId =
       source_checkpoint_id
         ? `cp:${parent_run_id}:${source_checkpoint_id}`

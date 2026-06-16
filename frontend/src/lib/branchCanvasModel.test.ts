@@ -24,6 +24,9 @@ function makeTreeNode(overrides: Partial<BranchTreeNode> & { run_id: string }): 
     completed_at: null,
     favorite: false,
     children: [],
+    variant_group_id: null,
+    variant_index: null,
+    variant_label: null,
     ...overrides,
   };
 }
@@ -563,5 +566,230 @@ describe("buildBranchCanvasModel", () => {
     const runNode = out.nodes.find((n) => n.id === `run:${ROOT_ID}`);
     expect(runNode!.data.status).toBe("completed");
     expect(runNode!.data.score).toBe(0.99);
+  });
+
+  // ─── V3 Variant Group tests ───────────────────────────────────────────────
+
+  // ── V3-1. Two sibling variant runs → one vg: node + two variant_run nodes ──
+  it("groups two sibling variant runs into a vg: node and emits variant_run children (expanded)", () => {
+    const GROUP_ID = "grp-001";
+    const VAR_A = "run-var-aaaa";
+    const VAR_B = "run-var-bbbb";
+
+    const varA = makeTreeNode({
+      run_id: VAR_A,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      source_checkpoint_id: null,
+      variant_group_id: GROUP_ID,
+      variant_index: 0,
+      variant_label: "Variant A",
+      status: "completed",
+    });
+    const varB = makeTreeNode({
+      run_id: VAR_B,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      source_checkpoint_id: null,
+      variant_group_id: GROUP_ID,
+      variant_index: 1,
+      variant_label: "Variant B",
+      status: "completed",
+    });
+
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [varA, varB] });
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+
+    // Must have a vg: node
+    const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
+    expect(vgNode).toBeDefined();
+    expect(vgNode!.type).toBe("variant_group");
+    expect(vgNode!.data.label).toBe("Variants (2)");
+    expect(vgNode!.data.group_id).toBe(GROUP_ID);
+
+    // Must NOT have regular run: nodes for the two variant runs
+    expect(out.nodes.find((n) => n.id === `run:${VAR_A}` && n.type === "run")).toBeUndefined();
+    expect(out.nodes.find((n) => n.id === `run:${VAR_B}` && n.type === "run")).toBeUndefined();
+
+    // Must have variant_run nodes using run: prefix
+    const vrA = out.nodes.find((n) => n.id === `run:${VAR_A}`);
+    const vrB = out.nodes.find((n) => n.id === `run:${VAR_B}`);
+    expect(vrA).toBeDefined();
+    expect(vrA!.type).toBe("variant_run");
+    expect(vrA!.data.variant_group_id).toBe(GROUP_ID);
+    expect(vrB).toBeDefined();
+    expect(vrB!.type).toBe("variant_run");
+
+    // Must have a branch_from edge to the vg: node
+    const branchEdge = out.edges.find((e) => e.id === `vg-branch:${GROUP_ID}`);
+    expect(branchEdge).toBeDefined();
+    expect(branchEdge!.target).toBe(`vg:${GROUP_ID}`);
+    expect(branchEdge!.data?.relation).toBe("branch_from");
+
+    // Must have variant_child edges
+    const vcA = out.edges.find((e) => e.id === `vc:${VAR_A}`);
+    const vcB = out.edges.find((e) => e.id === `vc:${VAR_B}`);
+    expect(vcA).toBeDefined();
+    expect(vcA!.source).toBe(`vg:${GROUP_ID}`);
+    expect(vcA!.target).toBe(`run:${VAR_A}`);
+    expect(vcA!.data?.relation).toBe("variant_child");
+    expect(vcB).toBeDefined();
+  });
+
+  // ── V3-2. collapsedGroupIds → only vg: node, no variant_run nodes/edges ───
+  it("collapses a variant group when its group_id is in collapsedGroupIds", () => {
+    const GROUP_ID = "grp-002";
+    const VAR_A = "run-var-cccc";
+    const VAR_B = "run-var-dddd";
+
+    const varA = makeTreeNode({
+      run_id: VAR_A,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      variant_group_id: GROUP_ID,
+      variant_index: 0,
+    });
+    const varB = makeTreeNode({
+      run_id: VAR_B,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      variant_group_id: GROUP_ID,
+      variant_index: 1,
+    });
+
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [varA, varB] });
+    const out = buildBranchCanvasModel(
+      baseInput({ branchTree: tree, collapsedGroupIds: new Set([GROUP_ID]) }),
+    );
+
+    // vg: node is present
+    const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
+    expect(vgNode).toBeDefined();
+    expect(vgNode!.data.collapsed).toBe(true);
+
+    // No variant_run nodes
+    expect(out.nodes.find((n) => n.id === `run:${VAR_A}`)).toBeUndefined();
+    expect(out.nodes.find((n) => n.id === `run:${VAR_B}`)).toBeUndefined();
+
+    // No variant_child edges
+    expect(out.edges.find((e) => e.id === `vc:${VAR_A}`)).toBeUndefined();
+    expect(out.edges.find((e) => e.id === `vc:${VAR_B}`)).toBeUndefined();
+  });
+
+  // ── V3-3. Non-variant child still emits a regular run node ─────────────────
+  it("still emits a regular run node for a non-variant child", () => {
+    const REGULAR_CHILD = "run-child-regular";
+    const child = makeTreeNode({
+      run_id: REGULAR_CHILD,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+    });
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [child] });
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+
+    const runNode = out.nodes.find((n) => n.id === `run:${REGULAR_CHILD}`);
+    expect(runNode).toBeDefined();
+    expect(runNode!.type).toBe("run");
+
+    const branchEdge = out.edges.find((e) => e.id === `branch:${REGULAR_CHILD}`);
+    expect(branchEdge).toBeDefined();
+    expect(branchEdge!.target).toBe(`run:${REGULAR_CHILD}`);
+  });
+
+  // ── V3-4. Descendant of a variant run gets fallback branch_from edge ────────
+  it("emits a branch_from edge from run:{winnerId} for a child of a variant run", () => {
+    const GROUP_ID = "grp-003";
+    const WINNER_ID = "run-var-winner";
+    const CONTINUE_ID = "run-continue-from-winner";
+
+    const varWinner = makeTreeNode({
+      run_id: WINNER_ID,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      variant_group_id: GROUP_ID,
+      variant_index: 0,
+      status: "completed",
+    });
+
+    // A regular child of the winner variant run
+    const continueRun = makeTreeNode({
+      run_id: CONTINUE_ID,
+      root_run_id: ROOT_ID,
+      parent_run_id: WINNER_ID,
+      source_checkpoint_id: "cp-winner-final",
+    });
+
+    // Attach continueRun as child of varWinner
+    varWinner.children = [continueRun];
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [varWinner] });
+
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+
+    // continue run must be a regular run node
+    const runNode = out.nodes.find((n) => n.id === `run:${CONTINUE_ID}`);
+    expect(runNode).toBeDefined();
+    expect(runNode!.type).toBe("run");
+
+    // branch_from edge must fall back to run:{WINNER_ID} (no cp: nodes for variant runs)
+    const branchEdge = out.edges.find((e) => e.id === `branch:${CONTINUE_ID}`);
+    expect(branchEdge).toBeDefined();
+    expect(branchEdge!.source).toBe(`run:${WINNER_ID}`);
+    expect(branchEdge!.target).toBe(`run:${CONTINUE_ID}`);
+    expect(branchEdge!.data?.relation).toBe("branch_from");
+  });
+
+  // ── V3-5. Group status aggregate rules ────────────────────────────────────
+  it("aggregates variant group status: [completed, completed] → completed", () => {
+    const GROUP_ID = "grp-status-all-done";
+    const VA = "run-var-s1";
+    const VB = "run-var-s2";
+
+    const tree = makeTreeNode({
+      run_id: ROOT_ID,
+      children: [
+        makeTreeNode({ run_id: VA, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 0, status: "completed" }),
+        makeTreeNode({ run_id: VB, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 1, status: "completed" }),
+      ],
+    });
+
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+    const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
+    expect(vgNode!.data.status).toBe("completed");
+  });
+
+  it("aggregates variant group status: [completed, running] → running", () => {
+    const GROUP_ID = "grp-status-running";
+    const VA = "run-var-r1";
+    const VB = "run-var-r2";
+
+    const tree = makeTreeNode({
+      run_id: ROOT_ID,
+      children: [
+        makeTreeNode({ run_id: VA, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 0, status: "completed" }),
+        makeTreeNode({ run_id: VB, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 1, status: "running" }),
+      ],
+    });
+
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+    const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
+    expect(vgNode!.data.status).toBe("running");
+  });
+
+  it("aggregates variant group status: [completed, failed] → partial_failed", () => {
+    const GROUP_ID = "grp-status-partial";
+    const VA = "run-var-p1";
+    const VB = "run-var-p2";
+
+    const tree = makeTreeNode({
+      run_id: ROOT_ID,
+      children: [
+        makeTreeNode({ run_id: VA, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 0, status: "completed" }),
+        makeTreeNode({ run_id: VB, root_run_id: ROOT_ID, parent_run_id: ROOT_ID, variant_group_id: GROUP_ID, variant_index: 1, status: "failed" }),
+      ],
+    });
+
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+    const vgNode = out.nodes.find((n) => n.id === `vg:${GROUP_ID}`);
+    expect(vgNode!.data.status).toBe("partial_failed");
   });
 });

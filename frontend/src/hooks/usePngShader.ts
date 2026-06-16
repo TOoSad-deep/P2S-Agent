@@ -209,6 +209,9 @@ export interface BranchTreeNode {
   completed_at?: number | null;
   favorite?: boolean;
   children: BranchTreeNode[];
+  variant_group_id?: string | null;
+  variant_index?: number | null;
+  variant_label?: string | null;
 }
 
 export interface BranchTreeResponse {

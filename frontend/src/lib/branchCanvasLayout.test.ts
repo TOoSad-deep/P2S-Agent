@@ -59,6 +59,55 @@ function makeInputNode(): BranchCanvasNode {
 const NO_EDGES: BranchCanvasEdge[] = [];
 const NO_OVERRIDES: Record<string, { x: number; y: number }> = {};
 
+// ─── V3 variant node fixtures ────────────────────────────────────────────────
+
+function makeVariantGroupNode(
+  groupId: string,
+  parentRunId: string | null,
+  overrides: Partial<BranchCanvasNode> = {},
+): BranchCanvasNode {
+  return {
+    id: `vg:${groupId}`,
+    type: "variant_group",
+    position: { x: 0, y: 0 },
+    data: {
+      type: "variant_group",
+      label: "Variants (2)",
+      group_id: groupId,
+      parent_run_id: parentRunId,
+      source_checkpoint_id: null,
+      status: "completed",
+      collapsed: false,
+    },
+    ...overrides,
+  };
+}
+
+function makeVariantRunNode(
+  runId: string,
+  groupId: string,
+  variantIndex: number,
+  overrides: Partial<BranchCanvasNode> = {},
+): BranchCanvasNode {
+  return {
+    id: `run:${runId}`,
+    type: "variant_run",
+    position: { x: 0, y: 0 },
+    data: {
+      type: "variant_run",
+      label: runId,
+      run_id: runId,
+      variant_group_id: groupId,
+      variant_index: variantIndex,
+      variant_label: null,
+      status: "completed",
+      score: null,
+      favorite: false,
+    },
+    ...overrides,
+  };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("layoutBranchCanvas", () => {
@@ -360,5 +409,139 @@ describe("layoutBranchCanvas", () => {
       makeRunNode("B", "A"),
     ];
     expect(() => layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES)).not.toThrow();
+  });
+
+  // ─── V3 variant group layout tests ────────────────────────────────────────
+
+  // ── V3-L1. variant_group node placed one COLUMN_WIDTH right of parent run ──
+  it("places a variant_group node one COLUMN_WIDTH right of its parent run, same y", () => {
+    const ROOT = "root-vg-001";
+    const GROUP_ID = "grp-layout-001";
+    const VAR_A = "var-a-001";
+    const VAR_B = "var-b-001";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeVariantGroupNode(GROUP_ID, ROOT),
+      makeVariantRunNode(VAR_A, GROUP_ID, 0),
+      makeVariantRunNode(VAR_B, GROUP_ID, 1),
+    ];
+
+    const result = layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES);
+
+    const rootNode = result.find((n) => n.id === `run:${ROOT}`)!;
+    const vgNode = result.find((n) => n.id === `vg:${GROUP_ID}`)!;
+
+    expect(vgNode).toBeDefined();
+    // One column right of parent run
+    expect(vgNode.position.x).toBe(rootNode.position.x + COLUMN_WIDTH);
+    // Same y as parent run
+    expect(vgNode.position.y).toBe(rootNode.position.y);
+  });
+
+  // ── V3-L2. variant_run nodes stacked right of group, separated by ROW_HEIGHT
+  it("places variant_run nodes one COLUMN_WIDTH right of group, stacked by ROW_HEIGHT", () => {
+    const ROOT = "root-vg-002";
+    const GROUP_ID = "grp-layout-002";
+    const VAR_A = "var-a-002";
+    const VAR_B = "var-b-002";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeVariantGroupNode(GROUP_ID, ROOT),
+      makeVariantRunNode(VAR_A, GROUP_ID, 0),
+      makeVariantRunNode(VAR_B, GROUP_ID, 1),
+    ];
+
+    const result = layoutBranchCanvas(nodes, NO_EDGES, NO_OVERRIDES);
+
+    const vgNode = result.find((n) => n.id === `vg:${GROUP_ID}`)!;
+    const vrA = result.find((n) => n.id === `run:${VAR_A}`)!;
+    const vrB = result.find((n) => n.id === `run:${VAR_B}`)!;
+
+    // Both variant runs are COLUMN_WIDTH right of the group
+    expect(vrA.position.x).toBe(vgNode.position.x + COLUMN_WIDTH);
+    expect(vrB.position.x).toBe(vgNode.position.x + COLUMN_WIDTH);
+
+    // First at group.y + 0 * ROW_HEIGHT, second at group.y + 1 * ROW_HEIGHT
+    expect(vrA.position.y).toBe(vgNode.position.y + 0 * ROW_HEIGHT);
+    expect(vrB.position.y).toBe(vgNode.position.y + 1 * ROW_HEIGHT);
+
+    // Strictly increasing y
+    expect(vrB.position.y).toBeGreaterThan(vrA.position.y);
+  });
+
+  // ── V3-L3. layoutOverrides win for a variant_group node ───────────────────
+  it("applies layoutOverrides to variant_group nodes, overriding the computed position", () => {
+    const ROOT = "root-vg-003";
+    const GROUP_ID = "grp-layout-003";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeVariantGroupNode(GROUP_ID, ROOT),
+    ];
+
+    const overrides = { [`vg:${GROUP_ID}`]: { x: 1234, y: 5678 } };
+    const result = layoutBranchCanvas(nodes, NO_EDGES, overrides);
+
+    const vgNode = result.find((n) => n.id === `vg:${GROUP_ID}`)!;
+    expect(vgNode.position).toEqual({ x: 1234, y: 5678 });
+  });
+
+  // ── V3-L4. layoutOverrides win for a variant_run node ─────────────────────
+  it("applies layoutOverrides to variant_run nodes", () => {
+    const ROOT = "root-vg-004";
+    const GROUP_ID = "grp-layout-004";
+    const VAR_A = "var-a-004";
+
+    const nodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeVariantGroupNode(GROUP_ID, ROOT),
+      makeVariantRunNode(VAR_A, GROUP_ID, 0),
+    ];
+
+    const overrides = { [`run:${VAR_A}`]: { x: 999, y: 888 } };
+    const result = layoutBranchCanvas(nodes, NO_EDGES, overrides);
+
+    const vrA = result.find((n) => n.id === `run:${VAR_A}`)!;
+    expect(vrA.position).toEqual({ x: 999, y: 888 });
+  });
+
+  // ── V3-L5. Run placement is not disturbed by variant nodes ────────────────
+  it("does not disturb regular run placement when variant nodes are present", () => {
+    const ROOT = "root-vg-005";
+    const CHILD = "child-vg-005";
+    const GROUP_ID = "grp-layout-005";
+    const VAR_A = "var-a-005";
+
+    // Build with only regular nodes first to get expected positions
+    const regularNodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeRunNode(CHILD, ROOT),
+    ];
+    const regularResult = layoutBranchCanvas(regularNodes, NO_EDGES, NO_OVERRIDES);
+    const expectedRoot = regularResult.find((n) => n.id === `run:${ROOT}`)!;
+    const expectedChild = regularResult.find((n) => n.id === `run:${CHILD}`)!;
+
+    // Now add variant nodes
+    const mixedNodes: BranchCanvasNode[] = [
+      makeInputNode(),
+      makeRunNode(ROOT),
+      makeRunNode(CHILD, ROOT),
+      makeVariantGroupNode(GROUP_ID, ROOT),
+      makeVariantRunNode(VAR_A, GROUP_ID, 0),
+    ];
+    const mixedResult = layoutBranchCanvas(mixedNodes, NO_EDGES, NO_OVERRIDES);
+
+    const rootPos = mixedResult.find((n) => n.id === `run:${ROOT}`)!;
+    const childPos = mixedResult.find((n) => n.id === `run:${CHILD}`)!;
+
+    expect(rootPos.position).toEqual(expectedRoot.position);
+    expect(childPos.position).toEqual(expectedChild.position);
   });
 });

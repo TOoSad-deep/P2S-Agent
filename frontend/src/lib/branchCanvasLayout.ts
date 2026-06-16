@@ -44,6 +44,8 @@ export function layoutBranchCanvas(
   const runNodes: BranchCanvasNode[] = [];
   // Map from run_id → ordered list of checkpoint nodes (preserving input order)
   const cpByRunId = new Map<string, BranchCanvasNode[]>();
+  const variantGroupNodes: BranchCanvasNode[] = [];
+  const variantRunNodes: BranchCanvasNode[] = [];
 
   for (const node of nodes) {
     const nodeType = (node.data as { type?: string }).type;
@@ -61,6 +63,10 @@ export function layoutBranchCanvas(
         }
         list.push(node);
       }
+    } else if (nodeType === "variant_group") {
+      variantGroupNodes.push(node);
+    } else if (nodeType === "variant_run") {
+      variantRunNodes.push(node);
     }
   }
 
@@ -146,6 +152,59 @@ export function layoutBranchCanvas(
       ...inputResult,
       position: { x: inputX, y: inputY },
     });
+  }
+
+  // ── 4b. Variant post-pass: place variant_group and variant_run nodes ───────
+  // Group nodes: one COLUMN_WIDTH right of their parent run.
+  for (const vgNode of variantGroupNodes) {
+    const parentRunId = (vgNode.data as { parent_run_id?: string | null }).parent_run_id;
+    const parentRunNodeId = parentRunId ? `run:${parentRunId}` : null;
+    const parentPos = parentRunNodeId ? computedPositions.get(parentRunNodeId) : null;
+    const gx = parentPos ? parentPos.x + COLUMN_WIDTH : 0;
+    const gy = parentPos ? parentPos.y : 0;
+    computedPositions.set(vgNode.id, { x: gx, y: gy });
+    const existing = resultMap.get(vgNode.id);
+    if (existing !== undefined) {
+      resultMap.set(vgNode.id, { ...existing, position: { x: gx, y: gy } });
+    }
+  }
+
+  // Variant run nodes: COLUMN_WIDTH right of their group, stacked by variant_index then id.
+  // Build a stable ordering within each group.
+  const variantRunsByGroup = new Map<string, BranchCanvasNode[]>();
+  for (const vrNode of variantRunNodes) {
+    const gid = (vrNode.data as { variant_group_id?: string | null }).variant_group_id;
+    if (!gid) continue;
+    let list = variantRunsByGroup.get(gid);
+    if (!list) {
+      list = [];
+      variantRunsByGroup.set(gid, list);
+    }
+    list.push(vrNode);
+  }
+
+  for (const [gid, members] of variantRunsByGroup) {
+    const groupNodeId = `vg:${gid}`;
+    const groupPos = computedPositions.get(groupNodeId);
+
+    // Sort by variant_index then id (stable)
+    const sorted = [...members].sort((a, b) => {
+      const ia = (a.data as { variant_index?: number | null }).variant_index ?? 0;
+      const ib = (b.data as { variant_index?: number | null }).variant_index ?? 0;
+      if (ia !== ib) return ia - ib;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+
+    for (let i = 0; i < sorted.length; i++) {
+      const vrNode = sorted[i];
+      const vx = groupPos ? groupPos.x + COLUMN_WIDTH : 0;
+      const vy = groupPos ? groupPos.y + i * ROW_HEIGHT : 0;
+      computedPositions.set(vrNode.id, { x: vx, y: vy });
+      const existing = resultMap.get(vrNode.id);
+      if (existing !== undefined) {
+        resultMap.set(vrNode.id, { ...existing, position: { x: vx, y: vy } });
+      }
+    }
   }
 
   // ── 5. Apply layoutOverrides (wins over everything) ───────────────────────
