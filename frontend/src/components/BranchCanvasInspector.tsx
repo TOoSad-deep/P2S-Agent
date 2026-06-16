@@ -20,6 +20,8 @@ import type {
 import { fmtScore } from "../lib/format";
 import DrawSessionInspector from "./DrawSessionInspector";
 import FineControlPanel, { DEFAULT_CONSTRAINT_SPEC, isMeaningfulConstraint } from "./FineControlPanel";
+import FusionBuilderPanel, { type FusionDraft, type FusionCandidate } from "./FusionBuilderPanel";
+import type { FusionStatus } from "../hooks/usePngShader";
 
 // ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
 
@@ -69,6 +71,14 @@ interface Props {
   onSelectDrawWinner?: (drawId: string, runId: string) => void;
   onStopDraw?: (drawId: string) => void;
   fusionEnabled?: boolean;
+  fusionDraft?: FusionDraft | null;
+  fusionStatus?: FusionStatus | null;
+  fusionCandidates?: FusionCandidate[];
+  fusionBaseImageUrl?: string | null;
+  onFusionDraftChange?: (next: FusionDraft) => void;
+  onCreateFusion?: () => void;
+  onComposite?: () => void;
+  onRunFusion?: () => void;
   submitError?: string | null;
   disabled?: boolean;
   // V4.2 region canvas overlay
@@ -1101,6 +1111,14 @@ export default function BranchCanvasInspector({
   onSelectDrawWinner,
   onStopDraw,
   fusionEnabled,
+  fusionDraft,
+  fusionStatus,
+  fusionCandidates,
+  fusionBaseImageUrl,
+  onFusionDraftChange,
+  onCreateFusion,
+  onComposite,
+  onRunFusion,
   disabled,
   submitError,
   onRegionsChange,
@@ -1248,5 +1266,26 @@ export default function BranchCanvasInspector({
     }
   };
 
-  return <PanelShell>{renderContent()}</PanelShell>;
+  return (
+    <PanelShell>
+      {renderContent()}
+      {/* V4.5 FusionBuilderPanel — always rendered when fusionDraft is active */}
+      {fusionDraft != null && onFusionDraftChange && onCreateFusion && onComposite && onRunFusion && (
+        <div className="border-t border-[var(--border-color)] pt-2.5 mt-1">
+          <FusionBuilderPanel
+            draft={fusionDraft}
+            candidates={fusionCandidates ?? []}
+            fusion={fusionStatus ?? null}
+            baseImageUrl={fusionBaseImageUrl}
+            onChange={onFusionDraftChange}
+            onCreate={onCreateFusion}
+            onComposite={onComposite}
+            onRun={onRunFusion}
+            onPreviewRun={onSwitchRun}
+            disabled={disabled}
+          />
+        </div>
+      )}
+    </PanelShell>
+  );
 }

@@ -20,7 +20,10 @@ import type {
   RedrawCardResponse,
   DrawCardEventType,
   RegionConstraint,
+  FusionStatus,
+  CreateFusionRequest,
 } from "../hooks/usePngShader";
+import type { FusionDraft } from "./FusionBuilderPanel";
 import {
   buildBranchCanvasModel,
   buildDrawSessionModel,
@@ -53,6 +56,10 @@ interface Props {
   drawMore: (drawId: string, request: DrawMoreRequest) => Promise<DrawMoreResponse | null>;
   redrawCard: (drawId: string, runId: string, opts?: { reason?: string; diversity?: string }) => Promise<RedrawCardResponse | null>;
   cardEvent: (drawId: string, runId: string, eventType: DrawCardEventType, opts?: { value?: unknown; reason?: string; tags?: string[] }) => Promise<void>;
+  createFusion: (request: CreateFusionRequest) => Promise<{ fusion_id: string; status: string } | null>;
+  fetchFusion: (fusionId: string) => Promise<FusionStatus>;
+  generateCompositeTarget: (fusionId: string) => Promise<FusionStatus | null>;
+  runFusion: (fusionId: string, body?: { quality?: Record<string, unknown>; directed_acceptance?: Record<string, unknown> }) => Promise<{ fusion_id: string; status: string; output_run_id: string } | null>;
   // optional preview callback (wired by parent if desired)
   onPreviewNode?: (node: BranchCanvasNode | null) => void;
   disabled?: boolean;
@@ -113,6 +120,10 @@ export default function BranchCanvasWorkspace({
   drawMore,
   redrawCard,
   cardEvent,
+  createFusion,
+  fetchFusion,
+  generateCompositeTarget,
+  runFusion,
   onPreviewNode,
   disabled,
 }: Props) {
@@ -133,6 +144,9 @@ export default function BranchCanvasWorkspace({
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [regionDraft, setRegionDraft] = useState<{ anchorNodeId: string; regions: RegionConstraint[] } | null>(null);
+  const [fusionDraft, setFusionDraft] = useState<FusionDraft | null>(null);
+  const [activeFusionId, setActiveFusionId] = useState<string | null>(null);
+  const [fusionStatus, setFusionStatus] = useState<FusionStatus | null>(null);
 
   // ── runId ref: kept in sync so async callbacks read the latest value ──────
   const runIdRef = useRef(runId);
@@ -459,6 +473,85 @@ export default function BranchCanvasWorkspace({
     [],
   );
 
+  // ── Fusion handlers (V4.5) ─────────────────────────────────────────────────
+
+  const handleUseAsBase = useCallback(
+    (runId: string) => {
+      setFusionDraft((prev) =>
+        prev
+          ? { ...prev, base_run_id: runId }
+          : {
+              base_run_id: runId,
+              draw_session_id: drawSession?.draw_id ?? null,
+              feedback: "",
+              regions: [],
+            },
+      );
+    },
+    [drawSession],
+  );
+
+  const handleUseRegion = useCallback(
+    (runId: string) => {
+      setFusionDraft((prev) => {
+        const base = prev ?? {
+          base_run_id: null,
+          draw_session_id: drawSession?.draw_id ?? null,
+          feedback: "",
+          regions: [],
+        };
+        const n = base.regions.length;
+        const newRegion = {
+          id: `region_${n}_${Date.now().toString(36)}`,
+          label: `Region ${n + 1}`,
+          source_run_id: runId,
+          instruction: "",
+          geometry_type: "rect" as const,
+          geometry: { x: 0.25, y: 0.25, w: 0.5, h: 0.5 },
+          strength: 0.5,
+          blend_mode: "soft" as const,
+          feather: 0.08,
+        };
+        return { ...base, regions: [...base.regions, newRegion] };
+      });
+    },
+    [drawSession],
+  );
+
+  const handleFusionDraftChange = useCallback((next: FusionDraft) => {
+    setFusionDraft(next);
+  }, []);
+
+  const handleCreateFusion = useCallback(async () => {
+    if (!fusionDraft?.base_run_id) return;
+    const r = await createFusion({
+      base_run_id: fusionDraft.base_run_id,
+      draw_session_id: fusionDraft.draw_session_id,
+      feedback: fusionDraft.feedback,
+      regions: fusionDraft.regions,
+    });
+    if (r) {
+      setActiveFusionId(r.fusion_id);
+      setFusionStatus(null);
+    }
+  }, [fusionDraft, createFusion]);
+
+  const handleComposite = useCallback(async () => {
+    if (!activeFusionId) return;
+    await generateCompositeTarget(activeFusionId);
+    fetchFusion(activeFusionId).then(setFusionStatus).catch(() => {});
+  }, [activeFusionId, generateCompositeTarget, fetchFusion]);
+
+  const handleRunFusion = useCallback(async () => {
+    if (!activeFusionId) return;
+    const r = await runFusion(activeFusionId);
+    if (r) {
+      switchRun(r.output_run_id);
+      fetchFusion(activeFusionId).then(setFusionStatus).catch(() => {});
+      if (runIdRef.current) fetchBranches(runIdRef.current).then(setBranchInfo).catch(() => {});
+    }
+  }, [activeFusionId, runFusion, switchRun, fetchFusion, fetchBranches]);
+
   // ── Variant exploration handlers ───────────────────────────────────────────
 
   const handleExploreVariants = useCallback(
@@ -540,10 +633,19 @@ export default function BranchCanvasWorkspace({
       eventType: DrawCardEventType,
       opts?: { value?: unknown; reason?: string; tags?: string[] },
     ) => {
+      // Intercept fusion-specific events before posting to backend
+      if (eventType === "use_as_fusion_base") {
+        handleUseAsBase(rid);
+        return;
+      }
+      if (eventType === "use_as_region_source") {
+        handleUseRegion(rid);
+        return;
+      }
       await cardEvent(drawId, rid, eventType, opts);
       fetchDrawSession(drawId).then(setDrawSession).catch(() => {});
     },
-    [cardEvent, fetchDrawSession],
+    [cardEvent, fetchDrawSession, handleUseAsBase, handleUseRegion],
   );
 
   const handlePreviewCard = useCallback(
@@ -629,6 +731,34 @@ export default function BranchCanvasWorkspace({
       if (timer) clearTimeout(timer);
     };
   }, [activeDrawId, fetchDrawSession, fetchBranches]);
+
+  // ── Fusion polling (2s, stops on terminal status) ─────────────────────────
+  useEffect(() => {
+    if (!activeFusionId) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const TERMINAL = new Set(["completed", "failed"]);
+    const poll = async () => {
+      if (!alive) return;
+      try {
+        const s = await fetchFusion(activeFusionId);
+        if (!alive) return;
+        setFusionStatus(s);
+        if (s.output_run_id && runIdRef.current) {
+          fetchBranches(runIdRef.current).then((b) => { if (alive) setBranchInfo(b); }).catch(() => {});
+        }
+        if (TERMINAL.has(s.status)) return; // stop polling
+      } catch {
+        // best-effort
+      }
+      timer = setTimeout(poll, 2000);
+    };
+    poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeFusionId, fetchFusion, fetchBranches]);
 
   // ── Placeholder when no run ────────────────────────────────────────────────
   if (!runId || !branchInfo) {
@@ -745,7 +875,25 @@ export default function BranchCanvasWorkspace({
             onContinueCard={handleContinueCard}
             onSelectDrawWinner={handleSelectDrawWinner}
             onStopDraw={handleStopDraw}
-            fusionEnabled={false}
+            fusionEnabled={true}
+            fusionDraft={fusionDraft}
+            fusionStatus={fusionStatus}
+            fusionCandidates={
+              drawSession?.cards?.map((c) => ({
+                run_id: c.run_id,
+                label: c.label,
+                thumbnail_url: c.thumbnail_url,
+              })) ?? []
+            }
+            fusionBaseImageUrl={
+              fusionDraft?.base_run_id
+                ? `/png-shader/runs/${fusionDraft.base_run_id}/artifacts/selected_render`
+                : null
+            }
+            onFusionDraftChange={handleFusionDraftChange}
+            onCreateFusion={handleCreateFusion}
+            onComposite={handleComposite}
+            onRunFusion={handleRunFusion}
             submitError={submitError}
             disabled={disabled}
             onRegionsChange={handleRegionsChange}

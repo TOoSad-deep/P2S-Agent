@@ -32,6 +32,8 @@ import type {
   RedrawCardResponse,
   DrawCardEventType,
   PreferenceProfile,
+  FusionStatus,
+  CreateFusionRequest,
 } from "../hooks/usePngShader";
 import StrategyControlPanel from "./StrategyControlPanel";
 import ModelSelectorPanel from "./ModelSelectorPanel";
@@ -81,6 +83,10 @@ interface Props {
   patchPreferenceProfile: (patch: Partial<Pick<PreferenceProfile, "enabled" | "default_locks" | "positive_preferences" | "negative_preferences" | "score_drop_tolerance_hint">>) => Promise<PreferenceProfile | null>;
   rebuildPreferences: () => Promise<PreferenceProfile | null>;
   clearPreferences: () => Promise<void>;
+  createFusion: (request: CreateFusionRequest) => Promise<{ fusion_id: string; status: string } | null>;
+  fetchFusion: (fusionId: string) => Promise<FusionStatus>;
+  generateCompositeTarget: (fusionId: string) => Promise<FusionStatus | null>;
+  runFusion: (fusionId: string, body?: { quality?: Record<string, unknown>; directed_acceptance?: Record<string, unknown> }) => Promise<{ fusion_id: string; status: string; output_run_id: string } | null>;
 }
 
 /** Mirror of backend list_checkpoints: candidates with GLSL, iteration
@@ -178,6 +184,10 @@ export default function PngShaderView({
   patchPreferenceProfile,
   rebuildPreferences,
   clearPreferences,
+  createFusion,
+  fetchFusion,
+  generateCompositeTarget,
+  runFusion,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
@@ -541,6 +551,10 @@ export default function PngShaderView({
                   drawMore={drawMore}
                   redrawCard={redrawCard}
                   cardEvent={cardEvent}
+                  createFusion={createFusion}
+                  fetchFusion={fetchFusion}
+                  generateCompositeTarget={generateCompositeTarget}
+                  runFusion={runFusion}
                   disabled={loading}
                 />
               ) : (

@@ -39,6 +39,10 @@ export default function App() {
     patchPreferenceProfile,
     rebuildPreferences,
     clearPreferences,
+    createFusion,
+    fetchFusion,
+    generateCompositeTarget,
+    runFusion,
   } = usePngShader()
 
   const models = useModels()
@@ -203,6 +207,10 @@ export default function App() {
           patchPreferenceProfile={patchPreferenceProfile}
           rebuildPreferences={rebuildPreferences}
           clearPreferences={clearPreferences}
+          createFusion={createFusion}
+          fetchFusion={fetchFusion}
+          generateCompositeTarget={generateCompositeTarget}
+          runFusion={runFusion}
         />
       </main>
 

@@ -1142,6 +1142,98 @@ export function usePngShader() {
     }
   }, []);
 
+  // ─── V4.5 Fusion API ─────────────────────────────────────────────────────────
+
+  const createFusion = useCallback(async (
+    request: CreateFusionRequest,
+  ): Promise<{ fusion_id: string; status: string } | null> => {
+    const requestId = makeRequestId("fusion-create");
+    logFrontendEvent("api_fusion_create", { request_id: requestId, base_run_id: request.base_run_id, region_count: request.regions.length });
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/fusions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify(request),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_fusion_create_failed", { request_id: requestId, status: response.status }, "warn");
+        setError(`Create fusion failed (${response.status}): ${text}`);
+        return null;
+      }
+      const data = await response.json();
+      return data as { fusion_id: string; status: string };
+    } catch (err) {
+      logFrontendEvent("api_fusion_create_error", { error: err instanceof Error ? err.message : String(err) }, "warn");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, []);
+
+  const fetchFusion = useCallback(async (fusionId: string): Promise<FusionStatus> => {
+    const requestId = makeRequestId("fusion-fetch");
+    const response = await fetch(`${API_BASE}/png-shader/fusions/${fusionId}`, {
+      headers: { "x-request-id": requestId },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      logFrontendEvent("api_fusion_fetch_failed", { request_id: requestId, fusion_id: fusionId, status: response.status }, "warn");
+      throw new Error(`Fusion fetch failed (${response.status}): ${text}`);
+    }
+    const data: FusionStatus = await response.json();
+    return data;
+  }, []);
+
+  const generateCompositeTarget = useCallback(async (fusionId: string): Promise<FusionStatus | null> => {
+    const requestId = makeRequestId("fusion-composite");
+    logFrontendEvent("api_fusion_composite", { request_id: requestId, fusion_id: fusionId });
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/fusions/${fusionId}/composite-target`, {
+        method: "POST",
+        headers: { "x-request-id": requestId },
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_fusion_composite_failed", { request_id: requestId, fusion_id: fusionId, status: response.status }, "warn");
+        setError(`Generate composite target failed (${response.status}): ${text}`);
+        return null;
+      }
+      const data: FusionStatus = await response.json();
+      return data;
+    } catch (err) {
+      logFrontendEvent("api_fusion_composite_error", { fusion_id: fusionId, error: err instanceof Error ? err.message : String(err) }, "warn");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, []);
+
+  const runFusion = useCallback(async (
+    fusionId: string,
+    body?: { quality?: Record<string, unknown>; directed_acceptance?: Record<string, unknown> },
+  ): Promise<{ fusion_id: string; status: string; output_run_id: string } | null> => {
+    const requestId = makeRequestId("fusion-run");
+    logFrontendEvent("api_fusion_run", { request_id: requestId, fusion_id: fusionId });
+    try {
+      const response = await fetch(`${API_BASE}/png-shader/fusions/${fusionId}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": requestId },
+        body: JSON.stringify(body ?? {}),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        logFrontendEvent("api_fusion_run_failed", { request_id: requestId, fusion_id: fusionId, status: response.status }, "warn");
+        setError(`Run fusion failed (${response.status}): ${text}`);
+        return null;
+      }
+      const data = await response.json();
+      return data as { fusion_id: string; status: string; output_run_id: string };
+    } catch (err) {
+      logFrontendEvent("api_fusion_run_error", { fusion_id: fusionId, error: err instanceof Error ? err.message : String(err) }, "warn");
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }, []);
+
   const clearResult = useCallback(() => {
     stopPolling();
     activeRunRef.current = null;
@@ -1191,6 +1283,10 @@ export function usePngShader() {
     rebuildPreferences,
     clearPreferences,
     postPreferenceEvent,
+    createFusion,
+    fetchFusion,
+    generateCompositeTarget,
+    runFusion,
   };
 }
 
@@ -1220,4 +1316,37 @@ export interface PreferenceEventInput {
   reason?: string | null;
   tags?: string[];
   context?: Record<string, unknown>;
+}
+
+// ─── V4.5 Fusion types ────────────────────────────────────────────────────────
+
+export interface FusionRegion {
+  id: string;
+  label: string;
+  source_run_id: string;
+  instruction: string;
+  geometry_type: "rect";
+  geometry: { x: number; y: number; w: number; h: number };
+  strength: number;
+  blend_mode: "soft" | "replace_target" | "protect_base";
+  feather: number;
+}
+
+export interface FusionStatus {
+  fusion_id: string;
+  status: "draft" | "target_ready" | "running" | "completed" | "failed";
+  base_run_id: string;
+  source_run_ids: string[];
+  output_run_id?: string | null;
+  composite_target_url?: string | null;
+  regions: FusionRegion[];
+  error?: string | null;
+}
+
+export interface CreateFusionRequest {
+  base_run_id: string;
+  draw_session_id?: string | null;
+  feedback?: string;
+  source_run_ids?: string[];
+  regions: FusionRegion[];
 }
