@@ -364,3 +364,102 @@ def test_multiple_appends_all_land(tmp_path):
 
     index = load_run_index(path=idx)
     assert len(index) == 10
+
+
+# ---------------------------------------------------------------------------
+# V3 variant fields: RunLineageRecord, fold, and build_branch_tree node
+# ---------------------------------------------------------------------------
+
+def test_variant_fields_survive_created_fold(tmp_path):
+    """A created record with variant fields folds back with all three preserved."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record(
+        "v-run-1",
+        variant_group_id="group_1",
+        variant_index=2,
+        variant_label="lighting_color",
+    )
+    append_run_created(rec, path=idx)
+
+    index = load_run_index(path=idx)
+    assert "v-run-1" in index
+    r = index["v-run-1"]
+    assert r.variant_group_id == "group_1"
+    assert r.variant_index == 2
+    assert r.variant_label == "lighting_color"
+
+
+def test_non_variant_record_folds_with_none_variant_fields(tmp_path):
+    """A record without variant fields folds with all three as None (back-compat)."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record("plain-run")
+    append_run_created(rec, path=idx)
+
+    index = load_run_index(path=idx)
+    assert "plain-run" in index
+    r = index["plain-run"]
+    assert r.variant_group_id is None
+    assert r.variant_index is None
+    assert r.variant_label is None
+
+
+def test_variant_fields_survive_updated_merge(tmp_path):
+    """An updated event carrying variant_group_id merges correctly."""
+    idx = tmp_path / "idx.jsonl"
+    rec = _record("v-run-2")
+    append_run_created(rec, path=idx)
+    append_run_updated(
+        "v-run-2",
+        {"variant_group_id": "group_x", "variant_index": 0, "variant_label": "baseline"},
+        path=idx,
+    )
+
+    index = load_run_index(path=idx)
+    r = index["v-run-2"]
+    assert r.variant_group_id == "group_x"
+    assert r.variant_index == 0
+    assert r.variant_label == "baseline"
+
+
+def test_build_branch_tree_variant_node_fields(tmp_path):
+    """build_branch_tree node for a variant child includes the three variant fields."""
+    idx = tmp_path / "idx.jsonl"
+    t = 2_000_000.0
+    root = _record("vroot", root_run_id="vroot", parent_run_id=None, created_at=t)
+    variant_child = _record(
+        "vchild-1",
+        root_run_id="vroot",
+        parent_run_id="vroot",
+        created_at=t + 10,
+        variant_group_id="group_1",
+        variant_index=2,
+        variant_label="lighting_color",
+    )
+    for rec in [root, variant_child]:
+        append_run_created(rec, path=idx)
+
+    records = load_run_index(path=idx)
+    tree = build_branch_tree(records, "vroot")
+
+    child_node = next(c for c in tree["children"] if c["run_id"] == "vchild-1")
+    assert child_node["variant_group_id"] == "group_1"
+    assert child_node["variant_index"] == 2
+    assert child_node["variant_label"] == "lighting_color"
+
+
+def test_build_branch_tree_non_variant_node_has_none_variant_fields(tmp_path):
+    """build_branch_tree node for a non-variant run has all three variant fields as None."""
+    idx = tmp_path / "idx.jsonl"
+    t = 3_000_000.0
+    root = _record("nvroot", root_run_id="nvroot", parent_run_id=None, created_at=t)
+    child = _record("nvchild", root_run_id="nvroot", parent_run_id="nvroot", created_at=t + 5)
+    for rec in [root, child]:
+        append_run_created(rec, path=idx)
+
+    records = load_run_index(path=idx)
+    tree = build_branch_tree(records, "nvroot")
+
+    child_node = next(c for c in tree["children"] if c["run_id"] == "nvchild")
+    assert child_node["variant_group_id"] is None
+    assert child_node["variant_index"] is None
+    assert child_node["variant_label"] is None

@@ -79,6 +79,9 @@ class RunLineageRecord:
     final_score: float | None = None
     favorite: bool = False
     tags: list[str] = field(default_factory=list)
+    variant_group_id: str | None = None
+    variant_index: int | None = None
+    variant_label: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +128,9 @@ def _dict_to_record(d: dict[str, Any]) -> RunLineageRecord:
         final_score=d.get("final_score"),
         favorite=bool(d.get("favorite", False)),
         tags=list(d.get("tags") or []),
+        variant_group_id=d.get("variant_group_id"),
+        variant_index=int(d["variant_index"]) if d.get("variant_index") is not None else None,
+        variant_label=d.get("variant_label"),
     )
 
 
@@ -273,6 +279,9 @@ def build_branch_tree(
             "created_at": rec.created_at,
             "completed_at": rec.completed_at,
             "favorite": rec.favorite,
+            "variant_group_id": rec.variant_group_id,
+            "variant_index": rec.variant_index,
+            "variant_label": rec.variant_label,
             "children": children,
         }
 
