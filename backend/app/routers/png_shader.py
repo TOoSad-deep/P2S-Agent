@@ -58,6 +58,13 @@ from app.pipeline.human_feedback import (
     build_human_feedback_notes,
     validate_feedback,
 )
+from app.pipeline.human_constraints import (
+    HumanConstraintSpec,
+    build_constraint_notes,
+    parse_constraint_spec,
+    spec_to_dict,
+    validate_constraint_spec,
+)
 from app.pipeline.input_spec import build_input_spec, validate_input_spec
 from app.pipeline.run_index import (
     RunIndexError,
@@ -632,6 +639,16 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     except FeedbackValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # Parse and validate optional structured constraints (V4.1).
+    _constraints_payload = payload.get("constraints")
+    _has_constraints = isinstance(_constraints_payload, dict) and bool(_constraints_payload)
+    _constraint_spec: HumanConstraintSpec | None = None
+    if _has_constraints:
+        _constraint_spec = parse_constraint_spec(_constraints_payload)
+        _constraint_errors = validate_constraint_spec(_constraint_spec)
+        if _constraint_errors:
+            raise HTTPException(status_code=422, detail={"constraint_errors": _constraint_errors})
+
     # Parent must have produced at least one branchable checkpoint.
     if not list_checkpoints(parent):
         raise HTTPException(
@@ -655,6 +672,9 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     notes = build_human_feedback_notes(
         feedback=feedback, mode=mode, locks=locks, checkpoint=checkpoint
     )
+    # V4.1: append constraint notes when constraints were supplied.
+    if _constraint_spec is not None:
+        notes += build_constraint_notes(_constraint_spec)
     parent_lineage = parent.get("lineage") or {}
     root_run_id = parent_lineage.get("root_run_id") or run_id
     lineage = {
@@ -711,6 +731,11 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         "human_feedback.txt": feedback,
         "directed_acceptance.json": directed_acceptance,
     }
+    # V4.1: add constraints artifacts when present.
+    if _constraint_spec is not None:
+        _constraint_dict = spec_to_dict(_constraint_spec)
+        extra_artifacts["constraints.json"] = _constraint_dict
+        directed_acceptance["constraints"] = _constraint_dict
 
     log_event(
         logger,
@@ -790,6 +815,7 @@ def _create_variant_group(
     strategies: list[dict],
     quality_overrides: dict,
     draw_session_id: "str | None" = None,
+    constraint_spec: "HumanConstraintSpec | None" = None,
 ) -> tuple[str, list[str]]:
     """Create one variant group: spawn N child runs (one per strategy), persist
     the VariantGroupRecord, append the 'created' event. Returns (group_id, child_run_ids).
@@ -823,6 +849,9 @@ def _create_variant_group(
             locks=strategy.get("locks") or {},
             checkpoint=checkpoint,
         ) + list(strategy.get("notes") or [])
+        # V4.1: append constraint notes when constraints were supplied.
+        if constraint_spec is not None:
+            notes += build_constraint_notes(constraint_spec)
 
         quality = dict(quality_overrides)
         quality["refinement_mode"] = "on"
@@ -861,6 +890,11 @@ def _create_variant_group(
             "directed_acceptance.json": directed_acceptance,
             "variant_strategy.json": strategy,
         }
+        # V4.1: add constraints artifacts when present.
+        if constraint_spec is not None:
+            _cspec_dict = spec_to_dict(constraint_spec)
+            extra_artifacts["constraints.json"] = _cspec_dict
+            directed_acceptance["constraints"] = _cspec_dict
 
         initial_result = {
             "run_id": child_run_id,
@@ -994,6 +1028,16 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     if not feedback or not feedback.strip():
         raise HTTPException(status_code=422, detail="feedback is required for explore-variants")
 
+    # Parse and validate optional structured constraints (V4.1).
+    _ev_constraints_payload = payload.get("constraints")
+    _ev_has_constraints = isinstance(_ev_constraints_payload, dict) and bool(_ev_constraints_payload)
+    _ev_constraint_spec: HumanConstraintSpec | None = None
+    if _ev_has_constraints:
+        _ev_constraint_spec = parse_constraint_spec(_ev_constraints_payload)
+        _ev_constraint_errors = validate_constraint_spec(_ev_constraint_spec)
+        if _ev_constraint_errors:
+            raise HTTPException(status_code=422, detail={"constraint_errors": _ev_constraint_errors})
+
     if not list_checkpoints(parent):
         raise HTTPException(status_code=409, detail="no branchable checkpoint yet")
 
@@ -1031,6 +1075,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
         diversity=diversity,
         strategies=strategies,
         quality_overrides=quality_overrides,
+        constraint_spec=_ev_constraint_spec,
     )
 
     if stop_parent:
@@ -1123,6 +1168,7 @@ def _create_draw_groups(
     draw_id: str,
     card_count: int,
     on_group=None,
+    constraint_spec: "HumanConstraintSpec | None" = None,
 ) -> tuple[list[str], list[str]]:
     """Plan *card_count* into batches and create one variant group per batch.
 
@@ -1152,6 +1198,7 @@ def _create_draw_groups(
             strategies=strategies,
             quality_overrides=quality,
             draw_session_id=draw_id,
+            constraint_spec=constraint_spec,
         )
         group_ids.append(gid)
         card_run_ids.extend(cids)
@@ -1195,7 +1242,17 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     mode = str(payload.get("mode") or "batch_draw")
     checkpoint_id_raw = payload.get("checkpoint_id")
     checkpoint_id = str(checkpoint_id_raw) if checkpoint_id_raw is not None else "final:selected"
-    request_locks = (payload.get("constraints") or {}).get("locks") or {}
+    _ds_constraints_payload = payload.get("constraints")
+    _ds_has_constraints = isinstance(_ds_constraints_payload, dict) and bool(_ds_constraints_payload)
+    request_locks = (_ds_constraints_payload or {}).get("locks") or {}
+
+    # Parse and validate optional structured constraints (V4.1).
+    _ds_constraint_spec: HumanConstraintSpec | None = None
+    if _ds_has_constraints:
+        _ds_constraint_spec = parse_constraint_spec(_ds_constraints_payload)
+        _ds_constraint_errors = validate_constraint_spec(_ds_constraint_spec)
+        if _ds_constraint_errors:
+            raise HTTPException(status_code=422, detail={"constraint_errors": _ds_constraint_errors})
 
     checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
     # Pre-validate ONCE up-front so a bad spec can't leave partial groups behind.
@@ -1217,6 +1274,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
         request_locks=request_locks,
         draw_id=draw_id,
         card_count=card_count,
+        constraint_spec=_ds_constraint_spec,
     )
 
     # Persist the session record + creation event best-effort (I/O must not 500).
@@ -1445,6 +1503,16 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
     diversity = str(payload.get("diversity") or record.diversity)
     checkpoint_id = record.source_checkpoint_id
 
+    # Parse and validate optional structured constraints from draw-more payload (V4.1).
+    _dm_constraints_payload = payload.get("constraints")
+    _dm_has_constraints = isinstance(_dm_constraints_payload, dict) and bool(_dm_constraints_payload)
+    _dm_constraint_spec: HumanConstraintSpec | None = None
+    if _dm_has_constraints:
+        _dm_constraint_spec = parse_constraint_spec(_dm_constraints_payload)
+        _dm_constraint_errors = validate_constraint_spec(_dm_constraint_spec)
+        if _dm_constraint_errors:
+            raise HTTPException(status_code=422, detail={"constraint_errors": _dm_constraint_errors})
+
     checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
     _prevalidate_draw_quality(reference_path, quality)
 
@@ -1477,6 +1545,7 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
         draw_id=draw_id,
         card_count=card_count,
         on_group=_commit,
+        constraint_spec=_dm_constraint_spec,
     )
 
     record.status = "running"

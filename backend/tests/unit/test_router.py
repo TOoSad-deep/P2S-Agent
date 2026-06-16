@@ -2568,3 +2568,201 @@ def test_draw_session_card_event_un_eliminate(tmp_path):
     body2 = client.get("/png-shader/draw-sessions/draw_ue").json()
     card2 = next(c for c in body2["cards"] if c["run_id"] == "c_ue")
     assert card2["eliminated"] is False, "card must not be eliminated after value=false event"
+
+
+# ---------------------------------------------------------------------------
+# V4.1 Structured Constraints — branch_refine + explore_variants + draw-session
+# ---------------------------------------------------------------------------
+
+_VALID_CONSTRAINTS = {
+    "locks": {"preserve_layout": True},
+    "targets": {"reflection": "increase"},
+    "edit_strength": 0.35,
+}
+
+
+def test_branch_refine_with_constraints_adds_notes_and_artifacts(tmp_path, monkeypatch):
+    """branch_refine WITH constraints → human_feedback_notes include [GLOBAL LOCK] and
+    [TARGET] notes; extra_artifacts contains constraints.json; directed_acceptance has
+    a 'constraints' key."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the reflection stronger",
+            "mode": "refine",
+            "constraints": _VALID_CONSTRAINTS,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    notes = captured["human_feedback_notes"]
+    assert any("[GLOBAL LOCK]" in n for n in notes), f"no [GLOBAL LOCK] note in {notes}"
+    assert any("[TARGET]" in n for n in notes), f"no [TARGET] note in {notes}"
+    assert any("[EDIT STRENGTH]" in n for n in notes), f"no [EDIT STRENGTH] note in {notes}"
+
+    artifacts = captured["extra_artifacts"]
+    assert "constraints.json" in artifacts, "constraints.json missing from extra_artifacts"
+    cj = artifacts["constraints.json"]
+    assert cj["locks"] == {"preserve_layout": True}
+    assert cj["targets"] == {"reflection": "increase"}
+    assert abs(cj["edit_strength"] - 0.35) < 1e-9
+
+    da = captured["directed_acceptance"]
+    assert "constraints" in da, "directed_acceptance missing 'constraints' key"
+    assert da["constraints"]["locks"] == {"preserve_layout": True}
+
+
+def test_branch_refine_without_constraints_unchanged(tmp_path, monkeypatch):
+    """branch_refine WITHOUT constraints → no [GLOBAL LOCK]/[TARGET]/[EDIT STRENGTH] notes;
+    no constraints.json artifact; no 'constraints' key in directed_acceptance
+    (proves backward compat)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the reflection stronger",
+            "mode": "refine",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    notes = captured["human_feedback_notes"]
+    assert not any("[GLOBAL LOCK]" in n for n in notes), "unexpected [GLOBAL LOCK] in notes"
+    assert not any("[TARGET]" in n for n in notes), "unexpected [TARGET] in notes"
+    assert not any("[EDIT STRENGTH]" in n for n in notes), "unexpected [EDIT STRENGTH] in notes"
+
+    artifacts = captured["extra_artifacts"]
+    assert "constraints.json" not in artifacts, "unexpected constraints.json in extra_artifacts"
+
+    da = captured["directed_acceptance"]
+    assert "constraints" not in da, "unexpected 'constraints' key in directed_acceptance"
+
+
+def test_branch_refine_invalid_constraints_returns_422(tmp_path):
+    """branch_refine with invalid constraints (edit_strength out of range) → 422
+    with constraint_errors."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make it brighter",
+            "mode": "refine",
+            "constraints": {"edit_strength": 1.5},
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert "constraint_errors" in body["detail"], f"expected constraint_errors in {body}"
+
+
+def test_explore_variants_with_constraints_each_child_has_notes_and_artifact(tmp_path, monkeypatch):
+    """explore_variants WITH constraints → each child's human_feedback_notes include
+    [GLOBAL LOCK] and constraints.json appears in each child's extra_artifacts."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captures: list[dict] = []
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline(captures),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={
+            "feedback": "add more warmth",
+            "variant_count": 2,
+            "constraints": _VALID_CONSTRAINTS,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    child_run_ids = resp.json()["child_run_ids"]
+    for cid in child_run_ids:
+        _wait_for_variant_completion(client, cid)
+
+    assert len(captures) == 2
+    for cap in captures:
+        notes = cap["human_feedback_notes"]
+        assert any("[GLOBAL LOCK]" in n for n in notes), f"missing [GLOBAL LOCK] in {notes}"
+        artifacts = cap["extra_artifacts"]
+        assert "constraints.json" in artifacts, "constraints.json missing from extra_artifacts"
+        assert artifacts["constraints.json"]["locks"] == {"preserve_layout": True}
+        da = cap["directed_acceptance"]
+        assert "constraints" in da, "directed_acceptance missing 'constraints'"
+
+
+def test_explore_variants_invalid_constraints_returns_422(tmp_path):
+    """explore_variants with invalid constraints → 422 with constraint_errors."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={
+            "feedback": "more depth",
+            "variant_count": 2,
+            "constraints": {"edit_strength": 2.0},
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert "constraint_errors" in resp.json()["detail"]
+
+
+def test_draw_session_create_with_constraints_children_carry_notes(tmp_path, monkeypatch):
+    """draw-session create WITH constraints → children carry [GLOBAL LOCK] notes
+    and constraints.json in extra_artifacts."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captures: list[dict] = []
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline(captures),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={
+            "feedback": "warmer palette",
+            "card_count": 2,
+            "constraints": _VALID_CONSTRAINTS,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    card_run_ids = resp.json()["card_run_ids"]
+    for cid in card_run_ids:
+        _wait_for_variant_completion(client, cid)
+
+    assert len(captures) == 2
+    for cap in captures:
+        notes = cap["human_feedback_notes"]
+        assert any("[GLOBAL LOCK]" in n for n in notes), f"missing [GLOBAL LOCK] in {notes}"
+        artifacts = cap["extra_artifacts"]
+        assert "constraints.json" in artifacts, "constraints.json missing"
+        assert artifacts["constraints.json"]["locks"] == {"preserve_layout": True}
+        da = cap["directed_acceptance"]
+        assert "constraints" in da, "directed_acceptance missing 'constraints'"
