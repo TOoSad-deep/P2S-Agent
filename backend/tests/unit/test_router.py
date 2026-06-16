@@ -23,7 +23,8 @@ from app.routers.png_shader import _run_store, router
 def _isolate_run_index(tmp_path, monkeypatch):
     """Redirect all run-index writes to a per-test temp file so the real
     backend/test_results/run_index.jsonl is never touched during tests.
-    Also redirect variant_groups writes to an isolated temp directory."""
+    Also redirect variant_groups, draw_sessions and preferences writes to
+    isolated temp directories."""
     monkeypatch.setattr(
         "app.routers.png_shader._RUN_INDEX_PATH",
         str(tmp_path / "run_index.jsonl"),
@@ -35,6 +36,10 @@ def _isolate_run_index(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.routers.png_shader._DRAW_SESSIONS_ROOT",
         str(tmp_path / "ds"),
+    )
+    monkeypatch.setattr(
+        "app.routers.png_shader._PREFERENCES_ROOT",
+        str(tmp_path / "prefs"),
     )
 
 FastAPI = fastapi.FastAPI
@@ -2945,3 +2950,199 @@ def test_region_mask_bad_strength_422(tmp_path):
     assert resp.status_code == 422, (
         f"Expected 422 for non-numeric strength, got {resp.status_code}: {resp.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# V4.3 Preference endpoints tests
+# ---------------------------------------------------------------------------
+
+
+def test_preference_profile_get_default(tmp_path):
+    """GET /preferences/profile when nothing is saved returns the default profile."""
+    client = _client()
+    resp = client.get("/png-shader/preferences/profile")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["schema_version"] == 1
+    assert body["enabled"] is True
+    assert body["positive_preferences"] == []
+    assert body["negative_preferences"] == []
+    assert body["summary_source_event_count"] == 0
+
+
+def test_preference_profile_patch_editable_fields(tmp_path, monkeypatch):
+    """PATCH editable fields persists; subsequent GET reflects the change."""
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    client = _client()
+
+    patch_body = {"enabled": False, "positive_preferences": ["x"]}
+    resp = client.patch("/png-shader/preferences/profile", json=patch_body)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["enabled"] is False
+    assert body["positive_preferences"] == ["x"]
+
+    # Subsequent GET should reflect the patch.
+    get_resp = client.get("/png-shader/preferences/profile")
+    assert get_resp.status_code == 200, get_resp.text
+    get_body = get_resp.json()
+    assert get_body["enabled"] is False
+    assert get_body["positive_preferences"] == ["x"]
+
+
+def test_preference_profile_patch_disallowed_key_422(tmp_path):
+    """PATCH with a disallowed key (schema_version) returns 422."""
+    client = _client()
+    resp = client.patch("/png-shader/preferences/profile", json={"schema_version": 2})
+    assert resp.status_code == 422, resp.text
+
+
+def test_preference_events_post_and_readable(tmp_path, monkeypatch):
+    """POST /preferences/events stores an event; load_preference_events shows it."""
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/preferences/events",
+        json={"event_type": "manual_note", "feedback": "looks great", "reason": "vivid colors"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    event_id = body["event_id"]
+    assert event_id.startswith("pref_")
+
+    # Verify via load_preference_events.
+    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    events = _load_pref_events(root=prefs_root)
+    assert len(events) == 1
+    assert events[0].event_id == event_id
+    assert events[0].event_type == "manual_note"
+    assert events[0].feedback == "looks great"
+
+
+def test_preference_rebuild_reflects_winner_event(tmp_path, monkeypatch):
+    """POST rebuild after a winner_selected event updates positive_preferences."""
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    client = _client()
+
+    # Post a winner_selected event with reason and tags.
+    post_resp = client.post(
+        "/png-shader/preferences/events",
+        json={
+            "event_type": "winner_selected",
+            "reason": "sharp edges",
+            "tags": ["clean", "minimal"],
+            "group_id": "g1",
+        },
+    )
+    assert post_resp.status_code == 200, post_resp.text
+
+    # Trigger rebuild.
+    rebuild_resp = client.post("/png-shader/preferences/rebuild")
+    assert rebuild_resp.status_code == 200, rebuild_resp.text
+    profile = rebuild_resp.json()
+
+    # positive_preferences should include reason and tags.
+    assert "sharp edges" in profile["positive_preferences"]
+    assert "clean" in profile["positive_preferences"]
+    assert "minimal" in profile["positive_preferences"]
+    assert profile["summary_source_event_count"] == 1
+
+
+def test_preference_clear_resets_events_and_profile(tmp_path, monkeypatch):
+    """POST /preferences/clear empties events and resets profile to defaults."""
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    client = _client()
+
+    # Add some data first.
+    client.post(
+        "/png-shader/preferences/events",
+        json={"event_type": "manual_note", "reason": "temporary"},
+    )
+    client.patch("/png-shader/preferences/profile", json={"enabled": False})
+
+    # Clear.
+    clear_resp = client.post("/png-shader/preferences/clear")
+    assert clear_resp.status_code == 200, clear_resp.text
+    assert clear_resp.json()["ok"] is True
+
+    # Events should be gone.
+    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    events = _load_pref_events(root=prefs_root)
+    assert events == []
+
+    # Profile should be default.
+    get_resp = client.get("/png-shader/preferences/profile")
+    profile = get_resp.json()
+    assert profile["enabled"] is True
+    assert profile["positive_preferences"] == []
+
+
+def test_variant_winner_mirrors_preference_event(tmp_path, monkeypatch):
+    """set_variant_winner also appends a winner_selected preference event."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    prefs_root = str(tmp_path / "prefs")
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+
+    children = [
+        {"run_id": "pw_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
+        {"run_id": "pw_b", "status": "completed", "variant_index": 1, "variant_label": "B"},
+    ]
+    _seed_group(vg_root, group_id="group_pref_win", children=children)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/variant-groups/group_pref_win/winner",
+        json={"winner_run_id": "pw_a", "reason": "best contrast"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # A preference event must have been appended.
+    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    events = _load_pref_events(root=prefs_root)
+    winner_evts = [e for e in events if e.event_type == "winner_selected"]
+    assert len(winner_evts) == 1
+    assert winner_evts[0].winner_run_id == "pw_a"
+    assert winner_evts[0].reason == "best contrast"
+    assert winner_evts[0].context.get("source") == "variant_winner"
+
+
+def test_rate_variant_mirrors_preference_event(tmp_path, monkeypatch):
+    """rate_variant with rating -1 appends a variant_rated preference event."""
+    _run_store.clear()
+    vg_root = str(tmp_path / "vg")
+    prefs_root = str(tmp_path / "prefs")
+    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+
+    children = [
+        {"run_id": "pr_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
+    ]
+    _seed_group(vg_root, group_id="group_pref_rate", children=children)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/variant-groups/group_pref_rate/ratings",
+        json={"run_id": "pr_a", "rating": -1, "reason": "too dark", "tags": ["dark"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # A preference event must have been appended.
+    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    events = _load_pref_events(root=prefs_root)
+    rated_evts = [e for e in events if e.event_type == "variant_rated"]
+    assert len(rated_evts) == 1
+    assert rated_evts[0].run_id == "pr_a"
+    assert rated_evts[0].rating == -1
+    assert rated_evts[0].reason == "too dark"
+    assert "dark" in rated_evts[0].tags
+    assert rated_evts[0].context.get("source") == "variant_rating"
