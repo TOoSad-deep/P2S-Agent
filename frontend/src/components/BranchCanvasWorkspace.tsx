@@ -99,6 +99,9 @@ export default function BranchCanvasWorkspace({
   // ── State ──────────────────────────────────────────────────────────────────
   const [branchInfo, setBranchInfo] = useState<BranchTreeResponse | null>(null);
   const [activeTimeline, setActiveTimeline] = useState<CheckpointTimelineEntry[]>([]);
+  // Timelines for non-active runs in the tree, fetched once per tree shape so
+  // branch_from edges can resolve to a parent's real source-checkpoint node.
+  const [otherTimelines, setOtherTimelines] = useState<Record<string, CheckpointTimelineEntry[]>>({});
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [branchDraft, setBranchDraft] = useState<{ sourceRunId: string; sourceCheckpointId: string } | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -171,6 +174,43 @@ export default function BranchCanvasWorkspace({
     return () => { alive = false; };
   }, [runId, result?.refinement_history?.length, result?.status, fetchTimeline]);
 
+  // ── Stable signature of every run id in the tree (DFS order) ───────────────
+  const treeRunIdsKey = useMemo<string>(() => {
+    if (!branchInfo) return "";
+    const ids: string[] = [];
+    (function walk(node: BranchTreeResponse["tree"]) {
+      ids.push(node.run_id);
+      for (const c of node.children) walk(c);
+    })(branchInfo.tree);
+    return ids.join(",");
+  }, [branchInfo]);
+
+  // ── Fetch timelines for the non-active runs in the tree (alive-guarded) ────
+  // Without these, a child's branch_from edge cannot resolve to the parent's
+  // real source-checkpoint node and degrades to the parent run node.
+  useEffect(() => {
+    const ids = treeRunIdsKey ? treeRunIdsKey.split(",") : [];
+    const others = ids.filter((id) => id && id !== runId);
+    if (others.length === 0) {
+      setOtherTimelines({});
+      return;
+    }
+    let alive = true;
+    Promise.all(
+      others.map((id) =>
+        fetchTimeline(id)
+          .then((t) => [id, t] as const)
+          .catch(() => [id, [] as CheckpointTimelineEntry[]] as const),
+      ),
+    ).then((pairs) => {
+      if (!alive) return;
+      const map: Record<string, CheckpointTimelineEntry[]> = {};
+      for (const [id, t] of pairs) map[id] = t;
+      setOtherTimelines(map);
+    });
+    return () => { alive = false; };
+  }, [treeRunIdsKey, runId, fetchTimeline]);
+
   // ── Derived: active run id ─────────────────────────────────────────────────
   const activeRunId = useMemo(
     () => branchInfo?.active_run_id ?? runId,
@@ -189,11 +229,12 @@ export default function BranchCanvasWorkspace({
     return favSet;
   }, [branchInfo]);
 
-  // ── Derived: timelinesByRunId (only active run fetched in V2.1-6) ──────────
-  const timelinesByRunId = useMemo<Record<string, CheckpointTimelineEntry[]>>(
-    () => (activeRunId ? { [activeRunId]: activeTimeline } : {}),
-    [activeRunId, activeTimeline],
-  );
+  // ── Derived: timelinesByRunId (all tree runs; active overrides w/ live data)─
+  const timelinesByRunId = useMemo<Record<string, CheckpointTimelineEntry[]>>(() => {
+    const map: Record<string, CheckpointTimelineEntry[]> = { ...otherTimelines };
+    if (activeRunId) map[activeRunId] = activeTimeline;
+    return map;
+  }, [otherTimelines, activeRunId, activeTimeline]);
 
   // ── Derived: statusesByRunId ───────────────────────────────────────────────
   const statusesByRunId = useMemo(

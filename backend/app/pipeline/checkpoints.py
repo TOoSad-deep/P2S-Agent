@@ -275,6 +275,24 @@ _SUFFIX_ALLOWLIST = {".png", ".json", ".glsl", ".txt"}
 _VALID_ARTIFACT_KINDS = {"shader", "render", "llm_io"}
 
 
+def _candidate_render_relpath(cand: dict | None, candidate_id: str) -> Path:
+    """Relative path (within run_dir) of a candidate's render PNG.
+
+    GLSL candidates scored through the WebGL rasterizer are written as
+    ``candidates/{id}_webgl.png`` (see ``scoring.py`` /
+    ``_evaluate_glsl_with_webgl``); DSL candidates as ``candidates/{id}_render.png``.
+    The resolver picks between them from the candidate's recorded metadata so
+    ``/artifacts/selected_render`` does not 404 for a selected WebGL candidate.
+
+    ``candidate_id`` is the security-validated id; the suffix is derived only
+    from trusted scoreboard metadata, never from a filesystem path.
+    """
+    metrics = (cand or {}).get("objective_metrics") or {}
+    is_webgl = (cand or {}).get("output_kind") == "glsl" and metrics.get("render_backend") == "webgl"
+    suffix = "_webgl.png" if is_webgl else "_render.png"
+    return Path("candidates") / f"{candidate_id}{suffix}"
+
+
 def build_timeline(result: dict, *, run_id: str | None = None) -> list[dict]:
     """Build a rich ordered list of CheckpointTimelineEntry dicts.
 
@@ -481,7 +499,11 @@ def resolve_checkpoint_artifact(
                     f"{checkpoint_id}+render: no selected candidate found in scoreboard"
                 )
             sid = selected.get("id")
-            relative = Path("candidates") / f"{sid}_render.png"
+            if not sid or not _CANDIDATE_ID_RE.match(str(sid)):
+                raise CheckpointError(
+                    f"{checkpoint_id}+render: selected candidate id {sid!r} is invalid"
+                )
+            relative = _candidate_render_relpath(selected, str(sid))
         else:  # llm_io
             raise CheckpointError(
                 f"{checkpoint_id}+{kind}: no llm_io file for selected candidate"
@@ -496,13 +518,13 @@ def resolve_checkpoint_artifact(
             )
         # Validate id is known in the scoreboard
         scoreboard = result.get("scoreboard") or {}
-        known_ids = {c.get("id") for c in scoreboard.get("candidates") or []}
-        if candidate_id not in known_ids:
+        cand_by_id = {c.get("id"): c for c in scoreboard.get("candidates") or []}
+        if candidate_id not in cand_by_id:
             raise CheckpointError(
                 f"unknown candidate id {candidate_id!r} (not in scoreboard)"
             )
         if kind == "render":
-            relative = Path("candidates") / f"{candidate_id}_render.png"
+            relative = _candidate_render_relpath(cand_by_id[candidate_id], candidate_id)
         elif kind == "llm_io":
             relative = Path("candidates") / f"{candidate_id}.json"
         else:  # shader — candidate GLSL is inline, no file

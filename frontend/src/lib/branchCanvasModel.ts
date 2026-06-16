@@ -201,16 +201,38 @@ export function buildBranchCanvasModel(
     }
   }
 
+  // ── Node lookup for ancestor-chain expansion ──────────────────────────────
+  const nodeById = new Map<string, BranchTreeNode>(
+    allTreeNodes.map((n) => [n.run_id, n]),
+  );
+
   // ── Compute expandedRunIds (only non-variant runs participate) ─────────────
-  // Priority: active first, then favorites in DFS order. Cap at MAX_EXPANDED_RUNS.
-  // Then remove any id in collapsedRunIds (explicit collapse always wins).
-  // Variant runs are excluded — they have no checkpoint nodes and must not
-  // consume a budget slot that a real run could use.
+  // Priority: active first, then the active run's ancestor chain (so a child's
+  // branch_from edge can connect to the real source checkpoint on its parent
+  // rather than degrading to the parent run node), then favorites in DFS order.
+  // Cap at MAX_EXPANDED_RUNS. Then remove any id in collapsedRunIds (explicit
+  // collapse always wins). Variant runs are excluded — they have no checkpoint
+  // nodes and must not consume a budget slot that a real run could use.
   const candidateIds: string[] = [];
   if (activeRunId !== null
       && !variantRunIds.has(activeRunId)
       && allTreeNodes.some((n) => n.run_id === activeRunId)) {
     candidateIds.push(activeRunId);
+  }
+  // Walk up from the active run, immediate parent first. Skipped for variant
+  // active runs: their branch_from edge targets the variant group node, not a
+  // checkpoint, so expanding ancestors would only burn budget for favorites.
+  if (activeRunId !== null && !variantRunIds.has(activeRunId)) {
+    const seen = new Set<string>();
+    let cursor = nodeById.get(activeRunId)?.parent_run_id ?? null;
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const pnode = nodeById.get(cursor);
+      if (pnode && !variantRunIds.has(cursor) && !candidateIds.includes(cursor)) {
+        candidateIds.push(cursor);
+      }
+      cursor = pnode?.parent_run_id ?? null;
+    }
   }
   for (const node of allTreeNodes) {
     if (

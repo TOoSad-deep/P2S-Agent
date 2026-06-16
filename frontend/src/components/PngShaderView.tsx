@@ -12,6 +12,7 @@ import PngShaderParamPanel from "./PngShaderParamPanel";
 import HumanLoopPanel from "./HumanLoopPanel";
 import BranchWorkspacePanel from "./BranchWorkspacePanel";
 import BranchCanvasWorkspace from "./BranchCanvasWorkspace";
+import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import type {
   PngShaderResult,
   BranchRefineRequest,
@@ -124,6 +125,47 @@ function candidatePreviewGlsl(candidate: CandidateEntry | null, result: PngShade
   return null;
 }
 
+/** Resolve a checkpoint id (mirror of the backend resolve_checkpoint) to its
+ *  GLSL + label so a timeline/canvas selection can drive the main preview.
+ *  Covers candidates, refinement iterations, and the final selected shader of
+ *  the *active* run; cross-run checkpoints are handled by switching runs. */
+function checkpointPreviewGlsl(
+  result: PngShaderResult | null,
+  checkpointId: string | null,
+): { glsl: string; label: string } | null {
+  if (!result || !checkpointId) return null;
+  const candidates = result.scoreboard?.candidates ?? [];
+
+  if (checkpointId === "final:selected") {
+    return result.selected_glsl?.trim()
+      ? { glsl: result.selected_glsl, label: "Current best" }
+      : null;
+  }
+  if (checkpointId === "candidate:selected") {
+    const sel =
+      candidates.find((c) => c.id === result.selected_candidate_id) ??
+      candidates.find((c) => c.selected) ??
+      null;
+    const glsl = sel?.compile_glsl?.trim()
+      ? sel.compile_glsl
+      : result.selected_glsl?.trim()
+        ? result.selected_glsl
+        : null;
+    return glsl ? { glsl, label: "Selected baseline" } : null;
+  }
+  if (checkpointId.startsWith("candidate:")) {
+    const id = checkpointId.slice("candidate:".length);
+    const c = candidates.find((x) => x.id === id);
+    return c?.compile_glsl?.trim() ? { glsl: c.compile_glsl, label: `Candidate ${id}` } : null;
+  }
+  if (checkpointId.startsWith("refinement:iter:")) {
+    const n = Number(checkpointId.slice("refinement:iter:".length));
+    const e = (result.refinement_history ?? []).find((x) => x.iteration === n);
+    return e?.compile_glsl?.trim() ? { glsl: e.compile_glsl, label: `Iteration ${n}` } : null;
+  }
+  return null;
+}
+
 export default function PngShaderView({
   result,
   loading,
@@ -231,6 +273,33 @@ export default function PngShaderView({
     setBranchCheckpointId(`candidate:${id}`);
   }, []);
 
+  // Selecting a checkpoint from the timeline / canvas drives BOTH the directed-
+  // branch start point and the main preview. For an explicit candidate it also
+  // syncs the scoreboard highlight; for iterations / final / selected it clears
+  // the candidate highlight so checkpointPreview wins the preview chain.
+  const handleSelectCheckpoint = useCallback((id: string | null) => {
+    setBranchCheckpointId(id);
+    setLlmPreview({ glsl: null, label: null, key: null });
+    if (id && id.startsWith("candidate:") && id !== "candidate:selected") {
+      setPreviewCandidateId(id.slice("candidate:".length));
+    } else {
+      setPreviewCandidateId(null);
+    }
+  }, []);
+
+  // Canvas node click → preview. Only nodes of the *active* run can be previewed
+  // against the current result; other-run nodes are reached via double-click
+  // (switchRun) inside the canvas workspace.
+  const handleCanvasPreviewNode = useCallback((node: BranchCanvasNode | null) => {
+    if (!node) return;
+    const d = node.data;
+    if (d.type === "checkpoint" && d.run_id === runId && d.checkpoint_id) {
+      handleSelectCheckpoint(d.checkpoint_id);
+    } else if (d.type === "run" && d.run_id === runId) {
+      handleSelectCheckpoint("final:selected");
+    }
+  }, [runId, handleSelectCheckpoint]);
+
   const handleParamGlslChange = useCallback((glsl: string) => {
     const key = activeKeyRef.current;
     if (!key) return;
@@ -251,8 +320,15 @@ export default function PngShaderView({
   const candidatePreview = candidatePreviewGlsl(previewCandidate, result);
   const llmPreviewGlsl = llmPreview.glsl?.trim() ? llmPreview.glsl : null;
 
-  const previewGlsl = llmPreviewGlsl ?? candidatePreview;
-  const previewLabel = llmPreviewGlsl ? llmPreview.label : previewCandidate?.id ?? null;
+  // Timeline / canvas selection preview — only contributes when no higher-
+  // priority candidate/llm preview is active.
+  const checkpointPreview = checkpointPreviewGlsl(result, branchCheckpointId);
+  const checkpointPreviewActive = !llmPreviewGlsl && !candidatePreview && !!checkpointPreview;
+
+  const previewGlsl = llmPreviewGlsl ?? candidatePreview ?? checkpointPreview?.glsl ?? null;
+  const previewLabel = llmPreviewGlsl
+    ? llmPreview.label
+    : previewCandidate?.id ?? (checkpointPreviewActive ? checkpointPreview!.label : null);
   const displayCandidateId = llmPreviewGlsl
     ? null
     : previewCandidate?.id ?? result?.selected_candidate_id ?? null;
@@ -260,7 +336,10 @@ export default function PngShaderView({
   // Identity of the currently shown result; keys the per-result working GLSL.
   const activeKey = llmPreviewGlsl
     ? `llm:${llmPreview.key ?? "initial"}`
-    : previewCandidate?.id ?? result?.selected_candidate_id ?? (result ? "__selected__" : null);
+    : previewCandidate?.id
+      ?? (checkpointPreviewActive ? `cp:${branchCheckpointId}` : null)
+      ?? result?.selected_candidate_id
+      ?? (result ? "__selected__" : null);
   activeKeyRef.current = activeKey;
   const workingGlsl = activeKey ? workingGlslByKey[activeKey] ?? null : null;
 
@@ -268,7 +347,8 @@ export default function PngShaderView({
   // 1. workingGlsl — this result's param-slider edits / parameterization (keyed)
   // 2. llmPreview  — Initial Call tab or a refinement iteration card
   // 3. candidatePreview — candidate row in the scoreboard
-  // 4. result.selected_glsl — pipeline's chosen output
+  // 4. checkpointPreview — timeline / canvas checkpoint selection
+  // 5. result.selected_glsl — pipeline's chosen output
   const activeGlsl = workingGlsl ?? previewGlsl ?? result?.selected_glsl ?? null;
   const activeQualityRouter = previewCandidate?.quality_router ?? result?.quality_router ?? null;
 
@@ -439,7 +519,7 @@ export default function PngShaderView({
             <HumanLoopPanel
               checkpoints={deriveCheckpoints(result)}
               selectedCheckpointId={branchCheckpointId}
-              onSelectCheckpoint={setBranchCheckpointId}
+              onSelectCheckpoint={handleSelectCheckpoint}
               onSubmit={onBranchRefine}
               lineage={result.lineage ?? null}
               disabled={loading}
@@ -481,6 +561,7 @@ export default function PngShaderView({
                   stopVariantGroup={stopVariantGroup}
                   selectVariantWinner={selectVariantWinner}
                   rateVariant={rateVariant}
+                  onPreviewNode={handleCanvasPreviewNode}
                   disabled={loading}
                 />
               ) : (
@@ -488,7 +569,7 @@ export default function PngShaderView({
                   runId={runId}
                   result={result}
                   activeCheckpointId={branchCheckpointId}
-                  onCheckpointSelect={setBranchCheckpointId}
+                  onCheckpointSelect={handleSelectCheckpoint}
                   onSwitchRun={switchRun}
                   fetchTimeline={fetchTimeline}
                   fetchBranches={fetchBranches}

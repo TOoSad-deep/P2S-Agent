@@ -1,10 +1,33 @@
 // BranchCanvasNode.tsx — custom React Flow v12 node components (V2.1-4).
-// Pure presentational. No data fetching. No app state.
-import { memo } from "react";
+// Presentational: the only I/O is an <img> whose src points at the checkpoint
+// render artifact (browser-fetched, no app state).
+import { memo, useState } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { ChevronDown, ChevronRight, GitBranch, Image, Layers, Loader, Star, X } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import { fmtScore, truncate } from "../lib/format";
+
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+
+// ─── Checkpoint render thumbnail (lazy <img>, skeleton fallback) ──────────────
+
+function CheckpointThumbnail({ runId, artifactId }: { runId?: string; artifactId?: string | null }) {
+  const [errored, setErrored] = useState(false);
+  if (!runId || !artifactId || errored) {
+    // No render artifact (e.g. inline refinement iteration) or load failed.
+    return <div className="w-full h-16 rounded" style={{ background: "var(--bg-tertiary)" }} />;
+  }
+  return (
+    <img
+      src={`${API_BASE}/png-shader/runs/${runId}/artifacts/${artifactId}`}
+      alt=""
+      loading="lazy"
+      className="w-full h-16 rounded object-cover"
+      style={{ background: "var(--bg-tertiary)" }}
+      onError={() => setErrored(true)}
+    />
+  );
+}
 
 // ─── Status dot/spinner (reusable within this file) ──────────────────────────
 
@@ -136,11 +159,8 @@ export const CheckpointNode = memo(function CheckpointNode({ data, selected }: N
         )}
       </div>
 
-      {/* Thumbnail skeleton — actual lazy-load is out of scope */}
-      <div
-        className="w-full h-16 rounded"
-        style={{ background: "var(--bg-tertiary)" }}
-      />
+      {/* Render thumbnail (falls back to a skeleton when unavailable) */}
+      <CheckpointThumbnail runId={data.run_id} artifactId={data.thumbnail_artifact_id} />
 
       {/* Score + delta */}
       <div className="flex items-center gap-1.5">

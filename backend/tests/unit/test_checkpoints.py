@@ -455,6 +455,69 @@ def test_resolve_artifact_non_selected_candidate_llm_io(tmp_path):
     assert p.name == "cv_0.json"
 
 
+def _result_webgl_selected() -> dict:
+    """A result whose selected candidate is a GLSL candidate rendered via WebGL,
+    so its render PNG is written as ``{id}_webgl.png`` rather than ``_render.png``."""
+    return {
+        "selected_candidate_id": "llm_0",
+        "selected_glsl": SELECTED_GLSL,
+        "scoreboard": {
+            "selected_id": "llm_0",
+            "candidates": [
+                {
+                    "id": "llm_0",
+                    "source": "llm",
+                    "output_kind": "glsl",
+                    "selected": True,
+                    "previewable": True,
+                    "compile_glsl": SELECTED_GLSL,
+                    "final_score": 0.61,
+                    "objective_metrics": {"render_backend": "webgl"},
+                },
+                {
+                    "id": "cv_0",
+                    "source": "cv",
+                    "output_kind": "dsl",
+                    "selected": False,
+                    "previewable": True,
+                    "compile_glsl": CV_GLSL,
+                    "final_score": 0.40,
+                    "objective_metrics": {},
+                },
+            ],
+        },
+    }
+
+
+def test_resolve_artifact_selected_render_webgl_candidate(tmp_path):
+    """selected_render for a GLSL/WebGL selected candidate resolves to {id}_webgl.png
+    (regression: the resolver used to hardcode {id}_render.png and 404)."""
+    run_dir = _make_run_dir(tmp_path)
+    p = resolve_checkpoint_artifact(
+        _result_webgl_selected(), "candidate:selected", "render", run_dir=run_dir
+    )
+    assert p.name == "llm_0_webgl.png"
+    assert "candidates" in str(p)
+
+
+def test_resolve_artifact_named_render_webgl_candidate(tmp_path):
+    """A directly-addressed GLSL/WebGL candidate also resolves to its _webgl.png."""
+    run_dir = _make_run_dir(tmp_path)
+    p = resolve_checkpoint_artifact(
+        _result_webgl_selected(), "candidate:llm_0", "render", run_dir=run_dir
+    )
+    assert p.name == "llm_0_webgl.png"
+
+
+def test_resolve_artifact_render_dsl_candidate_unchanged(tmp_path):
+    """DSL candidates keep the {id}_render.png convention."""
+    run_dir = _make_run_dir(tmp_path)
+    p = resolve_checkpoint_artifact(
+        _result_webgl_selected(), "candidate:cv_0", "render", run_dir=run_dir
+    )
+    assert p.name == "cv_0_render.png"
+
+
 def test_resolve_artifact_candidate_shader_raises(tmp_path):
     """Non-selected candidate shader kind has no file — must raise."""
     run_dir = _make_run_dir(tmp_path)

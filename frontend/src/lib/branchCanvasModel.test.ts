@@ -190,6 +190,36 @@ describe("buildBranchCanvasModel", () => {
     expect(branchEdge!.target).toBe(`run:${CHILD_ID}`);
   });
 
+  // ── 5b. active child expands its parent so branch_from connects to cp node ─
+  it("expands the active run's parent so its branch_from edge connects to the source cp node", () => {
+    const CHILD_ID = "run-child-active";
+    const SOURCE_CP = "candidate:selected";
+
+    const child = makeTreeNode({
+      run_id: CHILD_ID,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      source_checkpoint_id: SOURCE_CP,
+    });
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [child] });
+
+    const out = buildBranchCanvasModel(
+      baseInput({
+        branchTree: tree,
+        activeRunId: CHILD_ID, // the child is active; its parent must auto-expand
+        timelinesByRunId: {
+          [ROOT_ID]: makeTimeline([{ id: SOURCE_CP }, { id: "final:selected" }], ROOT_ID),
+          [CHILD_ID]: makeTimeline([{ id: "final:selected" }], CHILD_ID),
+        },
+      }),
+    );
+
+    const branchEdge = out.edges.find((e) => e.id === `branch:${CHILD_ID}`);
+    expect(branchEdge).toBeDefined();
+    expect(branchEdge!.source).toBe(`cp:${ROOT_ID}:${SOURCE_CP}`);
+    expect(branchEdge!.target).toBe(`run:${CHILD_ID}`);
+  });
+
   // ── 6. collapsedRunIds overrides even the active run ─────────────────────
   it("emits no checkpoint nodes for the active run if it's in collapsedRunIds", () => {
     const tree = makeTreeNode({ run_id: ROOT_ID });

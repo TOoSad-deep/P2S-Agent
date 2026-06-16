@@ -2034,3 +2034,92 @@ def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
     assert v["status"] == "completed", f"expected 'completed', got {v['status']!r}"
     assert v["final_score"] == 0.72, f"expected 0.72, got {v['final_score']!r}"
     assert v["favorite"] is True, "run-index favorite must be reflected in evicted child"
+
+
+# ---------------------------------------------------------------------------
+# P1: /status + /branch-refine rehydrate evicted/restarted runs from disk
+# ---------------------------------------------------------------------------
+
+def _persist_run_dir_on_disk(tmp_path, run_id, *, with_reference=False):
+    """Lay down the run-dir artifacts a completed run writes, without touching
+    the in-memory store (simulates an evicted/restarted run)."""
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if with_reference:
+        Image.new("RGBA", (32, 32), (180, 80, 40, 255)).save(run_dir / "reference_input.png")
+    (run_dir / "selected_shader.glsl").write_text(_BRANCH_GLSL, encoding="utf-8")
+    (run_dir / "scoreboard.json").write_text(json.dumps({
+        "selected_id": "llm_0",
+        "candidates": [{
+            "id": "llm_0",
+            "source": "llm",
+            "output_kind": "glsl",
+            "selected": True,
+            "previewable": True,
+            "compile_glsl": _BRANCH_GLSL,
+            "final_score": 0.7,
+            "objective_metrics": {"render_backend": "webgl"},
+        }],
+    }), encoding="utf-8")
+    (run_dir / "quality_router.json").write_text(json.dumps({"final_score": 0.7}), encoding="utf-8")
+    (run_dir / "objective_metrics.json").write_text(json.dumps({"mse": 0.1}), encoding="utf-8")
+    return run_dir
+
+
+def test_status_rehydrates_evicted_run_from_disk(tmp_path):
+    """GET /status for a run absent from the store reconstructs it from disk."""
+    _run_store.clear()
+    idx = str(tmp_path / "run_index.jsonl")
+    run_dir = _persist_run_dir_on_disk(tmp_path, "run_hist")
+    _seed_index(idx, run_id="run_hist", run_dir=str(run_dir), final_score=0.7)
+
+    client = _client()
+    resp = client.get("/png-shader/status/run_hist")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["run_id"] == "run_hist"
+    assert body["status"] == "completed"
+    assert body["selected_glsl"] == _BRANCH_GLSL
+    assert body["scoreboard"]["selected_id"] == "llm_0"
+    assert body["rehydrated"] is True
+
+
+def test_status_404_when_not_in_store_or_index(tmp_path):
+    """Truly unknown runs still 404 — rehydration must not mask missing runs."""
+    _run_store.clear()
+    client = _client()
+    assert client.get("/png-shader/status/ghost").status_code == 404
+
+
+def test_status_404_when_index_entry_has_no_run_dir(tmp_path):
+    """An index record without a run_dir cannot be rehydrated → 404."""
+    _run_store.clear()
+    idx = str(tmp_path / "run_index.jsonl")
+    _seed_index(idx, run_id="run_pending", run_dir=None, status="pending")
+    client = _client()
+    assert client.get("/png-shader/status/run_pending").status_code == 404
+
+
+def test_branch_refine_from_rehydrated_parent(tmp_path, monkeypatch):
+    """branch-refine succeeds when the parent exists only on disk (evicted)."""
+    _run_store.clear()
+    idx = str(tmp_path / "run_index.jsonl")
+    run_dir = _persist_run_dir_on_disk(tmp_path, "run_hist", with_reference=True)
+    _seed_index(idx, run_id="run_hist", run_dir=str(run_dir), final_score=0.7)
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+    )
+    client = _client()
+    resp = client.post(
+        "/png-shader/runs/run_hist/branch-refine",
+        json={"checkpoint_id": "final:selected", "feedback": "boost contrast", "mode": "refine"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["parent_run_id"] == "run_hist"
+    assert body["run_id"] != "run_hist"
+    _wait_for_completion(client, body["run_id"])
+    # The child was seeded with the parent's persisted GLSL.
+    assert captured["seed_glsl"] == _BRANCH_GLSL

@@ -117,6 +117,101 @@ def _get_run_model(run_id: str) -> Optional[ModelConfig]:
     with _run_models_lock:
         return _run_models.get(run_id)
 
+
+def _read_json_artifact(path: Path):
+    """Best-effort JSON read of a run artifact; returns None on any error."""
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _rehydrate_run_from_disk(run_id: str) -> Optional[dict]:
+    """Reconstruct a run result dict from persisted artifacts on disk.
+
+    Fallback for ``/status`` and ``/branch-refine`` when a run is no longer in
+    the in-memory ``_run_store`` (evicted past ``_MAX_STORE_SIZE`` or lost to a
+    restart). Lineage lives in the JSONL run index; per-run artifacts
+    (``scoreboard.json``, ``selected_shader.glsl``, ``objective_metrics.json``,
+    ``quality_router.json``, ``preprocess.json``, ``lineage.json``) live under
+    ``run_dir``. This rebuilds enough of the result for the UI to switch to a
+    historic run and for ``branch-refine`` to seed from its ``final:selected``
+    or candidate checkpoints.
+
+    Returns None when the run is unknown to the index or its ``run_dir`` is not
+    on disk. Per-iteration refinement GLSL is not persisted, so branching from a
+    historic ``refinement:iter:*`` checkpoint stays unavailable after eviction
+    (``resolve_checkpoint`` raises and the request 422s) — the selected final
+    and candidate checkpoints, the common branch points, are covered.
+    """
+    records = load_run_index(path=_RUN_INDEX_PATH)
+    rec = records.get(run_id)
+    if rec is None or not rec.run_dir:
+        return None
+    run_dir = Path(rec.run_dir)
+    if not run_dir.exists():
+        return None
+
+    result: dict = {
+        "run_id": run_id,
+        "status": rec.status,
+        "run_dir": str(run_dir),
+        "parent_run_id": rec.parent_run_id,
+        "source_checkpoint_id": rec.source_checkpoint_id,
+        "title": rec.title,
+        "favorite": rec.favorite,
+        "tags": list(rec.tags or []),
+        "submitted_at": rec.created_at,
+        "completed_at": rec.completed_at,
+        "rehydrated": True,
+    }
+    if rec.variant_group_id is not None:
+        result["variant_group_id"] = rec.variant_group_id
+        result["variant_index"] = rec.variant_index
+        result["variant_label"] = rec.variant_label
+
+    # Lineage: prefer the persisted lineage.json (branch runs); otherwise
+    # synthesize from the index record so parent/source info is still exposed.
+    lineage = _read_json_artifact(run_dir / "lineage.json")
+    if isinstance(lineage, dict):
+        result["lineage"] = lineage
+    elif rec.parent_run_id:
+        result["lineage"] = {
+            "parent_run_id": rec.parent_run_id,
+            "root_run_id": rec.root_run_id,
+            "source_checkpoint_id": rec.source_checkpoint_id,
+            "source_checkpoint_label": rec.source_checkpoint_label,
+            "mode": rec.mode,
+            "feedback": rec.feedback,
+        }
+
+    scoreboard = _read_json_artifact(run_dir / "scoreboard.json")
+    if isinstance(scoreboard, dict):
+        result["scoreboard"] = scoreboard
+        if scoreboard.get("selected_id"):
+            result["selected_candidate_id"] = scoreboard["selected_id"]
+
+    glsl_path = run_dir / "selected_shader.glsl"
+    if glsl_path.exists():
+        try:
+            result["selected_glsl"] = glsl_path.read_text(encoding="utf-8")
+        except Exception:
+            logger.warning("selected_shader.glsl unreadable for run_id=%s", run_id, exc_info=True)
+
+    for key, fname in (
+        ("objective_metrics", "objective_metrics.json"),
+        ("quality_router", "quality_router.json"),
+        ("preprocess", "preprocess.json"),
+        ("refinement_summary", "refinement_summary.json"),
+    ):
+        data = _read_json_artifact(run_dir / fname)
+        if isinstance(data, dict):
+            result[key] = data
+
+    return result
+
+
 router = APIRouter(prefix="/png-shader", tags=["png-shader"])
 
 
@@ -557,9 +652,16 @@ async def run_png_shader(
 
 @router.get("/status/{run_id}")
 async def get_status(run_id: str) -> dict:
-    """Retrieve a cached pipeline result by run_id."""
+    """Retrieve a pipeline result by run_id.
+
+    Falls back to reconstructing the run from persisted artifacts on disk when
+    it is no longer in the in-memory store (evicted or service restarted), so
+    the UI can still switch to and inspect historic runs.
+    """
     with _run_store_lock:
         result = _run_store.get(run_id)
+    if result is None:
+        result = _rehydrate_run_from_disk(run_id)
     if result is None:
         raise HTTPException(
             status_code=404,
@@ -599,6 +701,10 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
 
     with _run_store_lock:
         parent = _run_store.get(run_id)
+    if parent is None:
+        # Evicted / restarted: rebuild the parent from persisted artifacts so a
+        # branch can still be seeded from a historic checkpoint.
+        parent = _rehydrate_run_from_disk(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -778,6 +884,10 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
 
     with _run_store_lock:
         parent = _run_store.get(run_id)
+    if parent is None:
+        # Evicted / restarted: rebuild the parent from persisted artifacts so a
+        # variant fan-out can still be seeded from a historic checkpoint.
+        parent = _rehydrate_run_from_disk(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
