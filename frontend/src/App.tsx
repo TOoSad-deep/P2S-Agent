@@ -174,6 +174,7 @@ export default function App() {
           fetchBranches={fetchBranches}
           updateRunMetadata={updateRunMetadata}
           switchRun={switchRun}
+          branchRefine={branchRefine}
         />
       </main>
 

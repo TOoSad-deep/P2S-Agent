@@ -1,8 +1,6 @@
-// BranchCanvasWorkspace.tsx — orchestrator for the Branch Canvas Workspace (V2.1-6).
+// BranchCanvasWorkspace.tsx — orchestrator for the Branch Canvas Workspace (V2.1-7).
 // Fetches V2 data, builds the canvas model + layout, and renders the canvas + inspector
-// with selection / run-switch / drag-persistence.
-// Branch-draft submit, compare mode, Canvas/List toggle, and mounting into PngShaderView
-// are deferred to V2.1-7 — those props are no-op stubs here.
+// with selection / run-switch / drag-persistence / branch-draft submit flow.
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { RotateCcw } from "lucide-react";
 import type {
@@ -10,12 +8,14 @@ import type {
   CheckpointTimelineEntry,
   BranchTreeResponse,
   RunMetadataPatch,
+  BranchRefineRequest,
 } from "../hooks/usePngShader";
 import {
   buildBranchCanvasModel,
   type BranchCanvasNode,
+  type BranchCanvasEdge,
 } from "../lib/branchCanvasModel";
-import { layoutBranchCanvas } from "../lib/branchCanvasLayout";
+import { layoutBranchCanvas, COLUMN_WIDTH } from "../lib/branchCanvasLayout";
 import BranchCanvas from "./BranchCanvas";
 import { branchCanvasNodeTypes } from "./BranchCanvasNode";
 import BranchCanvasInspector from "./BranchCanvasInspector";
@@ -29,10 +29,9 @@ interface Props {
   fetchTimeline: (id: string) => Promise<CheckpointTimelineEntry[]>;
   switchRun: (id: string) => void;
   updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<unknown>;
-  // delegated to parent (wired in V2.1-7); optional no-op defaults:
+  branchRefine: (parentRunId: string, request: BranchRefineRequest) => Promise<string | null>;
+  // optional preview callback (wired by parent if desired)
   onPreviewNode?: (node: BranchCanvasNode | null) => void;
-  onRefineFromCheckpoint?: (runId: string, checkpointId: string) => void;
-  onContinueFromRun?: (runId: string) => void;
   disabled?: boolean;
 }
 
@@ -80,16 +79,16 @@ export default function BranchCanvasWorkspace({
   fetchTimeline,
   switchRun,
   updateRunMetadata,
+  branchRefine,
   onPreviewNode,
-  onRefineFromCheckpoint,
-  onContinueFromRun,
   disabled,
 }: Props) {
   // ── State ──────────────────────────────────────────────────────────────────
   const [branchInfo, setBranchInfo] = useState<BranchTreeResponse | null>(null);
   const [activeTimeline, setActiveTimeline] = useState<CheckpointTimelineEntry[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  // TODO(V2.1-7): make stateful when the collapse toggle UI is added
+  const [branchDraft, setBranchDraft] = useState<{ sourceRunId: string; sourceCheckpointId: string } | null>(null);
+  // TODO(V2.1-8): make stateful when the collapse toggle UI is added
   const collapsedRunIds = useMemo(() => new Set<string>(), []);
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -98,8 +97,11 @@ export default function BranchCanvasWorkspace({
   const runIdRef = useRef(runId);
   useEffect(() => { runIdRef.current = runId; }, [runId]);
 
-  // ── Clear selection on run-switch (I3) ────────────────────────────────────
-  useEffect(() => { setSelectedNodeId(null); }, [runId]);
+  // ── Clear selection AND draft on run-switch (I3 + draft cleanup) ──────────
+  useEffect(() => {
+    setSelectedNodeId(null);
+    setBranchDraft(null);
+  }, [runId]);
 
   // ── localStorage key (keyed by root run) ──────────────────────────────────
   const layoutStorageKey = `branchCanvasLayout:${branchInfo?.root_run_id ?? runId ?? "none"}`;
@@ -208,20 +210,67 @@ export default function BranchCanvasWorkspace({
     [model.nodes, model.edges, layoutOverrides],
   );
 
-  // ── Derived: display nodes (inject selected flag; unchanged nodes are stable)
-  const displayNodes = useMemo(
+  // ── Derived: draft node source (shared between displayNodes + displayEdges)─
+  const draftSrcNode = useMemo<BranchCanvasNode | null>(() => {
+    if (!branchDraft) return null;
+    const cpId = `cp:${branchDraft.sourceRunId}:${branchDraft.sourceCheckpointId}`;
+    return (
+      positionedNodes.find((n) => n.id === cpId) ??
+      positionedNodes.find((n) => n.id === `run:${branchDraft.sourceRunId}`) ??
+      null
+    );
+  }, [branchDraft, positionedNodes]);
+
+  // ── Derived: display nodes (inject selected flag + optional draft node) ────
+  const displayNodes = useMemo<BranchCanvasNode[]>(() => {
+    const base = positionedNodes.map((n) => {
+      const sel = n.id === selectedNodeId;
+      return n.selected === sel ? n : { ...n, selected: sel };
+    });
+
+    if (!branchDraft) return base;
+
+    const pos = draftSrcNode
+      ? { x: draftSrcNode.position.x + COLUMN_WIDTH, y: draftSrcNode.position.y + 40 }
+      : { x: 0, y: 0 };
+
+    const draftNode: BranchCanvasNode = {
+      id: "draft",
+      type: "branch_action",
+      position: pos,
+      selected: selectedNodeId === "draft",
+      data: {
+        type: "branch_action",
+        run_id: branchDraft.sourceRunId,
+        source_checkpoint_id: branchDraft.sourceCheckpointId,
+        label: "新分支 / New branch",
+      },
+    };
+
+    return [...base, draftNode];
+  }, [positionedNodes, selectedNodeId, branchDraft, draftSrcNode]);
+
+  // ── Derived: display edges (add draft edge when draft is active) ───────────
+  const displayEdges = useMemo<BranchCanvasEdge[]>(
     () =>
-      positionedNodes.map((n) => {
-        const sel = n.id === selectedNodeId;
-        return n.selected === sel ? n : { ...n, selected: sel };
-      }),
-    [positionedNodes, selectedNodeId],
+      branchDraft && draftSrcNode
+        ? [
+            ...model.edges,
+            {
+              id: "draft-edge",
+              source: draftSrcNode.id,
+              target: "draft",
+              data: { relation: "branch_from" as const },
+            },
+          ]
+        : model.edges,
+    [branchDraft, draftSrcNode, model.edges],
   );
 
-  // ── Derived: selected node ─────────────────────────────────────────────────
+  // ── Derived: selected node (must derive from displayNodes to resolve "draft")
   const selectedNode = useMemo(
-    () => positionedNodes.find((n) => n.id === selectedNodeId) ?? null,
-    [positionedNodes, selectedNodeId],
+    () => displayNodes.find((n) => n.id === selectedNodeId) ?? null,
+    [displayNodes, selectedNodeId],
   );
 
   // ── Handlers ───────────────────────────────────────────────────────────────
@@ -273,6 +322,42 @@ export default function BranchCanvasWorkspace({
     },
     [updateRunMetadata, fetchBranches],
   );
+
+  // ── Branch draft internal handlers ─────────────────────────────────────────
+
+  const handleRefineFromCheckpoint = useCallback(
+    (rid: string, checkpointId: string) => {
+      setBranchDraft({ sourceRunId: rid, sourceCheckpointId: checkpointId });
+      setSelectedNodeId("draft");
+    },
+    [],
+  );
+
+  const handleContinueFromRun = useCallback(
+    (rid: string) => {
+      setBranchDraft({ sourceRunId: rid, sourceCheckpointId: "final:selected" });
+      setSelectedNodeId("draft");
+    },
+    [],
+  );
+
+  const handleSubmitBranch = useCallback(
+    (_runId: string, request: BranchRefineRequest) => {
+      if (!branchDraft) return;
+      branchRefine(branchDraft.sourceRunId, request)
+        .then(() => {
+          setBranchDraft(null);
+          setSelectedNodeId(null);
+        })
+        .catch(() => {});
+    },
+    [branchDraft, branchRefine],
+  );
+
+  const handleCancelBranch = useCallback(() => {
+    setBranchDraft(null);
+    setSelectedNodeId(null);
+  }, []);
 
   // ── Placeholder when no run ────────────────────────────────────────────────
   if (!runId || !branchInfo) {
@@ -356,7 +441,7 @@ export default function BranchCanvasWorkspace({
         <div className="flex-1 min-w-0">
           <BranchCanvas
             nodes={displayNodes}
-            edges={model.edges}
+            edges={displayEdges}
             nodeTypes={branchCanvasNodeTypes}
             selectedNodeId={selectedNodeId}
             onNodeClick={handleNodeClick}
@@ -372,11 +457,10 @@ export default function BranchCanvasWorkspace({
             activeRunId={activeRunId}
             onSwitchRun={switchRun}
             onUpdateMetadata={handleUpdateMetadata}
-            onRefineFromCheckpoint={(rid, cpId) => onRefineFromCheckpoint?.(rid, cpId)}
-            onContinueFromRun={(rid) => onContinueFromRun?.(rid)}
-            // TODO(V2.1-7): wire real branch draft submit; branch_action nodes are not emitted until then
-            onSubmitBranch={() => {}}
-            onCancelBranch={() => {}}
+            onRefineFromCheckpoint={handleRefineFromCheckpoint}
+            onContinueFromRun={handleContinueFromRun}
+            onSubmitBranch={handleSubmitBranch}
+            onCancelBranch={handleCancelBranch}
             disabled={disabled}
           />
         </div>

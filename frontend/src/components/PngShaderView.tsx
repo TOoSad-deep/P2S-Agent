@@ -11,6 +11,7 @@ import LlmIOPanel, { type LlmPreviewSelection } from "./LlmIOPanel";
 import PngShaderParamPanel from "./PngShaderParamPanel";
 import HumanLoopPanel from "./HumanLoopPanel";
 import BranchWorkspacePanel from "./BranchWorkspacePanel";
+import BranchCanvasWorkspace from "./BranchCanvasWorkspace";
 import type {
   PngShaderResult,
   BranchRefineRequest,
@@ -53,6 +54,7 @@ interface Props {
   fetchBranches: (id: string) => Promise<BranchTreeResponse>;
   updateRunMetadata: (id: string, patch: RunMetadataPatch) => Promise<RunMetadataRecord>;
   switchRun: (id: string) => void;
+  branchRefine: (parentRunId: string, request: BranchRefineRequest) => Promise<string | null>;
 }
 
 /** Mirror of backend list_checkpoints: candidates with GLSL, iteration
@@ -135,10 +137,12 @@ export default function PngShaderView({
   fetchBranches,
   updateRunMetadata,
   switchRun,
+  branchRefine,
 }: Props) {
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
   const [branchCheckpointId, setBranchCheckpointId] = useState<string | null>(null);
+  const [workspaceView, setWorkspaceView] = useState<"list" | "canvas">("list");
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [seedEnabled, setSeedEnabled] = useState(false);
@@ -430,19 +434,51 @@ export default function PngShaderView({
             />
           )}
 
-          {/* Branch workspace: timeline + branch tree + compare strip */}
+          {/* Branch workspace: Canvas / List toggle + panels */}
           {result && runId && (
-            <BranchWorkspacePanel
-              runId={runId}
-              result={result}
-              activeCheckpointId={branchCheckpointId}
-              onCheckpointSelect={setBranchCheckpointId}
-              onSwitchRun={switchRun}
-              fetchTimeline={fetchTimeline}
-              fetchBranches={fetchBranches}
-              updateRunMetadata={updateRunMetadata}
-              disabled={loading}
-            />
+            <div className="flex flex-col gap-2">
+              {/* Segmented toggle */}
+              <div className="flex items-center gap-0.5 self-start bg-[var(--bg-tertiary)] rounded-md p-0.5">
+                {(["canvas", "list"] as const).map((view) => (
+                  <button
+                    key={view}
+                    onClick={() => setWorkspaceView(view)}
+                    className={`px-2.5 py-1 text-xs rounded-md transition-all ${
+                      workspaceView === view
+                        ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium shadow-sm shadow-emerald-500/25"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                    }`}
+                  >
+                    {view === "canvas" ? "画布 Canvas" : "列表 List"}
+                  </button>
+                ))}
+              </div>
+
+              {workspaceView === "canvas" ? (
+                <BranchCanvasWorkspace
+                  runId={runId}
+                  result={result}
+                  fetchBranches={fetchBranches}
+                  fetchTimeline={fetchTimeline}
+                  switchRun={switchRun}
+                  updateRunMetadata={updateRunMetadata}
+                  branchRefine={branchRefine}
+                  disabled={loading}
+                />
+              ) : (
+                <BranchWorkspacePanel
+                  runId={runId}
+                  result={result}
+                  activeCheckpointId={branchCheckpointId}
+                  onCheckpointSelect={setBranchCheckpointId}
+                  onSwitchRun={switchRun}
+                  fetchTimeline={fetchTimeline}
+                  fetchBranches={fetchBranches}
+                  updateRunMetadata={updateRunMetadata}
+                  disabled={loading}
+                />
+              )}
+            </div>
           )}
         </div>
 
