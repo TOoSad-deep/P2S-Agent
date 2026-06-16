@@ -145,20 +145,26 @@ function capTimeline(
 
 /**
  * Aggregate status for a variant group from its member statuses.
- * Rules:
- *   - all "completed"            → "completed"
- *   - any "running" or "queued"  → "running"
- *   - any "completed" but not all → "partial_failed"
- *   - else                       → "failed"
+ * Aligned with backend aggregate_group_status rules:
+ *   - []                                       → "queued"
+ *   - all "queued"                             → "queued"
+ *   - NOT all terminal (terminal = completed|failed|cancelled) → "running"
+ *   - all terminal, all completed              → "completed"
+ *   - all terminal, some completed             → "partial_failed"
+ *   - all terminal, no completed, any cancelled→ "cancelled"
+ *   - else                                     → "failed"
  */
 function aggregateVariantStatus(statuses: string[]): string {
-  if (statuses.length === 0) return "failed";
-  const hasRunning = statuses.some((s) => s === "running" || s === "queued");
-  if (hasRunning) return "running";
+  if (statuses.length === 0) return "queued";
+  const TERMINAL = new Set(["completed", "failed", "cancelled"]);
+  if (statuses.every((s) => s === "queued")) return "queued";
+  if (!statuses.every((s) => TERMINAL.has(s))) return "running";
+  // All terminal from here
+  const anyCompleted = statuses.some((s) => s === "completed");
   const allCompleted = statuses.every((s) => s === "completed");
   if (allCompleted) return "completed";
-  const anyCompleted = statuses.some((s) => s === "completed");
   if (anyCompleted) return "partial_failed";
+  if (statuses.some((s) => s === "cancelled")) return "cancelled";
   return "failed";
 }
 
