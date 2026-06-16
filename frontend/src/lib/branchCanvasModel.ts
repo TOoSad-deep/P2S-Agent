@@ -103,8 +103,10 @@ function buildReferencedCpMap(allNodes: BranchTreeNode[]): Map<string, Set<strin
 
 /**
  * Cap timeline entries to MAX_VISIBLE_CHECKPOINTS_PER_RUN.
- * Priority keep: candidate:selected, accepted===true, final:selected, referenced by child.
- * Then trim to last MAX_VISIBLE_CHECKPOINTS_PER_RUN.
+ * Must-keep: candidate:selected, accepted===true, final:selected, referenced by child.
+ * When must-keep entries alone meet or exceed the cap, keep exactly those (no eviction).
+ * Remaining slots are filled from the most-recent non-priority entries.
+ * Output preserves original timeline order.
  */
 function capTimeline(
   entries: CheckpointTimelineEntry[],
@@ -112,20 +114,29 @@ function capTimeline(
 ): CheckpointTimelineEntry[] {
   if (entries.length <= MAX_VISIBLE_CHECKPOINTS_PER_RUN) return entries;
 
-  // Filter to priority entries, preserving timeline order
-  const priority = entries.filter(
-    (e) =>
+  const mustKeepIds = new Set<string>();
+  for (const e of entries) {
+    if (
       e.id === "candidate:selected" ||
       e.accepted === true ||
       e.id === "final:selected" ||
-      referencedCpIds.has(e.id),
+      referencedCpIds.has(e.id)
+    ) {
+      mustKeepIds.add(e.id);
+    }
+  }
+
+  // All slots consumed by must-keep entries → keep exactly those (timeline order).
+  if (mustKeepIds.size >= MAX_VISIBLE_CHECKPOINTS_PER_RUN) {
+    return entries.filter((e) => mustKeepIds.has(e.id));
+  }
+
+  // Fill remaining slots from the most recent non-priority entries.
+  const freeSlots = MAX_VISIBLE_CHECKPOINTS_PER_RUN - mustKeepIds.size;
+  const fillIds = new Set(
+    entries.filter((e) => !mustKeepIds.has(e.id)).slice(-freeSlots).map((e) => e.id),
   );
-
-  const filtered = priority.length <= MAX_VISIBLE_CHECKPOINTS_PER_RUN
-    ? priority
-    : priority.slice(-MAX_VISIBLE_CHECKPOINTS_PER_RUN);
-
-  return filtered;
+  return entries.filter((e) => mustKeepIds.has(e.id) || fillIds.has(e.id));
 }
 
 /**
@@ -148,16 +159,13 @@ export function buildBranchCanvasModel(
   if (branchTree === null) return { nodes: [], edges: [] };
 
   const allTreeNodes = flattenTree(branchTree);
-  const treeNodeMap = new Map<string, BranchTreeNode>(
-    allTreeNodes.map((n) => [n.run_id, n]),
-  );
   const rootRunId = branchTree.run_id;
 
   // ── Compute expandedRunIds ──────────────────────────────────────────────────
   // Priority: active first, then favorites in DFS order. Cap at MAX_EXPANDED_RUNS.
   // Then remove any id in collapsedRunIds (explicit collapse always wins).
   const candidateIds: string[] = [];
-  if (activeRunId !== null && treeNodeMap.has(activeRunId)) {
+  if (activeRunId !== null && allTreeNodes.some((n) => n.run_id === activeRunId)) {
     candidateIds.push(activeRunId);
   }
   for (const node of allTreeNodes) {

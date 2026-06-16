@@ -301,11 +301,13 @@ describe("buildBranchCanvasModel", () => {
       }),
     );
 
-    // Count distinct run_ids that have checkpoint nodes
+    // Count distinct run_ids that have checkpoint nodes.
+    // cp id format is cp:{run_id}:{cp_id}; cp_id may contain colons, so extract
+    // run_id as the segment between the first and second colon.
     const expandedRunIds = new Set(
       out.nodes
         .filter((n) => n.id.startsWith("cp:"))
-        .map((n) => n.id.split(":")[1]),
+        .map((n) => n.id.slice(3, n.id.indexOf(":", 3))),
     );
     expect(expandedRunIds.size).toBeLessThanOrEqual(MAX_EXPANDED_RUNS);
   });
@@ -410,6 +412,95 @@ describe("buildBranchCanvasModel", () => {
     // And the branch edge should use the cp: node (not fallback)
     const branchEdge = out.edges.find((e) => e.id === `branch:${CHILD_ID}`);
     expect(branchEdge!.source).toBe(`cp:${ROOT_ID}:${SOURCE_CP}`);
+  });
+
+  // ── 15. Secondary cap keeps ALL must-keep entries (mustKeep.size ≥ 8 path) ──
+  it("never evicts must-keep entries when the priority subset itself exceeds 8", () => {
+    // 10 entries, all must-keep: candidate:selected, 8 accepted, final:selected
+    const entries: Array<{ id: string; accepted?: boolean }> = [];
+    entries.push({ id: "candidate:selected" });
+    for (let i = 0; i < 8; i++) {
+      entries.push({ id: `acc-${i}`, accepted: true });
+    }
+    entries.push({ id: "final:selected" });
+
+    expect(entries.length).toBe(10);
+    expect(entries.length).toBeGreaterThan(MAX_VISIBLE_CHECKPOINTS_PER_RUN);
+
+    const timeline = makeTimeline(entries, ROOT_ID);
+    const tree = makeTreeNode({ run_id: ROOT_ID });
+
+    const out = buildBranchCanvasModel(
+      baseInput({
+        branchTree: tree,
+        activeRunId: ROOT_ID,
+        timelinesByRunId: { [ROOT_ID]: timeline },
+      }),
+    );
+
+    const cpIds = out.nodes
+      .filter((n) => n.id.startsWith(`cp:${ROOT_ID}:`))
+      .map((n) => n.id.slice(`cp:${ROOT_ID}:`.length));
+
+    // candidate:selected and final:selected must always be present
+    expect(cpIds).toContain("candidate:selected");
+    expect(cpIds).toContain("final:selected");
+
+    // All 8 accepted entries must be kept
+    for (let i = 0; i < 8; i++) {
+      expect(cpIds).toContain(`acc-${i}`);
+    }
+
+    // All 10 must-keep entries are emitted (none evicted)
+    expect(cpIds).toHaveLength(10);
+  });
+
+  // ── 16. Referenced cp survives when priority set overflows the cap ─────────
+  it("keeps a referenced cp node even when ≥8 accepted entries would push it out with old slice logic", () => {
+    const CHILD_ID = "run-child-refoverflow";
+    const SOURCE_CP = "early-ref"; // referenced early; old slice(-8) would evict it
+
+    const child = makeTreeNode({
+      run_id: CHILD_ID,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      source_checkpoint_id: SOURCE_CP,
+    });
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [child] });
+
+    // Timeline: early-ref (referenced), then 8 accepted entries → 9 priority entries total
+    // Old code: priority.slice(-8) → early-ref (index 0) gets evicted
+    const entries: Array<{ id: string; accepted?: boolean }> = [];
+    entries.push({ id: SOURCE_CP }); // referenced — must keep
+    for (let i = 0; i < 8; i++) {
+      entries.push({ id: `acc-${i}`, accepted: true }); // also priority
+    }
+
+    expect(entries.length).toBe(9);
+    expect(entries.length).toBeGreaterThan(MAX_VISIBLE_CHECKPOINTS_PER_RUN);
+
+    const timeline = makeTimeline(entries, ROOT_ID);
+
+    const out = buildBranchCanvasModel(
+      baseInput({
+        branchTree: tree,
+        activeRunId: ROOT_ID,
+        timelinesByRunId: { [ROOT_ID]: timeline },
+      }),
+    );
+
+    const cpIds = out.nodes
+      .filter((n) => n.id.startsWith(`cp:${ROOT_ID}:`))
+      .map((n) => n.id.slice(`cp:${ROOT_ID}:`.length));
+
+    // The referenced checkpoint must be kept
+    expect(cpIds).toContain(SOURCE_CP);
+
+    // The branch edge must point to the cp: node, not the fallback run: node
+    const branchEdge = out.edges.find((e) => e.id === `branch:${CHILD_ID}`);
+    expect(branchEdge).toBeDefined();
+    expect(branchEdge!.source).toBe(`cp:${ROOT_ID}:${SOURCE_CP}`);
+    expect(branchEdge!.target).toBe(`run:${CHILD_ID}`);
   });
 
   // ── 13. input node type/data ───────────────────────────────────────────────
