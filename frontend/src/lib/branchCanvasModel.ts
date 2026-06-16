@@ -1,5 +1,6 @@
 import type { Node, Edge } from "@xyflow/react";
-import type { BranchTreeNode, CheckpointTimelineEntry } from "../hooks/usePngShader";
+import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus } from "../hooks/usePngShader";
+import { truncate } from "./format";
 
 export type BranchCanvasNodeType =
   | "input"
@@ -9,7 +10,9 @@ export type BranchCanvasNodeType =
   | "variant_group"
   | "variant_run"
   | "region_constraint"
-  | "preference";
+  | "preference"
+  | "draw_session"
+  | "draw_card";
 
 // React Flow v12 requires node data to extend Record<string, unknown>.
 export interface BranchCanvasNodeData extends Record<string, unknown> {
@@ -39,7 +42,10 @@ export type BranchCanvasEdgeRelation =
   | "active_run"
   | "variant_child"
   | "constraint_applies"
-  | "preference_influences";
+  | "preference_influences"
+  | "draw_from"
+  | "draw_card"
+  | "replacement_of";
 
 export interface BranchCanvasEdgeData extends Record<string, unknown> {
   relation: BranchCanvasEdgeRelation;
@@ -192,11 +198,13 @@ export function buildBranchCanvasModel(
   const rootRunId = branchTree.run_id;
 
   // ── Identify variant run_ids (those with a variant_group_id) ──────────────
+  // Runs that also have draw_session_id are draw cards — they are handled by
+  // the draw model and must NOT participate in variant_group/variant_run aggregation.
   const variantRunIds = new Set<string>();
   // Map from group_id → ordered list of tree nodes (DFS order, first-encounter)
   const variantGroupMap = new Map<string, BranchTreeNode[]>();
   for (const node of allTreeNodes) {
-    if (node.variant_group_id) {
+    if (node.variant_group_id && !node.draw_session_id) {
       variantRunIds.add(node.run_id);
       let members = variantGroupMap.get(node.variant_group_id);
       if (!members) {
@@ -259,12 +267,14 @@ export function buildBranchCanvasModel(
     data: { relation: "timeline_next" },
   });
 
-  // ── Regular run nodes + checkpoint nodes (DFS order, skipping variant runs) ─
+  // ── Regular run nodes + checkpoint nodes (DFS order, skipping variant/draw runs) ─
   for (const treeNode of allTreeNodes) {
     const { run_id } = treeNode;
 
     // Skip variant runs — they are handled in the variant group pass below
     if (variantRunIds.has(run_id)) continue;
+    // Skip draw card runs — they are handled by the draw model (buildDrawSessionModel)
+    if (treeNode.draw_session_id) continue;
 
     const statusOverride = statusesByRunId[run_id];
     const status =
@@ -442,6 +452,7 @@ export function buildBranchCanvasModel(
   for (const treeNode of allTreeNodes) {
     if (!treeNode.parent_run_id) continue; // root — no branch edge
     if (variantRunIds.has(treeNode.run_id)) continue; // variant runs handled above
+    if (treeNode.draw_session_id) continue; // draw cards handled by draw model
 
     const { run_id, parent_run_id, source_checkpoint_id } = treeNode;
 
@@ -468,6 +479,112 @@ export function buildBranchCanvasModel(
         ...(sourceCpLabel !== undefined ? { label: sourceCpLabel } : {}),
       },
     });
+  }
+
+  return { nodes, edges };
+}
+
+// ─── Draw Session Model ───────────────────────────────────────────────────────
+
+export interface BuildDrawSessionOptions {
+  anchorNodeId: string;   // canvas node id the "draw_from" edge originates from
+  collapsed?: boolean;    // when true, emit only the draw_session node (no cards)
+}
+
+/**
+ * Pure function: converts a DrawSessionStatus into React-Flow canvas
+ * nodes/edges for the draw_session and its draw_card children.
+ * All nodes get position {x:0, y:0} — layout assigns real coordinates.
+ */
+export function buildDrawSessionModel(
+  session: DrawSessionStatus,
+  opts: BuildDrawSessionOptions,
+): { nodes: BranchCanvasNode[]; edges: BranchCanvasEdge[] } {
+  const { draw_id, status, feedback, requested_count, completed_count, running_count, failed_count, winner_run_id, cards } = session;
+
+  const nodes: BranchCanvasNode[] = [];
+  const edges: BranchCanvasEdge[] = [];
+
+  // ── draw_session node ──────────────────────────────────────────────────────
+  const dsNodeId = `draw:${draw_id}`;
+  const rawLabel = feedback ? truncate(feedback, 24) : `Draw ${draw_id.slice(-4)}`;
+  nodes.push({
+    id: dsNodeId,
+    type: "draw_session",
+    position: { x: 0, y: 0 },
+    data: {
+      type: "draw_session",
+      draw_id,
+      status,
+      label: rawLabel,
+      requested_count,
+      completed_count,
+      running_count,
+      failed_count,
+      winner_run_id: winner_run_id ?? null,
+      card_count: cards.length,
+    },
+  });
+
+  // ── draw_from edge: anchor → draw_session ──────────────────────────────────
+  edges.push({
+    id: `drawfrom:${draw_id}`,
+    source: opts.anchorNodeId,
+    target: dsNodeId,
+    data: { relation: "draw_from" },
+  });
+
+  // Collapsed: stop here — no card nodes/edges.
+  if (opts.collapsed) {
+    return { nodes, edges };
+  }
+
+  // ── Collect run_ids in this session for replacement-link guard ────────────
+  const sessionRunIds = new Set(cards.map((c) => c.run_id));
+
+  // ── draw_card nodes + draw_card edges ─────────────────────────────────────
+  for (const card of cards) {
+    const dcNodeId = `drawcard:${card.run_id}`;
+
+    nodes.push({
+      id: dcNodeId,
+      type: "draw_card",
+      position: { x: 0, y: 0 },
+      data: {
+        type: "draw_card",
+        draw_id,
+        run_id: card.run_id,
+        card_id: card.card_id,
+        group_id: card.group_id ?? null,
+        index: card.index,
+        status: card.status,
+        label: card.label,
+        strategy_label: card.strategy_label ?? null,
+        favorite: !!card.favorite,
+        eliminated: !!card.eliminated,
+        final_score: card.final_score ?? null,
+        replacement_of_run_id: card.replacement_of_run_id ?? null,
+        can_use_for_fusion: !!card.can_use_for_fusion,
+        is_winner: winner_run_id === card.run_id,
+      },
+    });
+
+    edges.push({
+      id: `drawcard:${card.run_id}`,
+      source: dsNodeId,
+      target: dcNodeId,
+      data: { relation: "draw_card" },
+    });
+
+    // ── replacement_of edge (only when target is also in this session) ───────
+    if (card.replacement_of_run_id && sessionRunIds.has(card.replacement_of_run_id)) {
+      edges.push({
+        id: `repl:${card.run_id}`,
+        source: dcNodeId,
+        target: `drawcard:${card.replacement_of_run_id}`,
+        data: { relation: "replacement_of" },
+      });
+    }
   }
 
   return { nodes, edges };

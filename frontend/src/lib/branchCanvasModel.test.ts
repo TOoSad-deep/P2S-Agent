@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   buildBranchCanvasModel,
+  buildDrawSessionModel,
   MAX_EXPANDED_RUNS,
   MAX_VISIBLE_CHECKPOINTS_PER_RUN,
   type BuildBranchCanvasInput,
 } from "./branchCanvasModel";
-import type { BranchTreeNode, CheckpointTimelineEntry } from "../hooks/usePngShader";
+import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, DrawCardStatus } from "../hooks/usePngShader";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,41 @@ function makeTreeNode(overrides: Partial<BranchTreeNode> & { run_id: string }): 
     variant_group_id: null,
     variant_index: null,
     variant_label: null,
+    draw_session_id: null,
+    draw_card_index: null,
+    replacement_of_run_id: null,
+    ...overrides,
+  };
+}
+
+function makeDrawCard(overrides: Partial<DrawCardStatus> & { card_id: string; run_id: string; index: number }): DrawCardStatus {
+  return {
+    group_id: null,
+    status: "completed",
+    label: `Card ${overrides.index}`,
+    strategy_label: null,
+    final_score: null,
+    favorite: false,
+    eliminated: false,
+    replacement_of_run_id: null,
+    can_use_for_fusion: false,
+    ...overrides,
+  };
+}
+
+function makeDrawSession(overrides: Partial<DrawSessionStatus> & { draw_id: string }): DrawSessionStatus {
+  return {
+    parent_run_id: "run-parent-0001",
+    source_checkpoint_id: "candidate:selected",
+    feedback: "Make it more vibrant",
+    status: "completed",
+    requested_count: 3,
+    completed_count: 3,
+    running_count: 0,
+    failed_count: 0,
+    winner_run_id: null,
+    group_ids: [],
+    cards: [],
     ...overrides,
   };
 }
@@ -900,6 +936,41 @@ describe("buildBranchCanvasModel", () => {
     expect(vgNode!.data.status).toBe("failed");
   });
 
+  // ── V3.5 Exclusion: run with variant_group_id + draw_session_id is excluded ──
+  it("excludes a run with both variant_group_id and draw_session_id from variant_group/variant_run nodes", () => {
+    const GROUP_ID = "grp-draw-excl";
+    // Draw card: has BOTH variant_group_id and draw_session_id — must NOT produce variant nodes
+    const DRAW_RUN = "run-var-draw-card";
+    // Pure variant: has variant_group_id ONLY — must still produce variant nodes
+    const PURE_VAR = "run-var-pure";
+
+    const drawNode = makeTreeNode({
+      run_id: DRAW_RUN,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      variant_group_id: GROUP_ID,
+      variant_index: 0,
+      draw_session_id: "ds-excl-001",
+    });
+    const pureVarNode = makeTreeNode({
+      run_id: PURE_VAR,
+      root_run_id: ROOT_ID,
+      parent_run_id: ROOT_ID,
+      variant_group_id: GROUP_ID,
+      variant_index: 1,
+    });
+    const tree = makeTreeNode({ run_id: ROOT_ID, children: [drawNode, pureVarNode] });
+    const out = buildBranchCanvasModel(baseInput({ branchTree: tree }));
+
+    // Must NOT produce variant_run or variant_group node for the draw-session run
+    expect(out.nodes.find((n) => n.id === `run:${DRAW_RUN}` && n.type === "variant_run")).toBeUndefined();
+
+    // Control: pure variant run is handled by variant pass → variant_run node
+    const pureVarRunNode = out.nodes.find((n) => n.id === `run:${PURE_VAR}`);
+    expect(pureVarRunNode).toBeDefined();
+    expect(pureVarRunNode!.type).toBe("variant_run");
+  });
+
   // ── V3-7. Active variant run doesn't waste an expansion budget slot ────────
   it("active variant run produces no checkpoint nodes and a favorited non-variant run still expands", () => {
     // MAX_EXPANDED_RUNS = 3. Build 3 non-variant runs that should all expand
@@ -955,5 +1026,188 @@ describe("buildBranchCanvasModel", () => {
     expect(expandedRunIds.has(NON_VAR_B)).toBe(true);
     expect(expandedRunIds.has(NON_VAR_C)).toBe(true);
     expect(expandedRunIds.size).toBe(3);
+  });
+});
+
+// ─── buildDrawSessionModel tests ─────────────────────────────────────────────
+
+describe("buildDrawSessionModel", () => {
+  const ANCHOR = "run:run-root-0001";
+  const DRAW_ID = "ds-test-0001";
+
+  // ── DS-1. 3 cards → correct node/edge counts and id scheme ────────────────
+  it("3 cards → 1 draw_session node + 3 draw_card nodes + 1 draw_from edge + 3 draw_card edges", () => {
+    const cardA = makeDrawCard({ card_id: "c1", run_id: "run-c1", index: 0 });
+    const cardB = makeDrawCard({ card_id: "c2", run_id: "run-c2", index: 1 });
+    const cardC = makeDrawCard({ card_id: "c3", run_id: "run-c3", index: 2 });
+    const session = makeDrawSession({ draw_id: DRAW_ID, cards: [cardA, cardB, cardC] });
+
+    const { nodes, edges } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+
+    // Nodes: 1 draw_session + 3 draw_card
+    expect(nodes).toHaveLength(4);
+    const dsNode = nodes.find((n) => n.id === `draw:${DRAW_ID}`);
+    expect(dsNode).toBeDefined();
+    expect(dsNode!.type).toBe("draw_session");
+    expect(dsNode!.data.type).toBe("draw_session");
+
+    const cardIds = nodes.filter((n) => n.type === "draw_card").map((n) => n.id);
+    expect(cardIds).toContain("drawcard:run-c1");
+    expect(cardIds).toContain("drawcard:run-c2");
+    expect(cardIds).toContain("drawcard:run-c3");
+
+    // Edges: 1 draw_from + 3 draw_card
+    expect(edges).toHaveLength(4);
+    const dfEdge = edges.find((e) => e.id === `drawfrom:${DRAW_ID}`);
+    expect(dfEdge).toBeDefined();
+    expect(dfEdge!.source).toBe(ANCHOR);
+    expect(dfEdge!.target).toBe(`draw:${DRAW_ID}`);
+    expect(dfEdge!.data?.relation).toBe("draw_from");
+
+    for (const card of [cardA, cardB, cardC]) {
+      const dcEdge = edges.find((e) => e.id === `drawcard:${card.run_id}`);
+      expect(dcEdge).toBeDefined();
+      expect(dcEdge!.source).toBe(`draw:${DRAW_ID}`);
+      expect(dcEdge!.target).toBe(`drawcard:${card.run_id}`);
+      expect(dcEdge!.data?.relation).toBe("draw_card");
+    }
+  });
+
+  // ── DS-2. collapsed:true → only draw_session node + draw_from edge ─────────
+  it("collapsed:true emits only the draw_session node + draw_from edge", () => {
+    const cardA = makeDrawCard({ card_id: "c1", run_id: "run-c1", index: 0 });
+    const cardB = makeDrawCard({ card_id: "c2", run_id: "run-c2", index: 1 });
+    const session = makeDrawSession({ draw_id: DRAW_ID, cards: [cardA, cardB] });
+
+    const { nodes, edges } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR, collapsed: true });
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].id).toBe(`draw:${DRAW_ID}`);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].id).toBe(`drawfrom:${DRAW_ID}`);
+  });
+
+  // ── DS-3. replacement_of edge: in-session target → edge emitted ─────────────
+  it("emits replacement_of edge when card B replaces card A (both in session)", () => {
+    const cardA = makeDrawCard({ card_id: "c-a", run_id: "run-a", index: 0 });
+    const cardB = makeDrawCard({ card_id: "c-b", run_id: "run-b", index: 1, replacement_of_run_id: "run-a" });
+    const session = makeDrawSession({ draw_id: DRAW_ID, cards: [cardA, cardB] });
+
+    const { edges } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+
+    const replEdge = edges.find((e) => e.id === "repl:run-b");
+    expect(replEdge).toBeDefined();
+    expect(replEdge!.source).toBe("drawcard:run-b");
+    expect(replEdge!.target).toBe("drawcard:run-a");
+    expect(replEdge!.data?.relation).toBe("replacement_of");
+  });
+
+  // ── DS-3b. replacement_of edge: target NOT in session → no edge ─────────────
+  it("does NOT emit replacement_of edge when the target run_id is not in this session", () => {
+    const cardB = makeDrawCard({ card_id: "c-b", run_id: "run-b", index: 0, replacement_of_run_id: "run-outside" });
+    const session = makeDrawSession({ draw_id: DRAW_ID, cards: [cardB] });
+
+    const { edges } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+
+    expect(edges.find((e) => e.id === "repl:run-b")).toBeUndefined();
+  });
+
+  // ── DS-4. winner/favorite/eliminated flags surface on card node data ─────────
+  it("is_winner, favorite, eliminated flags are correctly set on card node data", () => {
+    const WINNER_RUN = "run-winner";
+    const cardWinner = makeDrawCard({ card_id: "c-w", run_id: WINNER_RUN, index: 0, favorite: true });
+    const cardElim   = makeDrawCard({ card_id: "c-e", run_id: "run-elim", index: 1, eliminated: true });
+    const cardPlain  = makeDrawCard({ card_id: "c-p", run_id: "run-plain", index: 2 });
+    const session = makeDrawSession({ draw_id: DRAW_ID, winner_run_id: WINNER_RUN, cards: [cardWinner, cardElim, cardPlain] });
+
+    const { nodes } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+
+    const winNode   = nodes.find((n) => n.id === `drawcard:${WINNER_RUN}`);
+    const elimNode  = nodes.find((n) => n.id === "drawcard:run-elim");
+    const plainNode = nodes.find((n) => n.id === "drawcard:run-plain");
+
+    expect(winNode!.data.is_winner).toBe(true);
+    expect(winNode!.data.favorite).toBe(true);
+    expect(winNode!.data.eliminated).toBe(false);
+
+    expect(elimNode!.data.eliminated).toBe(true);
+    expect(elimNode!.data.is_winner).toBe(false);
+
+    expect(plainNode!.data.is_winner).toBe(false);
+    expect(plainNode!.data.favorite).toBe(false);
+  });
+
+  // ── DS-5. empty cards → just draw_session node + draw_from edge ────────────
+  it("empty cards list → 1 draw_session node + 1 draw_from edge", () => {
+    const session = makeDrawSession({ draw_id: DRAW_ID, cards: [] });
+
+    const { nodes, edges } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].id).toBe(`draw:${DRAW_ID}`);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].id).toBe(`drawfrom:${DRAW_ID}`);
+  });
+
+  // ── DS-6. draw_session node data fields ─────────────────────────────────────
+  it("draw_session node data carries expected summary fields", () => {
+    const session = makeDrawSession({
+      draw_id: DRAW_ID,
+      status: "running",
+      requested_count: 4,
+      completed_count: 2,
+      running_count: 1,
+      failed_count: 1,
+      winner_run_id: "run-w",
+      cards: [
+        makeDrawCard({ card_id: "c1", run_id: "run-c1", index: 0 }),
+        makeDrawCard({ card_id: "c2", run_id: "run-c2", index: 1 }),
+      ],
+    });
+
+    const { nodes } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+    const dsNode = nodes.find((n) => n.id === `draw:${DRAW_ID}`)!;
+
+    expect(dsNode.data.draw_id).toBe(DRAW_ID);
+    expect(dsNode.data.status).toBe("running");
+    expect(dsNode.data.requested_count).toBe(4);
+    expect(dsNode.data.completed_count).toBe(2);
+    expect(dsNode.data.running_count).toBe(1);
+    expect(dsNode.data.failed_count).toBe(1);
+    expect(dsNode.data.winner_run_id).toBe("run-w");
+    expect(dsNode.data.card_count).toBe(2);
+    expect(dsNode.position).toEqual({ x: 0, y: 0 });
+  });
+
+  // ── DS-7. draw_card node data fields ─────────────────────────────────────────
+  it("draw_card node data carries expected fields", () => {
+    const card = makeDrawCard({
+      card_id: "c-detail",
+      run_id: "run-detail",
+      index: 3,
+      group_id: "grp-abc",
+      status: "completed",
+      label: "Card detail",
+      strategy_label: "high",
+      final_score: 0.85,
+      can_use_for_fusion: true,
+    });
+    const session = makeDrawSession({ draw_id: DRAW_ID, cards: [card] });
+
+    const { nodes } = buildDrawSessionModel(session, { anchorNodeId: ANCHOR });
+    const dcNode = nodes.find((n) => n.id === "drawcard:run-detail")!;
+
+    expect(dcNode.data.type).toBe("draw_card");
+    expect(dcNode.data.draw_id).toBe(DRAW_ID);
+    expect(dcNode.data.run_id).toBe("run-detail");
+    expect(dcNode.data.card_id).toBe("c-detail");
+    expect(dcNode.data.group_id).toBe("grp-abc");
+    expect(dcNode.data.index).toBe(3);
+    expect(dcNode.data.status).toBe("completed");
+    expect(dcNode.data.label).toBe("Card detail");
+    expect(dcNode.data.strategy_label).toBe("high");
+    expect(dcNode.data.final_score).toBe(0.85);
+    expect(dcNode.data.can_use_for_fusion).toBe(true);
+    expect(dcNode.position).toEqual({ x: 0, y: 0 });
   });
 });

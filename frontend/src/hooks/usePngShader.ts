@@ -212,6 +212,9 @@ export interface BranchTreeNode {
   variant_group_id?: string | null;
   variant_index?: number | null;
   variant_label?: string | null;
+  draw_session_id?: string | null;
+  draw_card_index?: number | null;
+  replacement_of_run_id?: string | null;
 }
 
 export interface BranchTreeResponse {
