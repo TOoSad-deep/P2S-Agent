@@ -297,6 +297,8 @@ export interface VariantStatusEntry {
   changes_summary?: string | null;
   error?: string | null;
   favorite?: boolean;
+  preference_score?: number;
+  recommended?: boolean;
 }
 
 export interface VariantGroupStatus {
@@ -307,6 +309,7 @@ export interface VariantGroupStatus {
   status: "queued" | "running" | "completed" | "partial_failed" | "failed" | "cancelled" | string;
   winner_run_id?: string | null;
   variants: VariantStatusEntry[];
+  preference_enabled?: boolean;
 }
 
 export interface DrawCardStatus {

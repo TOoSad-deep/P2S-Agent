@@ -2,7 +2,7 @@
 // Switches content by selected node type: null / input / run / checkpoint / branch_action / variant_group / variant_run / reserved.
 // Presentational + callbacks only; branch-draft form owns local state. No data fetching.
 import { useState, useEffect } from "react";
-import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle, Layers2, ChevronDown, ChevronRight } from "lucide-react";
+import { Search, Star, GitBranch, CheckCircle, XCircle, GitMerge, ThumbsUp, ThumbsDown, StopCircle, Layers2, ChevronDown, ChevronRight, Sparkles } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import type {
   BranchMode,
@@ -737,6 +737,7 @@ interface VariantCardProps {
   groupId: string;
   winnerRunId?: string | null;
   activeRunId: string | null;
+  preferenceEnabled?: boolean;
   onSwitchRun: (runId: string) => void;
   onRefineFromCheckpoint?: (runId: string, checkpointId: string) => void;
   onSelectWinner?: (groupId: string, winnerRunId: string, reason?: string) => void;
@@ -749,6 +750,7 @@ function VariantCard({
   groupId,
   winnerRunId,
   activeRunId,
+  preferenceEnabled,
   onSwitchRun,
   onRefineFromCheckpoint,
   onSelectWinner,
@@ -756,6 +758,7 @@ function VariantCard({
   disabled,
 }: VariantCardProps) {
   const isWinner = v.run_id === winnerRunId;
+  const showRecommended = preferenceEnabled && v.recommended;
 
   return (
     <div
@@ -777,6 +780,15 @@ function VariantCard({
         <span className="text-[11px] font-mono text-[var(--text-muted)] shrink-0">
           {fmtScore(v.final_score ?? v.current_score)}
         </span>
+        {showRecommended && (
+          <span
+            title={v.preference_score !== undefined ? `偏好得分 Preference score: ${v.preference_score.toFixed(3)}` : "偏好推荐 Recommended by preferences"}
+            className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[10px] font-medium bg-emerald-500/20 text-emerald-400 shrink-0"
+          >
+            <Sparkles className="w-2.5 h-2.5" />
+            推荐
+          </span>
+        )}
         {isWinner && (
           <span title="胜出 Winner" className="shrink-0">
             <Star className="w-3.5 h-3.5 text-emerald-400 fill-current" />
@@ -900,6 +912,7 @@ function VariantGroupView({
               groupId={groupId}
               winnerRunId={group.winner_run_id}
               activeRunId={activeRunId}
+              preferenceEnabled={group.preference_enabled}
               onSwitchRun={onSwitchRun}
               onRefineFromCheckpoint={onRefineFromCheckpoint}
               onSelectWinner={onSelectWinner}
@@ -972,6 +985,7 @@ function VariantRunDetailView({
         groupId={groupId}
         winnerRunId={group.winner_run_id}
         activeRunId={activeRunId}
+        preferenceEnabled={group.preference_enabled}
         onSwitchRun={onSwitchRun}
         onRefineFromCheckpoint={onRefineFromCheckpoint}
         onSelectWinner={onSelectWinner}
