@@ -5,6 +5,7 @@
 > **关联方案:**
 > - [V1 branch refinement](2026-06-15-human-in-loop-branch-refinement-design.md)
 > - [V2 branch workspace](2026-06-15-human-in-loop-v2-branch-workspace-design.md)
+> - [V2.1 branch canvas workspace](2026-06-16-human-in-loop-v2-1-branch-canvas-workspace-design.md)
 > - [V3 variant exploration](2026-06-15-human-in-loop-v3-variant-exploration-design.md)
 > - [V4 local control/preferences](2026-06-15-human-in-loop-v4-local-control-preferences-design.md)
 
@@ -22,14 +23,15 @@
 M0: Preflight / 现有能力稳定
 M1: V1.1 单 checkpoint -> 单 child run
 M2: V1.2 directed acceptance
-M3: V2.1 run index + timeline API
-M4: V2.2 branch workspace UI
-M5: V3.1 VariantGroup backend
-M6: V3.2 VariantExplorer frontend
-M7: V4.1 structured constraints
-M8: V4.2 region/mask constraints
-M9: V4.3 preference events/profile
-M10: V4.4 preference-assisted generation/ranking
+M3: V2 backend foundation: run index + timeline API
+M4: V2 branch workspace UI
+M5: V2.1 Branch Canvas Workspace
+M6: V3.1 VariantGroup backend
+M7: V3.2 Variant Canvas / Explorer frontend
+M8: V4.1 structured constraints
+M9: V4.2 region/mask constraints
+M10: V4.3 preference events/profile
+M11: V4.4 preference-assisted generation/ranking
 ```
 
 ## M0: Preflight
@@ -114,7 +116,7 @@ M10: V4.4 preference-assisted generation/ranking
 
 - `cd backend && python -m pytest tests/unit/test_glsl_refinement.py tests/unit/test_graph.py -v`
 
-## M3: V2.1 Run Index + Timeline API
+## M3: V2 Backend Foundation: Run Index + Timeline API
 
 目标：分支历史可恢复，run 内 checkpoint 有统一 timeline。
 
@@ -140,7 +142,7 @@ M10: V4.4 preference-assisted generation/ranking
 
 - `cd backend && python -m pytest tests/unit/test_run_index.py tests/unit/test_checkpoints.py tests/unit/test_router.py -v`
 
-## M4: V2.2 Branch Workspace UI
+## M4: V2 Branch Workspace UI
 
 目标：前端有可用的分支工作台。
 
@@ -165,7 +167,41 @@ M10: V4.4 preference-assisted generation/ranking
 
 - `cd frontend && npm run build`
 
-## M5: V3.1 VariantGroup Backend
+## M5: V2.1 Branch Canvas Workspace
+
+目标：在已完成 V1/V2 的基础上，把 branch tree/timeline UI 升级为自由画布式工作台，并作为 V3/V4 前端扩展底座。
+
+前端顺序：
+
+1. 接入 `reactflow`，新增 `BranchCanvasWorkspace` 容器。
+2. 新增 `branchCanvasModel.ts`，把 `/branches`、`/timeline`、`/status` 映射为 canvas nodes/edges。
+3. 新增 `branchCanvasLayout.ts`，实现 deterministic layered layout。
+4. 新增 `BranchCanvasNode`、`BranchCanvasInspector`。
+5. 支持节点选择、active run 切换、checkpoint preview。
+6. 支持从 checkpoint 创建 branch draft，并复用 `branchRefine` 提交。
+7. 支持 compare selection、fit view、auto layout、local layout overrides。
+8. 保留 `Canvas / List` fallback 切换。
+
+后端顺序：
+
+1. 首版不新增 pipeline 能力。
+2. 若前端聚合过重，再新增只读 `GET /png-shader/runs/{run_id}/canvas`，但不作为 V2.1 首发依赖。
+
+验收：
+
+- branch tree/timeline 能稳定映射为画布节点和边。
+- child run edge 优先连接到 parent source checkpoint。
+- parent timeline 未加载时 edge 回退连接到 parent run node。
+- 双击 run 节点能切换 active run。
+- 从 checkpoint 节点提交 branch 后，画布出现新 child run。
+- 手动拖拽位置只存本地 layout，不污染 run index。
+- List fallback 仍可用。
+
+测试门禁：
+
+- `cd frontend && npm run build`
+
+## M6: V3.1 VariantGroup Backend
 
 目标：一次从同一 checkpoint 创建多个 variant child runs。
 
@@ -192,31 +228,33 @@ M10: V4.4 preference-assisted generation/ranking
 
 - `cd backend && python -m pytest tests/unit/test_variant_groups.py tests/unit/test_router.py tests/unit/test_run_index.py -v`
 
-## M6: V3.2 Variant Explorer UI
+## M7: V3.2 Variant Canvas / Explorer UI
 
 目标：用户能比较 variants、选 winner、继续优化。
 
 前端顺序：
 
 1. `usePngShader` 增加 variant group API。
-2. 新增 `VariantExplorerPanel`。
-3. 新增 `VariantGrid` / `VariantCard`。
+2. 若已完成 M5，优先新增 `VariantGroupCanvasNode`、`VariantRunCanvasNode`、`VariantInspector`。
+3. 若未启用 canvas，新增 `VariantExplorerPanel`、`VariantGrid`、`VariantCard` 作为 fallback。
 4. group status 每 2 秒轮询。
 5. 支持 preview variant。
 6. 支持 select winner。
 7. 支持 continue from winner。
+8. winner 后刷新 branch canvas/list，并高亮 winner 节点。
 
 验收：
 
 - variants 逐个完成时 UI 实时更新。
 - failed variant 不阻塞其他 variant。
 - winner 选中后切换 active run。
+- canvas 模式下 VariantGroup 可折叠/展开。
 
 测试门禁：
 
 - `cd frontend && npm run build`
 
-## M7: V4.1 Structured Constraints
+## M8: V4.1 Structured Constraints
 
 目标：全局结构化约束进入 prompt 和 artifacts。
 
@@ -232,8 +270,9 @@ M10: V4.4 preference-assisted generation/ranking
 前端顺序：
 
 1. 新增 `FineControlPanel`。
-2. 支持 locks、targets、edit strength。
-3. constraints 传给 branchRefine/exploreVariants。
+2. 若已完成 M5，优先挂入 `BranchCanvasInspector`。
+3. 支持 locks、targets、edit strength。
+4. constraints 传给 branchRefine/exploreVariants。
 
 验收：
 
@@ -241,7 +280,7 @@ M10: V4.4 preference-assisted generation/ranking
 - constraints 能写入 artifacts。
 - constraints notes 进入 LLM prompt。
 
-## M8: V4.2 Region / Mask Constraints
+## M9: V4.2 Region / Mask Constraints
 
 目标：支持 rectangle 区域约束和局部指标。
 
@@ -259,6 +298,7 @@ M10: V4.4 preference-assisted generation/ranking
 1. 新增 `RegionMaskEditor`。
 2. 在 `ImageDiffPanel` 上覆盖 rectangle editor。
 3. 每个 region 可设置 mode/instruction/strength。
+4. 若已完成 M5，新增 `RegionConstraintCanvasNode`，表达 region 挂载到哪个 run/checkpoint。
 
 验收：
 
@@ -266,7 +306,7 @@ M10: V4.4 preference-assisted generation/ranking
 - 越界 region 返回 422。
 - region metrics 只计算区域内像素。
 
-## M9: V4.3 Preference Events / Profile
+## M10: V4.3 Preference Events / Profile
 
 目标：把用户选择沉淀为可审计偏好。
 
@@ -281,8 +321,10 @@ M10: V4.4 preference-assisted generation/ranking
 前端顺序：
 
 1. 新增 `PreferencePanel`。
-2. 展示 profile。
-3. 支持启用/禁用、编辑、重建、清空。
+2. 若已完成 M5，PreferencePanel 作为 inspector tab 或 drawer。
+3. 展示 profile。
+4. 支持启用/禁用、编辑、重建、清空。
+5. canvas 模式下可显示轻量 `PreferenceCanvasNode` 或 preference annotation。
 
 验收：
 
@@ -290,7 +332,7 @@ M10: V4.4 preference-assisted generation/ranking
 - profile 可编辑。
 - `enabled=false` 时不注入 preference notes。
 
-## M10: V4.4 Preference-assisted Generation / Ranking
+## M11: V4.4 Preference-assisted Generation / Ranking
 
 目标：偏好辅助 prompt 和 variant ranking。
 
@@ -303,8 +345,8 @@ M10: V4.4 preference-assisted generation/ranking
 
 前端顺序：
 
-1. HumanLoopPanel 增加 `Use preferences`。
-2. VariantExplorer 显示 preference recommendation。
+1. HumanLoopPanel/BranchCanvasInspector 增加 `Use preferences`。
+2. VariantExplorer/VariantInspector 显示 preference recommendation。
 3. 用户可覆盖推荐。
 
 验收：
@@ -317,6 +359,7 @@ M10: V4.4 preference-assisted generation/ranking
 
 - 不要在 V1 branch-refine 未稳定前做 V3 variants。
 - 不要在 V2 run index 未完成前做复杂 branch tree。
+- 不要在 V2.1 canvas model 未稳定前，把 V3/V4 的主 UI 只做成 canvas-only；必须保留 fallback。
 - 不要在 V4.1 constraints 未完成前做 mask。
 - 不要在 V3 group events 未稳定前做 preference profile。
 
@@ -324,6 +367,7 @@ M10: V4.4 preference-assisted generation/ranking
 
 - V1 后端 checkpoint resolver 与前端 HumanLoopPanel 原型可以并行。
 - V2 run index 与 BranchWorkspace UI mock 可以并行。
+- V2.1 BranchCanvas 静态节点/布局与 inspector UI 可以并行。
 - V3 backend VariantGroup 与前端 VariantCard 静态组件可以并行。
 - V4 PreferencePanel UI 可以在后端 preferences endpoint 前用 mock 数据并行。
 
@@ -338,4 +382,3 @@ M10: V4.4 preference-assisted generation/ranking
 - 简单 HumanLoopPanel。
 
 这是 human-in-loop 的最小闭环。V2 以后是体验和规模化能力。
-

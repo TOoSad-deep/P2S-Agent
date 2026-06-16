@@ -2,7 +2,7 @@
 
 > **状态:** 技术方案，待评审。
 >
-> **依赖:** V1 branch refine、V2 branch workspace、V3 variant exploration。V4 复用用户 feedback、branch lineage、variant ratings/winner events，并新增结构化约束和偏好记忆。
+> **依赖:** V1 branch refine、V2 branch workspace、V3 variant exploration。若已完成 [V2.1 Branch Canvas Workspace](2026-06-16-human-in-loop-v2-1-branch-canvas-workspace-design.md)，V4 的 controls/preferences 应优先挂入 Branch Canvas inspector，region/preference 以附属节点进入画布。V4 复用用户 feedback、branch lineage、variant ratings/winner events，并新增结构化约束和偏好记忆。
 >
 > **目标读者:** 后端/前端实现者，以及后续把 V4 拆成 implementation plan 的 agentic worker。
 
@@ -39,7 +39,7 @@ V4 建议拆成 4 个小版本：
 
 ### 精细控制面板
 
-在 V2/V3 的 HumanLoopPanel 中新增 `Controls` 区域：
+在 V2/V3 的 HumanLoopPanel 中新增 `Controls` 区域。若启用 V2.1，则该区域放入 `BranchCanvasInspector`，根据当前选中的 run/checkpoint/variant node 动态展示：
 
 ```text
 Directed Refinement
@@ -93,6 +93,25 @@ Strength: 0.80
 - 当前 run 是否启用偏好。
 
 用户可以编辑、禁用、清空偏好。
+
+### Branch Canvas 集成
+
+V4 不把精细框选直接放在 Branch Canvas 上。画布负责表达约束关系，精细编辑仍在主 preview 完成：
+
+```text
+Checkpoint / VariantRun node
+   ├─ RegionConstraint: water modify "make reflection clearer"
+   ├─ RegionConstraint: sky protect "preserve cloud layering"
+   └─ Preference: enabled, prefers conservative + lighting_color
+```
+
+交互边界：
+
+- 用户在 Branch Canvas 选择要优化的 checkpoint/run。
+- 右侧 inspector 显示 FineControlPanel、PreferencePanel。
+- 用户点击 `Add region` 后，在 Main Preview 的 `RegionMaskEditor` 上画 rectangle。
+- 保存后，画布在选中节点旁新增 `RegionConstraintNode`，用 `constraint_applies` edge 连接。
+- 约束数据仍随 `branchRefine` / `exploreVariants` 请求提交，不独立触发 pipeline。
 
 ## 数据模型
 
@@ -463,6 +482,8 @@ region_metrics/*.json
 - `RegionMaskEditor.tsx`
 - `PreferencePanel.tsx`
 - `PreferenceChips.tsx`
+- `RegionConstraintCanvasNode.tsx`，V2.1 canvas 模式新增
+- `PreferenceCanvasNode.tsx`，V2.1 canvas 模式新增
 
 ### RegionMaskEditor
 
@@ -504,6 +525,16 @@ export interface HumanConstraintSpec {
 - 清空 profile/events。
 - 从最近 winner/rating 重建。
 
+### Canvas 模式职责
+
+启用 V2.1 后：
+
+- `FineControlPanel` 嵌入 `BranchCanvasInspector`。
+- `PreferencePanel` 作为 inspector tab 或全局 drawer。
+- `RegionMaskEditor` 仍挂在 `ImageDiffPanel` / Main Preview。
+- `RegionConstraintCanvasNode` 只展示 region label、mode、strength、instruction 摘要，不负责画框。
+- `PreferenceCanvasNode` 只展示当前 run 使用的 profile snapshot 或推荐，不允许在节点内复杂编辑。
+
 ## 测试计划
 
 ### 后端
@@ -541,6 +572,8 @@ export interface HumanConstraintSpec {
 - rectangle editor normalized 坐标正确。
 - PreferencePanel patch/clear/rebuild 调用正确。
 - branchRefine/exploreVariants body 包含 constraints。
+- V2.1 canvas 模式下，新增/删除 region 后，画布 constraint node 与选中 run/checkpoint 同步。
+- 切换 canvas node 时 inspector 中 constraints draft 不串到其他节点。
 
 ## 失败处理和安全
 
@@ -561,13 +594,15 @@ export interface HumanConstraintSpec {
 ## 实现顺序
 
 1. V4.1: `human_constraints.py` + request schema + prompt notes 注入。
-2. V4.1: 前端 FineControlPanel，不含 mask。
+2. V4.1: 前端 FineControlPanel，不含 mask；若启用 V2.1，先嵌入 BranchCanvasInspector。
 3. V4.2: rectangle RegionMaskEditor + region constraints。
-4. V4.2: `region_metrics.py` + protected/modify region guardrails。
-5. V4.3: `preferences.py` + events/profile endpoints。
-6. V4.3: 从 V3 winner/rating group events 镜像或回填 preference events。
-7. V4.4: preference notes 注入 branch/variant prompts。
-8. V4.4: preference-assisted variant ranking。
+4. V4.2: V2.1 canvas 模式新增 RegionConstraintCanvasNode，表达约束挂载关系。
+5. V4.2: `region_metrics.py` + protected/modify region guardrails。
+6. V4.3: `preferences.py` + events/profile endpoints。
+7. V4.3: 从 V3 winner/rating group events 镜像或回填 preference events。
+8. V4.3: V2.1 canvas 模式新增 PreferenceCanvasNode 或 preference annotation。
+9. V4.4: preference notes 注入 branch/variant prompts。
+10. V4.4: preference-assisted variant ranking。
 
 ## 关键文件索引
 
@@ -576,5 +611,7 @@ export interface HumanConstraintSpec {
 - [backend/app/routers/png_shader.py](../backend/app/routers/png_shader.py) — branch/variant/preference endpoints
 - [backend/app/metrics/compute.py](../backend/app/metrics/compute.py) — 可复用图像指标，V4 新增局部指标
 - [frontend/src/components/ImageDiffPanel.tsx](../frontend/src/components/ImageDiffPanel.tsx) — region editor 挂载点
-- [frontend/src/components/PngShaderView.tsx](../frontend/src/components/PngShaderView.tsx) — FineControlPanel / PreferencePanel 挂载点
+- [frontend/src/components/PngShaderView.tsx](../frontend/src/components/PngShaderView.tsx) — FineControlPanel / PreferencePanel / canvas 挂载点
 - [frontend/src/hooks/usePngShader.ts](../frontend/src/hooks/usePngShader.ts) — constraints/preference API
+- `frontend/src/components/BranchCanvasInspector.tsx` — V2.1 canvas 模式下 controls/preferences 的主要挂载点
+- `frontend/src/lib/branchCanvasModel.ts` — V2.1 canvas 模式下把 region/preference 映射为附属节点

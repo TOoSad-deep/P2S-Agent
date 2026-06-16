@@ -5,6 +5,8 @@
 > **依赖:** V1 `branch-refine` 已完成：checkpoint resolver、child run lineage、用户反馈注入、directed acceptance。
 >
 > **目标读者:** 后端/前端实现者，以及后续把 V2 拆成 implementation plan 的 agentic worker。
+>
+> **V2.1 补充:** 若 V1/V2 已完成，后续前端体验优先按 [V2.1 Branch Canvas Workspace](2026-06-16-human-in-loop-v2-1-branch-canvas-workspace-design.md) 升级；本 V2 文档中的 branch tree/list 作为数据语义和 fallback 视图保留。
 
 ## Goal
 
@@ -24,7 +26,7 @@ V2 不新增优化算法；它主要是**工作流和可追溯性**。
 - 不做 mask、局部编辑、属性级强约束；这是 V4。
 - 不替换现有 1 秒轮询机制。
 - 不引入数据库。v2 采用轻量 JSONL/JSON 文件索引，后续需要多人协作时再迁移 DB。
-- 不做复杂画布式节点编辑；branch tree 是可扫描、可切换、可继续的工作台视图。
+- V2 baseline 不做复杂画布式节点编辑；branch tree 是可扫描、可切换、可继续的工作台视图。V2.1 会在不改变 V2 后端语义的前提下，把 branch tree/timeline 映射为 Branch Canvas。
 
 ## 与 V1 的关系
 
@@ -62,6 +64,8 @@ V2 在其上补齐：
 │ └─ Compare strip: current branch vs parent / sibling        │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+V2 baseline 可以先实现上述列表/树式工作台。若项目已完成 V1/V2，则建议进入 V2.1：采用三栏 `Main Preview + Branch Canvas + Inspector`，其中 timeline 和 branch tree 不消失，而是变成画布节点/边的数据来源。用户在画布上选 checkpoint、切 active run、创建 branch draft；右侧 inspector 继续承载 feedback、locks、metadata、refine 操作。
 
 ### 核心动作
 
@@ -124,6 +128,8 @@ export interface BranchTreeNode {
   children: BranchTreeNode[];
 }
 ```
+
+V2.1 不要求后端替换该模型；前端通过 adapter 将 `BranchTreeNode` 与 `CheckpointTimelineEntry` 转成 canvas nodes/edges。这样 V2 的 `/branches` 仍是权威 lineage 数据，画布只是交互视图。
 
 ### CheckpointTimelineEntry
 
@@ -407,6 +413,17 @@ publish_partial({
 - `BranchTree.tsx`
 - `BranchCompareStrip.tsx`
 
+V2.1 新增但不替代 V2 API：
+
+- `BranchCanvasWorkspace.tsx`
+- `BranchCanvas.tsx`
+- `BranchCanvasNode.tsx`
+- `BranchCanvasInspector.tsx`
+- `branchCanvasModel.ts`
+- `branchCanvasLayout.ts`
+
+`BranchTree` 和 `CheckpointTimeline` 保留为 compact/fallback 视图，也可继续给 screen reader 或小屏模式使用。
+
 `BranchWorkspacePanel` 输入：
 
 ```ts
@@ -484,6 +501,7 @@ const [branchTree, setBranchTree] = useState<BranchTreeNode | null>(null);
 4. 前端 `switchRun` + BranchWorkspace 基础 UI。
 5. artifact 安全读取和 thumbnail。
 6. 视觉 polish 与对比 strip。
+7. V1/V2 完成后执行 V2.1 Branch Canvas：用现有 `/branches`、`/timeline`、`/status` 构造画布视图模型，保留 list fallback。
 
 ## 关键文件索引
 

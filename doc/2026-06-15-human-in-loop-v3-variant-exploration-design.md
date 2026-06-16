@@ -2,7 +2,7 @@
 
 > **状态:** 技术方案，待评审。
 >
-> **依赖:** V1 branch refine + V2 branch workspace。V3 复用 child run、lineage、timeline、branch tree，并新增 VariantGroup 编排层。
+> **依赖:** V1 branch refine + V2 branch workspace。若已完成 [V2.1 Branch Canvas Workspace](2026-06-16-human-in-loop-v2-1-branch-canvas-workspace-design.md)，V3 前端应优先以 Branch Canvas 承载 VariantGroup；V3 复用 child run、lineage、timeline、branch tree/canvas，并新增 VariantGroup 编排层。
 >
 > **目标读者:** 后端/前端实现者，以及后续把 V3 拆成 implementation plan 的 agentic worker。
 
@@ -40,6 +40,12 @@ V2：
 - timeline/checkpoint 管理。
 - run metadata 和 artifact 读取。
 
+V2.1：
+
+- branch tree/timeline 被映射为 Branch Canvas。
+- checkpoint、run、branch action 都是画布节点。
+- V3 的 VariantGroup 在画布中表现为 group node，可展开为多个 variant child run 节点。
+
 V3：
 
 - 在 V1 branch-refine 外包一层 `VariantGroup`。
@@ -74,7 +80,7 @@ checkpoint + feedback
 
 ### 对比界面
 
-`VariantExplorerPanel` 展示：
+若尚未启用 V2.1，`VariantExplorerPanel` 可作为独立 panel 展示：
 
 ```text
 Variant Group: "make reflection stronger"
@@ -88,6 +94,20 @@ status: 2/4 completed, 2 running
 │ [Preview] [Select winner] [Continue]              │
 └────────────┴────────────┴────────────┴────────────┘
 ```
+
+若已启用 V2.1，则推荐 canvas-first 展示：
+
+```text
+checkpoint: refinement:iter:2
+   │
+   └─ VariantGroup: "make reflection stronger"  status 2/4 completed
+        ├─ Variant A conservative    score 0.71  ★ winner
+        ├─ Variant B semantic        score 0.69
+        ├─ Variant C lighting_color  running
+        └─ Variant D detail_texture  failed
+```
+
+`VariantExplorerPanel` 在该模式下降级为右侧 inspector/detail view：展示 group 设置、variant 卡片、winner/rating 操作；主关系仍由 Branch Canvas 表达。
 
 用户动作：
 
@@ -350,6 +370,8 @@ variant_label: str | None = None
 - 默认显示每个 variant child。
 - UI 可将同 group 的 sibling 折叠成一个 group node。
 
+V2.1 canvas 模式下不建议修改 run index 的树语义。前端 `buildBranchCanvasModel` 根据 `variant_group_id/index/label` 把 sibling child runs 聚合为 `VariantGroupNode`，展开时再显示每个 `VariantRunNode`。
+
 ### `backend/app/routers/png_shader.py` 扩展
 
 新增 endpoints：
@@ -446,6 +468,9 @@ judge_variant_group(reference, parent_render, variant_renders, feedback)
 - `VariantGrid.tsx`
 - `VariantCard.tsx`
 - `VariantCompareModal.tsx`
+- `VariantGroupCanvasNode.tsx`，V2.1 canvas 模式新增
+- `VariantRunCanvasNode.tsx`，V2.1 canvas 模式新增
+- `VariantInspector.tsx`，可复用 `VariantExplorerPanel` 的详情与操作
 
 `VariantCard` 信息：
 
@@ -477,8 +502,9 @@ const [variantGroup, setVariantGroup] = useState<VariantGroupStatus | null>(null
 
 1. 更新 group status。
 2. 调 `switchRun(winnerRunId)`，让主工作台展示 winner。
-3. branch tree 刷新。
-4. HumanLoopPanel 的默认 checkpoint 设为 `final:selected`。
+3. 刷新 branch tree/canvas model。
+4. winner 节点高亮并写入 favorite metadata。
+5. HumanLoopPanel/Inspector 的默认 checkpoint 设为 `final:selected`。
 
 ## 测试计划
 
@@ -511,6 +537,8 @@ const [variantGroup, setVariantGroup] = useState<VariantGroupStatus | null>(null
 - group polling 展示逐个完成的 variant。
 - Select winner 后调用 API 并 switch run。
 - failed variant 卡片不会阻塞其他 variants。
+- V2.1 canvas 模式下，group 能显示为可折叠 `VariantGroupNode`，展开后每个 child run 有独立节点。
+- winner 选择后 canvas 高亮 winner 节点，且 active run 与主 preview 同步。
 
 ## 失败处理
 
@@ -548,9 +576,11 @@ const [variantGroup, setVariantGroup] = useState<VariantGroupStatus | null>(null
 2. `/explore-variants` 创建 grouped child runs。
 3. `/variant-groups/{id}` 聚合状态。
 4. stop/winner/rating endpoints。
-5. 前端 VariantExplorerPanel。
-6. winner promotion 和 branch tree 联动。
-7. 可选 VLM tournament 自动推荐。
+5. 前端 hooks 接入 group API。
+6. 若未启用 V2.1，先实现 `VariantExplorerPanel` / `VariantGrid`。
+7. 若已启用 V2.1，优先实现 `VariantGroupCanvasNode` / `VariantRunCanvasNode` / `VariantInspector`，`VariantExplorerPanel` 作为 fallback/detail。
+8. winner promotion 和 branch tree/canvas 联动。
+9. 可选 VLM tournament 自动推荐。
 
 ## 关键文件索引
 
@@ -559,4 +589,5 @@ const [variantGroup, setVariantGroup] = useState<VariantGroupStatus | null>(null
 - [backend/app/pipeline/run_index.py](../backend/app/pipeline/run_index.py) — lineage 与 branch tree
 - [backend/app/pipeline/glsl_refinement.py](../backend/app/pipeline/glsl_refinement.py) — variant child run 复用闭环
 - [frontend/src/hooks/usePngShader.ts](../frontend/src/hooks/usePngShader.ts) — variant group API
-- [frontend/src/components/PngShaderView.tsx](../frontend/src/components/PngShaderView.tsx) — variant explorer 挂载点
+- [frontend/src/components/PngShaderView.tsx](../frontend/src/components/PngShaderView.tsx) — variant explorer/canvas 挂载点
+- `frontend/src/lib/branchCanvasModel.ts` — V2.1 canvas 模式下把 variant groups 映射为节点和边
