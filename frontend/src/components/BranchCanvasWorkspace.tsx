@@ -28,6 +28,7 @@ import {
   buildBranchCanvasModel,
   buildDrawSessionModel,
   buildRegionConstraintModel,
+  buildFusionModel,
   type BranchCanvasNode,
   type BranchCanvasEdge,
 } from "../lib/branchCanvasModel";
@@ -247,7 +248,7 @@ export default function BranchCanvasWorkspace({
     [activeRunId, result?.status, result?.quality_router?.final_score],
   );
 
-  // ── Derived: canvas model (base branch model + optional draw-session + region merge) ─
+  // ── Derived: canvas model (base branch model + optional draw-session + region + fusion merge) ─
   const model = useMemo(() => {
     const base = buildBranchCanvasModel({
       activeRunId,
@@ -278,8 +279,23 @@ export default function BranchCanvasWorkspace({
         edges: [...merged.edges, ...regionModel.edges],
       };
     }
+    if (fusionStatus) {
+      const fusionModel = buildFusionModel(fusionStatus, {
+        baseAnchorNodeId: `run:${fusionStatus.base_run_id}`,
+        sourceAnchorNodeIds: Object.fromEntries(
+          fusionStatus.source_run_ids.map((r) => [r, `run:${r}`]),
+        ),
+        outputAnchorNodeId: fusionStatus.output_run_id
+          ? `run:${fusionStatus.output_run_id}`
+          : undefined,
+      });
+      merged = {
+        nodes: [...merged.nodes, ...fusionModel.nodes],
+        edges: [...merged.edges, ...fusionModel.edges],
+      };
+    }
     return merged;
-  }, [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds, drawSession, collapsedDrawIds, regionDraft]);
+  }, [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds, collapsedGroupIds, drawSession, collapsedDrawIds, regionDraft, fusionStatus]);
 
   // ── Derived: positioned nodes (layout only; no selection) ─────────────────
   const positionedNodes = useMemo(

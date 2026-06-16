@@ -3,11 +3,12 @@ import {
   buildBranchCanvasModel,
   buildDrawSessionModel,
   buildRegionConstraintModel,
+  buildFusionModel,
   MAX_EXPANDED_RUNS,
   MAX_VISIBLE_CHECKPOINTS_PER_RUN,
   type BuildBranchCanvasInput,
 } from "./branchCanvasModel";
-import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, DrawCardStatus, RegionConstraint } from "../hooks/usePngShader";
+import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, DrawCardStatus, RegionConstraint, FusionStatus, FusionRegion } from "../hooks/usePngShader";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -1342,5 +1343,223 @@ describe("buildRegionConstraintModel", () => {
 
     expect(nodes.map((n) => n.id)).toEqual(ids.map((id) => `region:${id}`));
     expect(edges.map((e) => e.id)).toEqual(ids.map((id) => `applies:${id}`));
+  });
+});
+
+// ─── buildFusionModel tests ───────────────────────────────────────────────────
+
+function makeFusionRegion(overrides: Partial<FusionRegion> & { id: string }): FusionRegion {
+  return {
+    label: `FusionRegion ${overrides.id}`,
+    source_run_id: "run-src-default",
+    instruction: `Instruction for ${overrides.id}`,
+    geometry_type: "rect",
+    geometry: { x: 0.1, y: 0.1, w: 0.3, h: 0.3 },
+    strength: 0.5,
+    blend_mode: "soft",
+    feather: 0.08,
+    ...overrides,
+  };
+}
+
+function makeFusion(overrides: Partial<FusionStatus> & { fusion_id: string }): FusionStatus {
+  return {
+    status: "draft",
+    base_run_id: "run-base-0001",
+    source_run_ids: [],
+    output_run_id: null,
+    composite_target_url: null,
+    regions: [],
+    error: null,
+    ...overrides,
+  };
+}
+
+describe("buildFusionModel", () => {
+  const FUSION_ID = "fus-test-0001";
+  const BASE_ANCHOR = "run:run-base-0001";
+  const SRC_A = "run-src-aaaa";
+  const SRC_B = "run-src-bbbb";
+  const OUT_RUN = "run-out-0001";
+  const OUT_ANCHOR = `run:${OUT_RUN}`;
+
+  // ── FM-1. Full fusion: base + 2 sources + output → 1 node + 4 edges ────────
+  it("fusion with base + 2 sources + output: 1 node + fusion_base + 2 fusion_source + fusion_output edges", () => {
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      status: "completed",
+      base_run_id: "run-base-0001",
+      source_run_ids: [SRC_A, SRC_B],
+      output_run_id: OUT_RUN,
+      regions: [makeFusionRegion({ id: "r1" }), makeFusionRegion({ id: "r2" })],
+    });
+
+    const { nodes, edges } = buildFusionModel(fusion, {
+      baseAnchorNodeId: BASE_ANCHOR,
+      sourceAnchorNodeIds: { [SRC_A]: `run:${SRC_A}`, [SRC_B]: `run:${SRC_B}` },
+      outputAnchorNodeId: OUT_ANCHOR,
+    });
+
+    // 1 fusion_plan node
+    expect(nodes).toHaveLength(1);
+    const fpNode = nodes[0];
+    expect(fpNode.id).toBe(`fusion:${FUSION_ID}`);
+    expect(fpNode.type).toBe("fusion_plan");
+    expect(fpNode.data.type).toBe("fusion_plan");
+    expect(fpNode.data.fusion_id).toBe(FUSION_ID);
+    expect(fpNode.data.status).toBe("completed");
+    expect(fpNode.data.base_run_id).toBe("run-base-0001");
+    expect(fpNode.data.source_run_ids).toEqual([SRC_A, SRC_B]);
+    expect(fpNode.data.output_run_id).toBe(OUT_RUN);
+    expect(fpNode.data.region_count).toBe(2);
+    expect(fpNode.data.label).toBe(`Fusion ${FUSION_ID.slice(-4)}`);
+    expect(fpNode.position).toEqual({ x: 0, y: 0 });
+
+    // 4 edges total
+    expect(edges).toHaveLength(4);
+
+    // fusion_base edge
+    const baseEdge = edges.find((e) => e.id === `fbase:${FUSION_ID}`);
+    expect(baseEdge).toBeDefined();
+    expect(baseEdge!.source).toBe(BASE_ANCHOR);
+    expect(baseEdge!.target).toBe(`fusion:${FUSION_ID}`);
+    expect(baseEdge!.data?.relation).toBe("fusion_base");
+
+    // fusion_source edges (in source_run_ids order)
+    const srcEdgeA = edges.find((e) => e.id === `fsrc:${FUSION_ID}:${SRC_A}`);
+    expect(srcEdgeA).toBeDefined();
+    expect(srcEdgeA!.source).toBe(`run:${SRC_A}`);
+    expect(srcEdgeA!.target).toBe(`fusion:${FUSION_ID}`);
+    expect(srcEdgeA!.data?.relation).toBe("fusion_source");
+
+    const srcEdgeB = edges.find((e) => e.id === `fsrc:${FUSION_ID}:${SRC_B}`);
+    expect(srcEdgeB).toBeDefined();
+    expect(srcEdgeB!.source).toBe(`run:${SRC_B}`);
+    expect(srcEdgeB!.target).toBe(`fusion:${FUSION_ID}`);
+    expect(srcEdgeB!.data?.relation).toBe("fusion_source");
+
+    // fusion_output edge
+    const outEdge = edges.find((e) => e.id === `fout:${FUSION_ID}`);
+    expect(outEdge).toBeDefined();
+    expect(outEdge!.source).toBe(`fusion:${FUSION_ID}`);
+    expect(outEdge!.target).toBe(OUT_ANCHOR);
+    expect(outEdge!.data?.relation).toBe("fusion_output");
+  });
+
+  // ── FM-2. No anchors → just the fusion_plan node, no edges ─────────────────
+  it("no anchors provided → 1 fusion_plan node and 0 edges", () => {
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      source_run_ids: [SRC_A, SRC_B],
+      output_run_id: OUT_RUN,
+      regions: [makeFusionRegion({ id: "r1" })],
+    });
+
+    const { nodes, edges } = buildFusionModel(fusion, {});
+
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].id).toBe(`fusion:${FUSION_ID}`);
+    expect(edges).toHaveLength(0);
+  });
+
+  // ── FM-3. output edge absent when output_run_id is null ──────────────────────
+  it("output edge is absent when output_run_id is null even if outputAnchorNodeId is provided", () => {
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      source_run_ids: [SRC_A],
+      output_run_id: null,
+    });
+
+    const { edges } = buildFusionModel(fusion, {
+      baseAnchorNodeId: BASE_ANCHOR,
+      sourceAnchorNodeIds: { [SRC_A]: `run:${SRC_A}` },
+      outputAnchorNodeId: OUT_ANCHOR,
+    });
+
+    // Should have base + 1 source, but NO output edge
+    expect(edges.find((e) => e.id === `fout:${FUSION_ID}`)).toBeUndefined();
+    expect(edges.map((e) => e.data?.relation)).toContain("fusion_base");
+    expect(edges.map((e) => e.data?.relation)).toContain("fusion_source");
+    expect(edges).toHaveLength(2);
+  });
+
+  // ── FM-4. data carries correct fields for status/region_count/output_run_id ─
+  it("node data carries status, region_count, and output_run_id correctly", () => {
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      status: "running",
+      output_run_id: OUT_RUN,
+      regions: [makeFusionRegion({ id: "r1" }), makeFusionRegion({ id: "r2" }), makeFusionRegion({ id: "r3" })],
+    });
+
+    const { nodes } = buildFusionModel(fusion, {});
+    const fpNode = nodes[0];
+
+    expect(fpNode.data.status).toBe("running");
+    expect(fpNode.data.region_count).toBe(3);
+    expect(fpNode.data.output_run_id).toBe(OUT_RUN);
+  });
+
+  // ── FM-5. source_run_ids order is preserved in edges ─────────────────────────
+  it("fusion_source edges preserve source_run_ids array order", () => {
+    const SRC_1 = "run-src-1111";
+    const SRC_2 = "run-src-2222";
+    const SRC_3 = "run-src-3333";
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      source_run_ids: [SRC_1, SRC_2, SRC_3],
+    });
+
+    const { edges } = buildFusionModel(fusion, {
+      sourceAnchorNodeIds: {
+        [SRC_1]: `run:${SRC_1}`,
+        [SRC_2]: `run:${SRC_2}`,
+        [SRC_3]: `run:${SRC_3}`,
+      },
+    });
+
+    const sourceEdges = edges.filter((e) => e.data?.relation === "fusion_source");
+    expect(sourceEdges).toHaveLength(3);
+    expect(sourceEdges[0].id).toBe(`fsrc:${FUSION_ID}:${SRC_1}`);
+    expect(sourceEdges[1].id).toBe(`fsrc:${FUSION_ID}:${SRC_2}`);
+    expect(sourceEdges[2].id).toBe(`fsrc:${FUSION_ID}:${SRC_3}`);
+  });
+
+  // ── FM-6. source anchor missing for one run_id → that edge omitted ───────────
+  it("omits fusion_source edge for a run whose anchor is not in sourceAnchorNodeIds", () => {
+    const SRC_KNOWN = "run-src-known";
+    const SRC_MISSING = "run-src-missing";
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      source_run_ids: [SRC_KNOWN, SRC_MISSING],
+    });
+
+    const { edges } = buildFusionModel(fusion, {
+      sourceAnchorNodeIds: { [SRC_KNOWN]: `run:${SRC_KNOWN}` },
+      // SRC_MISSING is not in the map
+    });
+
+    const sourceEdges = edges.filter((e) => e.data?.relation === "fusion_source");
+    expect(sourceEdges).toHaveLength(1);
+    expect(sourceEdges[0].id).toBe(`fsrc:${FUSION_ID}:${SRC_KNOWN}`);
+  });
+
+  // ── FM-7. deterministic: same input → deeply-equal output ────────────────────
+  it("is deterministic: two calls with identical input produce deeply-equal output", () => {
+    const fusion = makeFusion({
+      fusion_id: FUSION_ID,
+      source_run_ids: [SRC_A, SRC_B],
+      output_run_id: OUT_RUN,
+      regions: [makeFusionRegion({ id: "r1" })],
+    });
+    const opts = {
+      baseAnchorNodeId: BASE_ANCHOR,
+      sourceAnchorNodeIds: { [SRC_A]: `run:${SRC_A}`, [SRC_B]: `run:${SRC_B}` },
+      outputAnchorNodeId: OUT_ANCHOR,
+    };
+
+    const a = buildFusionModel(fusion, opts);
+    const b = buildFusionModel(fusion, opts);
+    expect(a).toEqual(b);
   });
 });

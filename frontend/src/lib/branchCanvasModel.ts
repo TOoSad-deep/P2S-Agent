@@ -1,5 +1,5 @@
 import type { Node, Edge } from "@xyflow/react";
-import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, RegionConstraint } from "../hooks/usePngShader";
+import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, RegionConstraint, FusionStatus } from "../hooks/usePngShader";
 import { truncate } from "./format";
 
 export type BranchCanvasNodeType =
@@ -12,7 +12,8 @@ export type BranchCanvasNodeType =
   | "region_constraint"
   | "preference"
   | "draw_session"
-  | "draw_card";
+  | "draw_card"
+  | "fusion_plan";
 
 // React Flow v12 requires node data to extend Record<string, unknown>.
 export interface BranchCanvasNodeData extends Record<string, unknown> {
@@ -45,7 +46,11 @@ export type BranchCanvasEdgeRelation =
   | "preference_influences"
   | "draw_from"
   | "draw_card"
-  | "replacement_of";
+  | "replacement_of"
+  | "fusion_base"
+  | "fusion_source"
+  | "fusion_output"
+  | "region_source";
 
 export interface BranchCanvasEdgeData extends Record<string, unknown> {
   relation: BranchCanvasEdgeRelation;
@@ -633,6 +638,89 @@ export function buildRegionConstraintModel(
       source: opts.anchorNodeId,
       target: nodeId,
       data: { relation: "constraint_applies" },
+    });
+  }
+
+  return { nodes, edges };
+}
+
+// ─── Fusion Plan Model ────────────────────────────────────────────────────────
+
+export interface BuildFusionModelOpts {
+  /** Canvas node id of the base run (e.g. `run:${base_run_id}`). */
+  baseAnchorNodeId?: string;
+  /** Map from source_run_id → canvas node id for each fusion source. */
+  sourceAnchorNodeIds?: Record<string, string>;
+  /** Canvas node id of the output run (e.g. `run:${output_run_id}`). */
+  outputAnchorNodeId?: string;
+}
+
+/**
+ * Pure function: converts a FusionStatus into React-Flow canvas nodes/edges
+ * representing the fusion plan. Emits exactly one `fusion_plan` node and up to
+ * (1 + N + 1) edges depending on which anchor node ids are provided.
+ * All nodes get position {x:0, y:0} — layout assigns real coordinates.
+ * Deterministic (source_run_ids array order). No Date/Math.random.
+ */
+export function buildFusionModel(
+  fusion: FusionStatus,
+  opts: BuildFusionModelOpts,
+): { nodes: BranchCanvasNode[]; edges: BranchCanvasEdge[] } {
+  const { fusion_id, status, base_run_id, source_run_ids, output_run_id, regions } = fusion;
+  const { baseAnchorNodeId, sourceAnchorNodeIds, outputAnchorNodeId } = opts;
+
+  const nodes: BranchCanvasNode[] = [];
+  const edges: BranchCanvasEdge[] = [];
+
+  const fusionNodeId = `fusion:${fusion_id}`;
+
+  // ── Fusion plan node ───────────────────────────────────────────────────────
+  nodes.push({
+    id: fusionNodeId,
+    type: "fusion_plan",
+    position: { x: 0, y: 0 },
+    data: {
+      type: "fusion_plan",
+      fusion_id,
+      status,
+      base_run_id,
+      source_run_ids,
+      output_run_id: output_run_id ?? null,
+      region_count: regions.length,
+      label: `Fusion ${fusion_id.slice(-4)}`,
+    },
+  });
+
+  // ── fusion_base edge: baseAnchorNodeId → fusionNodeId ─────────────────────
+  if (baseAnchorNodeId !== undefined) {
+    edges.push({
+      id: `fbase:${fusion_id}`,
+      source: baseAnchorNodeId,
+      target: fusionNodeId,
+      data: { relation: "fusion_base" },
+    });
+  }
+
+  // ── fusion_source edges: sourceAnchorNodeId → fusionNodeId ────────────────
+  for (const runId of source_run_ids) {
+    const anchorId = sourceAnchorNodeIds?.[runId];
+    if (anchorId !== undefined) {
+      edges.push({
+        id: `fsrc:${fusion_id}:${runId}`,
+        source: anchorId,
+        target: fusionNodeId,
+        data: { relation: "fusion_source" },
+      });
+    }
+  }
+
+  // ── fusion_output edge: fusionNodeId → outputAnchorNodeId ─────────────────
+  if (outputAnchorNodeId !== undefined && output_run_id != null) {
+    edges.push({
+      id: `fout:${fusion_id}`,
+      source: fusionNodeId,
+      target: outputAnchorNodeId,
+      data: { relation: "fusion_output" },
     });
   }
 

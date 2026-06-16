@@ -2,7 +2,7 @@
 // Pure presentational. No data fetching. No app state.
 import { memo } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
-import { ChevronDown, ChevronRight, Crop, Dices, GitBranch, Image, Layers, Loader, Sparkles, Star, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Crop, Dices, GitBranch, GitMerge, Image, Layers, Loader, Sparkles, Star, X } from "lucide-react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import { fmtScore, truncate } from "../lib/format";
 
@@ -537,6 +537,80 @@ export const RegionConstraintNode = memo(function RegionConstraintNode({ data, s
   );
 });
 
+// ─── 10. FusionPlanNode ───────────────────────────────────────────────────────
+
+export const FusionPlanNode = memo(function FusionPlanNode({ data, selected }: NodeProps<BranchCanvasNode>) {
+  const ringClass = selected ? "ring-2 ring-emerald-500" : "";
+
+  const status = data.status as string | undefined;
+  const regionCount = (data.region_count as number | undefined) ?? 0;
+  const outputRunId = data.output_run_id as string | null | undefined;
+
+  // Status badge color
+  let statusBgClass = "bg-[var(--bg-tertiary)] text-[color:var(--text-muted)]";
+  if (status === "completed" || status === "target_ready") {
+    statusBgClass = "bg-emerald-500/20 text-emerald-400";
+  } else if (status === "running") {
+    statusBgClass = "bg-amber-500/20 text-amber-400";
+  } else if (status === "failed") {
+    statusBgClass = "bg-red-500/20 text-red-400";
+  }
+
+  return (
+    <div
+      className={`rounded-lg border text-[11px] flex flex-col gap-1 px-2.5 py-2 shadow-sm transition-all ${ringClass}`}
+      style={{
+        width: 190,
+        background: "var(--bg-secondary)",
+        borderColor: selected ? "var(--accent-primary)" : "var(--border-color)",
+        color: "var(--text-primary)",
+      }}
+    >
+      <Handle type="target" position={Position.Top} />
+
+      {/* Header row: merge icon + label + status badge */}
+      <div className="flex items-center gap-1.5">
+        <span title="fusion plan" className="flex-shrink-0">
+          <GitMerge className="w-3.5 h-3.5 text-emerald-400" />
+        </span>
+        <span
+          className="flex-1 truncate font-medium"
+          style={{ color: "var(--text-primary)" }}
+          title={data.label}
+        >
+          {data.label}
+        </span>
+        {status && (
+          <span className={`text-[10px] px-1 rounded font-medium flex-shrink-0 ${statusBgClass}`}>
+            {status === "running" ? (
+              <Loader className="w-2.5 h-2.5 animate-spin inline mr-0.5" />
+            ) : null}
+            {status}
+          </span>
+        )}
+      </div>
+
+      {/* Region count */}
+      <div className="flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
+        <Crop className="w-3 h-3 flex-shrink-0" />
+        <span>{regionCount} region{regionCount !== 1 ? "s" : ""}</span>
+      </div>
+
+      {/* Output hint */}
+      {outputRunId && (
+        <div
+          className="truncate text-[10px]"
+          style={{ color: "var(--text-muted)" }}
+        >
+          → output
+        </div>
+      )}
+
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+});
+
 // ─── Stable nodeTypes export ──────────────────────────────────────────────────
 // Module constant — satisfies React Flow's nodeTypes stability contract.
 
@@ -550,4 +624,5 @@ export const branchCanvasNodeTypes: NodeTypes = {
   draw_session: DrawSessionNode,
   draw_card: DrawCardNode,
   region_constraint: RegionConstraintNode,
+  fusion_plan: FusionPlanNode,
 };

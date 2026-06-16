@@ -141,6 +141,15 @@ export function layoutBranchCanvas(
   // Process in original input array order.
   const resultMap = new Map<string, BranchCanvasNode>();
 
+  // ── 3a. Collect fusion_plan nodes for the fusion post-pass ─────────────────
+  const fusionPlanNodes: BranchCanvasNode[] = [];
+  for (const node of nodes) {
+    const nodeType = (node.data as { type?: string }).type;
+    if (nodeType === "fusion_plan") {
+      fusionPlanNodes.push(node);
+    }
+  }
+
   // Place all known nodes
   for (const node of nodes) {
     const autoPos = computedPositions.get(node.id);
@@ -347,6 +356,53 @@ export function layoutBranchCanvas(
       const existing = resultMap.get(rcNode.id);
       if (existing !== undefined) {
         resultMap.set(rcNode.id, { ...existing, position: { x: rx, y: ry } });
+      }
+    }
+  }
+
+  // ── 4e. Fusion post-pass: place fusion_plan nodes ───────────────────────────
+  // Step 1: Build baseAnchorOf map from fusion_base edges.
+  // Edge: source = base anchor node id, target = fusion node id ("fusion:{fusion_id}").
+  const fusionBaseAnchorOf = new Map<string, string>(); // fusionNodeId → baseAnchorNodeId
+  for (const edge of edges) {
+    const rel = (edge.data as { relation?: string } | undefined)?.relation;
+    if (rel === "fusion_base") {
+      fusionBaseAnchorOf.set(edge.target, edge.source);
+    }
+  }
+
+  // Step 2: Group fusion_plan nodes by their base anchor id for overlap-avoidance.
+  const fusionByBaseAnchor = new Map<string, BranchCanvasNode[]>();
+  for (const fpNode of fusionPlanNodes) {
+    const anchorId = fusionBaseAnchorOf.get(fpNode.id);
+    if (anchorId !== undefined) {
+      let list = fusionByBaseAnchor.get(anchorId);
+      if (!list) {
+        list = [];
+        fusionByBaseAnchor.set(anchorId, list);
+      }
+      list.push(fpNode);
+    }
+  }
+
+  // Step 3: Place fusion_plan nodes one COLUMN_WIDTH right of (and offset from) base anchor.
+  for (const [anchorId, fpNodes] of fusionByBaseAnchor) {
+    const anchorPos = computedPositions.get(anchorId);
+    if (anchorPos === undefined) continue; // anchor not found — keep incoming positions
+
+    // Sort deterministically by node id
+    const sorted = [...fpNodes].sort((a, b) =>
+      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    );
+
+    for (let i = 0; i < sorted.length; i++) {
+      const fpNode = sorted[i];
+      const fx = anchorPos.x + COLUMN_WIDTH;
+      const fy = anchorPos.y + i * (ROW_HEIGHT * 2);
+      computedPositions.set(fpNode.id, { x: fx, y: fy });
+      const existing = resultMap.get(fpNode.id);
+      if (existing !== undefined) {
+        resultMap.set(fpNode.id, { ...existing, position: { x: fx, y: fy } });
       }
     }
   }
