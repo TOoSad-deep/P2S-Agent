@@ -3,7 +3,7 @@
 // with selection / run-switch / drag-persistence.
 // Branch-draft submit, compare mode, Canvas/List toggle, and mounting into PngShaderView
 // are deferred to V2.1-7 — those props are no-op stubs here.
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { RotateCcw } from "lucide-react";
 import type {
   PngShaderResult,
@@ -89,8 +89,17 @@ export default function BranchCanvasWorkspace({
   const [branchInfo, setBranchInfo] = useState<BranchTreeResponse | null>(null);
   const [activeTimeline, setActiveTimeline] = useState<CheckpointTimelineEntry[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [collapsedRunIds] = useState<Set<string>>(new Set());
+  // TODO(V2.1-7): make stateful when the collapse toggle UI is added
+  const collapsedRunIds = useMemo(() => new Set<string>(), []);
   const [layoutOverrides, setLayoutOverrides] = useState<Record<string, { x: number; y: number }>>({});
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // ── runId ref: kept in sync so async callbacks read the latest value ──────
+  const runIdRef = useRef(runId);
+  useEffect(() => { runIdRef.current = runId; }, [runId]);
+
+  // ── Clear selection on run-switch (I3) ────────────────────────────────────
+  useEffect(() => { setSelectedNodeId(null); }, [runId]);
 
   // ── localStorage key (keyed by root run) ──────────────────────────────────
   const layoutStorageKey = `branchCanvasLayout:${branchInfo?.root_run_id ?? runId ?? "none"}`;
@@ -100,6 +109,14 @@ export default function BranchCanvasWorkspace({
     setLayoutOverrides(loadLayoutOverrides(layoutStorageKey));
   }, [layoutStorageKey]);
 
+  // ── Persist layoutOverrides to localStorage when they change (M3) ─────────
+  // Skipped when overrides are empty to avoid clobbering on initial mount.
+  useEffect(() => {
+    if (Object.keys(layoutOverrides).length > 0) {
+      saveLayoutOverrides(layoutStorageKey, layoutOverrides);
+    }
+  }, [layoutOverrides, layoutStorageKey]);
+
   // ── Fetch branchInfo (alive-guarded) ──────────────────────────────────────
   useEffect(() => {
     if (!runId) {
@@ -108,8 +125,15 @@ export default function BranchCanvasWorkspace({
     }
     let alive = true;
     fetchBranches(runId)
-      .then((b) => { if (alive) setBranchInfo(b); })
-      .catch(() => {});
+      .then((b) => {
+        if (alive) {
+          setBranchInfo(b);
+          setLoadError(null);
+        }
+      })
+      .catch(() => {
+        if (alive) setLoadError("分支信息加载失败 / Failed to load branches");
+      });
     return () => { alive = false; };
   }, [runId, result?.status, fetchBranches]);
 
@@ -135,13 +159,13 @@ export default function BranchCanvasWorkspace({
   // ── Derived: favoriteRunIds ────────────────────────────────────────────────
   const favoriteRunIds = useMemo<Set<string>>(() => {
     if (!branchInfo) return new Set();
-    const result = new Set<string>();
+    const favSet = new Set<string>();
     function walk(node: BranchTreeResponse["tree"]): void {
-      if (node.favorite) result.add(node.run_id);
+      if (node.favorite) favSet.add(node.run_id);
       for (const child of node.children) walk(child);
     }
     walk(branchInfo.tree);
-    return result;
+    return favSet;
   }, [branchInfo]);
 
   // ── Derived: timelinesByRunId (only active run fetched in V2.1-6) ──────────
@@ -178,11 +202,21 @@ export default function BranchCanvasWorkspace({
     [activeRunId, branchInfo?.tree, timelinesByRunId, statusesByRunId, collapsedRunIds, favoriteRunIds],
   );
 
-  // ── Derived: positioned + selected nodes ──────────────────────────────────
-  const positionedNodes = useMemo(() => {
-    const laid = layoutBranchCanvas(model.nodes, model.edges, layoutOverrides);
-    return laid.map((n) => ({ ...n, selected: n.id === selectedNodeId }));
-  }, [model.nodes, model.edges, layoutOverrides, selectedNodeId]);
+  // ── Derived: positioned nodes (layout only; no selection) ─────────────────
+  const positionedNodes = useMemo(
+    () => layoutBranchCanvas(model.nodes, model.edges, layoutOverrides),
+    [model.nodes, model.edges, layoutOverrides],
+  );
+
+  // ── Derived: display nodes (inject selected flag; unchanged nodes are stable)
+  const displayNodes = useMemo(
+    () =>
+      positionedNodes.map((n) => {
+        const sel = n.id === selectedNodeId;
+        return n.selected === sel ? n : { ...n, selected: sel };
+      }),
+    [positionedNodes, selectedNodeId],
+  );
 
   // ── Derived: selected node ─────────────────────────────────────────────────
   const selectedNode = useMemo(
@@ -195,15 +229,15 @@ export default function BranchCanvasWorkspace({
   const handleNodeClick = useCallback(
     (id: string) => {
       setSelectedNodeId(id);
-      const node = positionedNodes.find((n) => n.id === id) ?? null;
+      const node = displayNodes.find((n) => n.id === id) ?? null;
       onPreviewNode?.(node);
     },
-    [positionedNodes, onPreviewNode],
+    [displayNodes, onPreviewNode],
   );
 
   const handleNodeDoubleClick = useCallback(
     (id: string) => {
-      const node = positionedNodes.find((n) => n.id === id);
+      const node = displayNodes.find((n) => n.id === id);
       if (
         node &&
         node.data.type === "run" &&
@@ -213,18 +247,14 @@ export default function BranchCanvasWorkspace({
         switchRun(node.data.run_id);
       }
     },
-    [positionedNodes, activeRunId, switchRun],
+    [displayNodes, activeRunId, switchRun],
   );
 
   const handleDragStop = useCallback(
     (id: string, pos: { x: number; y: number }) => {
-      setLayoutOverrides((prev) => {
-        const next = { ...prev, [id]: pos };
-        saveLayoutOverrides(layoutStorageKey, next);
-        return next;
-      });
+      setLayoutOverrides((prev) => ({ ...prev, [id]: pos }));
     },
-    [layoutStorageKey],
+    [],
   );
 
   const handleResetLayout = useCallback(() => {
@@ -236,11 +266,12 @@ export default function BranchCanvasWorkspace({
     (rid: string, patch: RunMetadataPatch) => {
       updateRunMetadata(rid, patch)
         .then(() => {
-          if (runId) fetchBranches(runId).then(setBranchInfo).catch(() => {});
+          const id = runIdRef.current;
+          if (id) fetchBranches(id).then(setBranchInfo).catch(() => {});
         })
         .catch(() => {});
     },
-    [updateRunMetadata, runId, fetchBranches],
+    [updateRunMetadata, fetchBranches],
   );
 
   // ── Placeholder when no run ────────────────────────────────────────────────
@@ -254,14 +285,22 @@ export default function BranchCanvasWorkspace({
           background: "var(--bg-secondary)",
         }}
       >
-        <p
-          className="text-[13px] text-center leading-relaxed"
-          style={{ color: "var(--text-muted)" }}
-        >
-          运行后显示分支画布
-          <br />
-          <span className="text-[11px] opacity-70">Branch canvas appears after a run</span>
-        </p>
+        {loadError ? (
+          <p
+            className="text-[13px] text-center leading-relaxed text-red-400"
+          >
+            {loadError}
+          </p>
+        ) : (
+          <p
+            className="text-[13px] text-center leading-relaxed"
+            style={{ color: "var(--text-muted)" }}
+          >
+            运行后显示分支画布
+            <br />
+            <span className="text-[11px] opacity-70">Branch canvas appears after a run</span>
+          </p>
+        )}
       </div>
     );
   }
@@ -316,7 +355,7 @@ export default function BranchCanvasWorkspace({
         {/* Canvas — flex-1 */}
         <div className="flex-1 min-w-0">
           <BranchCanvas
-            nodes={positionedNodes}
+            nodes={displayNodes}
             edges={model.edges}
             nodeTypes={branchCanvasNodeTypes}
             selectedNodeId={selectedNodeId}
@@ -335,6 +374,7 @@ export default function BranchCanvasWorkspace({
             onUpdateMetadata={handleUpdateMetadata}
             onRefineFromCheckpoint={(rid, cpId) => onRefineFromCheckpoint?.(rid, cpId)}
             onContinueFromRun={(rid) => onContinueFromRun?.(rid)}
+            // TODO(V2.1-7): wire real branch draft submit; branch_action nodes are not emitted until then
             onSubmitBranch={() => {}}
             onCancelBranch={() => {}}
             disabled={disabled}
