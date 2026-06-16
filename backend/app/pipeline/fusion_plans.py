@@ -255,26 +255,33 @@ def parse_fusion_plan(
     - ``status``: always "draft" on creation.
     - Bad strength/feather coerced to defaults via ``_safe_float``.
     """
+    # Guard: if payload is not a dict, treat as empty
+    payload = payload if isinstance(payload, dict) else {}
+
     base_run_id = str(payload.get("base_run_id") or "")
     draw_session_id = payload.get("draw_session_id")
     feedback = str(payload.get("feedback") or "")
-    metadata = dict(payload.get("metadata") or {})
+    _meta = payload.get("metadata")
+    metadata = _meta if isinstance(_meta, dict) else {}
 
     # Parse regions first so we can derive source_run_ids if needed
-    raw_regions = payload.get("regions") or []
+    _raw_regions = payload.get("regions")
+    raw_regions = _raw_regions if isinstance(_raw_regions, list) else []
     regions: list[FusionRegion] = []
     for r in raw_regions:
         if not isinstance(r, dict):
             continue
         strength = _safe_float(r.get("strength"), 0.5)
         feather = _safe_float(r.get("feather"), 0.08)
+        _geo = r.get("geometry")
+        geometry = _geo if isinstance(_geo, dict) else {}
         regions.append(FusionRegion(
             id=str(r.get("id") or ""),
             label=str(r.get("label") or ""),
             source_run_id=str(r.get("source_run_id") or ""),
             instruction=str(r.get("instruction") or ""),
             geometry_type=str(r.get("geometry_type") or "rect"),
-            geometry=dict(r.get("geometry") or {}),
+            geometry=geometry,
             strength=strength,
             blend_mode=str(r.get("blend_mode") or "soft"),
             feather=feather,

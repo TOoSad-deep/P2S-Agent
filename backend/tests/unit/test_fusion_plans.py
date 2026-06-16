@@ -256,6 +256,116 @@ class TestParseFusionPlan:
         record = self._parse(payload, fusion_id="fus-xyz")
         assert record.fusion_id == "fus-xyz"
 
+    # ------------------------------------------------------------------
+    # Tolerance: non-dict / non-list / None payload fields must not raise
+    # ------------------------------------------------------------------
+
+    def test_string_metadata_does_not_raise_and_coerces_to_empty_dict(self):
+        """metadata='not-a-dict' must not raise; record.metadata == {}."""
+        payload = {
+            "base_run_id": "b",
+            "metadata": "not-a-dict",
+            "regions": [
+                {
+                    "id": "r1",
+                    "label": "sky",
+                    "source_run_id": "run-src-1",
+                    "instruction": "glow",
+                    "geometry_type": "rect",
+                    "geometry": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5},
+                }
+            ],
+        }
+        record = parse_fusion_plan(
+            payload,
+            fusion_id="f",
+            root_run_id="r",
+            parent_run_id="p",
+            created_at=1.0,
+        )
+        assert record.metadata == {}
+
+    def test_string_geometry_does_not_raise_and_coerces_to_empty_dict(self):
+        """A region with geometry='not-a-dict' must not raise; geometry == {}."""
+        payload = {
+            "base_run_id": "b",
+            "regions": [
+                {
+                    "id": "r1",
+                    "label": "sky",
+                    "source_run_id": "run-src-1",
+                    "instruction": "glow",
+                    "geometry_type": "rect",
+                    "geometry": "not-a-dict",
+                }
+            ],
+        }
+        record = parse_fusion_plan(
+            payload,
+            fusion_id="f",
+            root_run_id="r",
+            parent_run_id="p",
+            created_at=1.0,
+        )
+        assert len(record.regions) == 1
+        assert record.regions[0].geometry == {}
+
+    def test_string_source_run_ids_does_not_raise_and_coerces_to_empty(self):
+        """source_run_ids='notalist' must not raise; derived from regions (empty → [])."""
+        payload = {
+            "base_run_id": "b",
+            "source_run_ids": "notalist",
+        }
+        record = parse_fusion_plan(
+            payload,
+            fusion_id="f",
+            root_run_id="r",
+            parent_run_id="p",
+            created_at=1.0,
+        )
+        # No regions → derived list is empty
+        assert record.source_run_ids == []
+
+    def test_none_payload_does_not_raise(self):
+        """parse_fusion_plan(None, ...) must not raise; treats payload as {}."""
+        record = parse_fusion_plan(
+            None,  # type: ignore[arg-type]
+            fusion_id="f",
+            root_run_id="r",
+            parent_run_id="p",
+            created_at=1.0,
+        )
+        assert record.base_run_id == ""
+        assert record.metadata == {}
+        assert record.regions == []
+
+    def test_non_dict_region_entry_is_skipped(self):
+        """A region entry that is not a dict must be silently skipped."""
+        payload = {
+            "base_run_id": "b",
+            "regions": [
+                "not-a-dict-region",
+                {
+                    "id": "r1",
+                    "label": "sky",
+                    "source_run_id": "run-src-1",
+                    "instruction": "glow",
+                    "geometry_type": "rect",
+                    "geometry": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5},
+                },
+            ],
+        }
+        record = parse_fusion_plan(
+            payload,
+            fusion_id="f",
+            root_run_id="r",
+            parent_run_id="p",
+            created_at=1.0,
+        )
+        # Only the valid dict region is kept
+        assert len(record.regions) == 1
+        assert record.regions[0].id == "r1"
+
 
 # ---------------------------------------------------------------------------
 # validate_fusion_plan

@@ -389,6 +389,45 @@ class TestReturnPath:
         assert out.parent == output_dir
 
 
+class TestUnsafeRegionId:
+    def test_unsafe_region_id_skips_mask_no_traversal(self, tmp_path: Path) -> None:
+        """A region id containing '../' must be rejected by _SAFE_ID_RE.
+
+        The composite_target.png IS written (the blend is still applied), but
+        NO mask file is written outside the region_masks directory — in
+        particular, no file at output_dir.parent / 'attack.png' is created.
+        """
+        base = _solid_png(tmp_path / "base.png", (255, 0, 0, 255))
+        source = _solid_png(tmp_path / "src.png", (0, 0, 255, 255))
+        region = FusionRegion(
+            id="../attack",
+            label="evil region",
+            source_run_id="run_a",
+            instruction="test",
+            geometry_type="rect",
+            geometry={"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5},
+            strength=1.0,
+            blend_mode="soft",
+            feather=0.0,
+        )
+        output_dir = tmp_path / "out"
+        # Must not raise
+        out = build_composite_target(
+            base_render_path=base,
+            source_render_paths={"run_a": source},
+            regions=[region],
+            output_dir=output_dir,
+        )
+        # composite_target.png IS written
+        assert out.exists(), "composite_target.png must be written even for unsafe id"
+        assert out.name == "composite_target.png"
+        # No traversal: attack.png must NOT appear at output_dir.parent / "attack.png"
+        traversal_target = output_dir.parent / "attack.png"
+        assert not traversal_target.exists(), (
+            "Path traversal: attack.png must NOT be created outside output_dir"
+        )
+
+
 class TestNonRectRegion:
     def test_non_rect_geometry_type_skipped(self, tmp_path: Path) -> None:
         """geometry_type != 'rect' is not yet supported and should be skipped (no crash)."""
