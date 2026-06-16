@@ -350,8 +350,15 @@ export default function BranchCanvasWorkspace({
       submittingRef.current = true;
       setSubmitError(null);
       branchRefine(branchDraft.sourceRunId, request)
-        .then(() => { setBranchDraft(null); setSelectedNodeId(null); })
-        .catch((err) => { setSubmitError(err instanceof Error ? err.message : "提交失败 / Submit failed"); })
+        .then((newRunId) => {
+          if (newRunId) {
+            setBranchDraft(null);
+            setSelectedNodeId(null);
+          } else {
+            setSubmitError("提交失败 / Submit failed");
+          }
+        })
+        .catch(() => { setSubmitError("提交失败 / Submit failed"); })  // belt-and-suspenders if it ever throws
         .finally(() => { submittingRef.current = false; });
     },
     [branchDraft, branchRefine],
@@ -447,7 +454,6 @@ export default function BranchCanvasWorkspace({
             nodes={displayNodes}
             edges={displayEdges}
             nodeTypes={branchCanvasNodeTypes}
-            selectedNodeId={selectedNodeId}
             onNodeClick={handleNodeClick}
             onNodeDoubleClick={handleNodeDoubleClick}
             onNodeDragStop={handleDragStop}

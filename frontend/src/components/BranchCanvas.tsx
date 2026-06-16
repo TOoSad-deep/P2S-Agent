@@ -17,7 +17,6 @@ interface Props {
    * remounts all nodes.
    */
   nodeTypes?: NodeTypes;
-  selectedNodeId?: string | null; // reserved: drives node.selected highlighting in V2.1-4
   onNodeClick?: (id: string) => void;
   onNodeDoubleClick?: (id: string) => void;
   onSelectionChange?: (ids: string[]) => void;
