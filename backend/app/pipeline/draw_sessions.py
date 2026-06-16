@@ -157,6 +157,8 @@ def load_session(
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(data, dict):
+        return None
     try:
         _created = data.get("created_at")
         created_at_val = float(_created) if _created is not None else 0.0
@@ -205,6 +207,7 @@ def append_session_event(
     sessions_dir.mkdir(parents=True, exist_ok=True)
     path = sessions_dir / f"{draw_id}_events.jsonl"
     line = json.dumps(event, ensure_ascii=False) + "\n"
+    # Module-level lock: serializes event appends across all sessions (events files are per-session; contention is low given 2-12 cards per draw).
     with _EVENTS_LOCK:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)

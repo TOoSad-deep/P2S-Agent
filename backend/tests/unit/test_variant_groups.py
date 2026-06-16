@@ -385,3 +385,27 @@ class TestAggregateGroupStatus:
 
     def test_aggregate_unknown_status_treated_as_non_terminal(self):
         assert aggregate_group_status(["bogus"]) == "running"
+
+
+# ---------------------------------------------------------------------------
+# load_group — non-dict JSON root guard (Finding 1 backport)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadGroupNonDictJson:
+    def _write_json(self, tmp_path: Path, group_id: str, content: str) -> None:
+        grp_dir = tmp_path / "variant_groups"
+        grp_dir.mkdir(parents=True, exist_ok=True)
+        (grp_dir / f"{group_id}.json").write_text(content, encoding="utf-8")
+
+    def test_load_group_non_dict_json_list_returns_none(self, tmp_path):
+        self._write_json(tmp_path, "grp-list", "[1, 2, 3]")
+        assert load_group("grp-list", root=tmp_path) is None
+
+    def test_load_group_non_dict_json_string_returns_none(self, tmp_path):
+        self._write_json(tmp_path, "grp-str-root", '"just a string"')
+        assert load_group("grp-str-root", root=tmp_path) is None
+
+    def test_load_group_non_dict_json_number_returns_none(self, tmp_path):
+        self._write_json(tmp_path, "grp-num-root", "42")
+        assert load_group("grp-num-root", root=tmp_path) is None

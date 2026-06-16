@@ -214,6 +214,8 @@ def load_group(
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(data, dict):
+        return None
     try:
         _created = data.get("created_at")
         created_at_val = float(_created) if _created is not None else 0.0

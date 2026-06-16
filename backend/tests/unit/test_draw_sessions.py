@@ -436,3 +436,27 @@ class TestAggregateDrawStatus:
 
     def test_all_cancelled_returns_cancelled(self):
         assert aggregate_draw_status(["cancelled", "cancelled"]) == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# load_session — non-dict JSON root guard (Finding 1)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadSessionNonDictJson:
+    def _write_json(self, tmp_path: Path, draw_id: str, content: str) -> None:
+        sess_dir = tmp_path / "draw_sessions"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        (sess_dir / f"{draw_id}.json").write_text(content, encoding="utf-8")
+
+    def test_load_non_dict_json_list_returns_none(self, tmp_path):
+        self._write_json(tmp_path, "draw-list", "[1, 2, 3]")
+        assert load_session("draw-list", root=tmp_path) is None
+
+    def test_load_non_dict_json_string_returns_none(self, tmp_path):
+        self._write_json(tmp_path, "draw-str-root", '"just a string"')
+        assert load_session("draw-str-root", root=tmp_path) is None
+
+    def test_load_non_dict_json_number_returns_none(self, tmp_path):
+        self._write_json(tmp_path, "draw-num-root", "42")
+        assert load_session("draw-num-root", root=tmp_path) is None
