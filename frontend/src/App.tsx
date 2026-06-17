@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sparkles, Zap } from 'lucide-react'
 import PngShaderView from './components/PngShaderView'
 import type { StrategyConfig } from './lib/strategy-presets'
+import { PngShaderProvider } from './context/PngShaderContext'
 
 export default function App() {
   const {
@@ -171,47 +172,49 @@ export default function App() {
 
       {/* Main Content */}
       <main className="max-w-[1600px] mx-auto px-6 py-6">
-        <PngShaderView
-          result={result}
-          loading={loading}
-          error={error}
-          onRun={handleRun}
-          inputImageUrl={inputImageUrl}
-          llmMode={llmMode}
-          onLlmModeChange={handleLlmModeChange}
-          modelControls={models}
-          strategy={strategy}
-          onStrategyPartial={handleStrategyPartial}
-          onApplyPreset={applyPreset}
-          onStop={stopRun}
-          stopPending={stopPending}
-          parameterizeGlsl={parameterizeGlsl}
-          onBranchRefine={handleBranchRefine}
-          runId={runId}
-          fetchTimeline={fetchTimeline}
-          fetchBranches={fetchBranches}
-          updateRunMetadata={updateRunMetadata}
-          switchRun={switchRun}
-          branchRefine={branchRefine}
-          exploreVariants={exploreVariants}
-          fetchVariantGroup={fetchVariantGroup}
-          stopVariantGroup={stopVariantGroup}
-          selectVariantWinner={selectVariantWinner}
-          rateVariant={rateVariant}
-          createDrawSession={createDrawSession}
-          fetchDrawSession={fetchDrawSession}
-          drawMore={drawMore}
-          redrawCard={redrawCard}
-          cardEvent={cardEvent}
-          fetchPreferenceProfile={fetchPreferenceProfile}
-          patchPreferenceProfile={patchPreferenceProfile}
-          rebuildPreferences={rebuildPreferences}
-          clearPreferences={clearPreferences}
-          createFusion={createFusion}
-          fetchFusion={fetchFusion}
-          generateCompositeTarget={generateCompositeTarget}
-          runFusion={runFusion}
-        />
+        <PngShaderProvider value={{
+          result,
+          loading,
+          error,
+          onRun: handleRun,
+          inputImageUrl,
+          llmMode,
+          onLlmModeChange: handleLlmModeChange,
+          modelControls: models,
+          strategy,
+          onStrategyPartial: handleStrategyPartial,
+          onApplyPreset: applyPreset,
+          onStop: stopRun,
+          stopPending,
+          parameterizeGlsl,
+          onBranchRefine: handleBranchRefine,
+          runId,
+          fetchTimeline,
+          fetchBranches,
+          updateRunMetadata,
+          switchRun,
+          branchRefine,
+          exploreVariants,
+          fetchVariantGroup,
+          stopVariantGroup,
+          selectVariantWinner,
+          rateVariant,
+          createDrawSession,
+          fetchDrawSession,
+          drawMore,
+          redrawCard,
+          cardEvent,
+          fetchPreferenceProfile,
+          patchPreferenceProfile,
+          rebuildPreferences,
+          clearPreferences,
+          createFusion,
+          fetchFusion,
+          generateCompositeTarget,
+          runFusion,
+        }}>
+          <PngShaderView />
+        </PngShaderProvider>
       </main>
 
       {/* Footer */}

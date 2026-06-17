@@ -40,6 +40,7 @@ import ModelSelectorPanel from "./ModelSelectorPanel";
 import type { ModelControls } from "../hooks/useModels";
 import type { StrategyConfig, StrategyMode } from "../lib/strategy-presets";
 import { useStrategyConfig } from "../hooks/useStrategyConfig";
+import { usePngShaderContext } from "../context/PngShaderContext";
 
 const LLM_SEGMENTS: { mode: LlmMode; label: string; sublabel: string; desc: string }[] = [
   { mode: "off",  label: "关",   sublabel: "Off",   desc: "仅使用确定性算法 (快速)" },
@@ -47,7 +48,7 @@ const LLM_SEGMENTS: { mode: LlmMode; label: string; sublabel: string; desc: stri
   { mode: "on",   label: "开",   sublabel: "On",    desc: "强制调用 LLM 生成着色器 (慢)" },
 ];
 
-interface Props {
+export interface PngShaderViewProps {
   result: PngShaderResult | null;
   loading: boolean;
   error: string | null;
@@ -148,47 +149,48 @@ function candidatePreviewGlsl(candidate: CandidateEntry | null, result: PngShade
   return null;
 }
 
-export default function PngShaderView({
-  result,
-  loading,
-  error,
-  onRun,
-  inputImageUrl,
-  llmMode,
-  onLlmModeChange,
-  modelControls,
-  strategy,
-  onStrategyPartial,
-  onApplyPreset,
-  onStop,
-  stopPending,
-  parameterizeGlsl,
-  onBranchRefine,
-  runId,
-  fetchTimeline,
-  fetchBranches,
-  updateRunMetadata,
-  switchRun,
-  branchRefine,
-  exploreVariants,
-  fetchVariantGroup,
-  stopVariantGroup,
-  selectVariantWinner,
-  rateVariant,
-  createDrawSession,
-  fetchDrawSession,
-  drawMore,
-  redrawCard,
-  cardEvent,
-  fetchPreferenceProfile,
-  patchPreferenceProfile,
-  rebuildPreferences,
-  clearPreferences,
-  createFusion,
-  fetchFusion,
-  generateCompositeTarget,
-  runFusion,
-}: Props) {
+export default function PngShaderView() {
+  const {
+    result,
+    loading,
+    error,
+    onRun,
+    inputImageUrl,
+    llmMode,
+    onLlmModeChange,
+    modelControls,
+    strategy,
+    onStrategyPartial,
+    onApplyPreset,
+    onStop,
+    stopPending,
+    parameterizeGlsl,
+    onBranchRefine,
+    runId,
+    fetchTimeline,
+    fetchBranches,
+    updateRunMetadata,
+    switchRun,
+    branchRefine,
+    exploreVariants,
+    fetchVariantGroup,
+    stopVariantGroup,
+    selectVariantWinner,
+    rateVariant,
+    createDrawSession,
+    fetchDrawSession,
+    drawMore,
+    redrawCard,
+    cardEvent,
+    fetchPreferenceProfile,
+    patchPreferenceProfile,
+    rebuildPreferences,
+    clearPreferences,
+    createFusion,
+    fetchFusion,
+    generateCompositeTarget,
+    runFusion,
+  } = usePngShaderContext();
   const { config: strategyConfig } = useStrategyConfig();
   const [parameterizing, setParameterizing] = useState(false);
   const [branchCheckpointId, setBranchCheckpointId] = useState<string | null>(null);
