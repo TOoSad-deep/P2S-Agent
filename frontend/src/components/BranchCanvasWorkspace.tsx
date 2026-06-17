@@ -152,8 +152,16 @@ export default function BranchCanvasWorkspace({
   const [fusionDraft, setFusionDraft] = useState<FusionDraft | null>(null);
   const [activeFusionId, setActiveFusionId] = useState<string | null>(null);
   const [fusionStatus, setFusionStatus] = useState<FusionStatus | null>(null);
-  // ── Inspector collapse (P4 layout only; not persisted) ─────────────────────
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // ── Inspector collapse (P4 layout; persisted to localStorage in P6) ─────────
+  const [inspectorOpen, setInspectorOpen] = useState(() => {
+    try {
+      const raw = localStorage.getItem("p2s.canvas.inspectorOpen");
+      if (raw === "0") return false;
+      return true; // default true when absent or invalid
+    } catch {
+      return true;
+    }
+  });
 
   // ── runId ref: kept in sync so async callbacks read the latest value ──────
   const runIdRef = useRef(runId);
@@ -841,20 +849,19 @@ export default function BranchCanvasWorkspace({
         <Panel position="top-right" style={{ margin: 8 }}>
           {inspectorOpen ? (
             <div
-              className="rounded-lg border"
+              className="canvas-panel"
               style={{
                 width: 380,
                 maxHeight: "calc(100% - 16px)",
                 overflowY: "auto",
-                borderColor: "var(--border-color)",
-                background: "rgba(20, 20, 24, 0.85)",
-                backdropFilter: "blur(8px)",
-                WebkitBackdropFilter: "blur(8px)",
               }}
             >
               <div className="flex justify-end p-1">
                 <button
-                  onClick={() => setInspectorOpen(false)}
+                  onClick={() => {
+                    setInspectorOpen(false);
+                    try { localStorage.setItem("p2s.canvas.inspectorOpen", "0"); } catch { /* ignore */ }
+                  }}
                   title="折叠 / Collapse"
                   className="flex items-center justify-center w-6 h-6 rounded transition-all hover:bg-[var(--bg-hover)]"
                   style={{ color: "var(--text-muted)" }}
@@ -911,16 +918,13 @@ export default function BranchCanvasWorkspace({
             </div>
           ) : (
             <button
-              onClick={() => setInspectorOpen(true)}
-              title="展开检查器 / Inspector"
-              className="flex items-center justify-center w-7 rounded-lg border py-3 transition-all hover:bg-[var(--bg-hover)]"
-              style={{
-                borderColor: "var(--border-color)",
-                background: "rgba(20, 20, 24, 0.85)",
-                backdropFilter: "blur(8px)",
-                WebkitBackdropFilter: "blur(8px)",
-                color: "var(--text-secondary)",
+              onClick={() => {
+                setInspectorOpen(true);
+                try { localStorage.setItem("p2s.canvas.inspectorOpen", "1"); } catch { /* ignore */ }
               }}
+              title="展开检查器 / Inspector"
+              className="canvas-panel flex items-center justify-center w-7 py-3 transition-all hover:bg-[var(--bg-hover)]"
+              style={{ color: "var(--text-secondary)" }}
             >
               »
             </button>

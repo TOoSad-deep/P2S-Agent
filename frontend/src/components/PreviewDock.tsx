@@ -11,9 +11,34 @@ interface PreviewDockProps {
   node: BranchCanvasNode | null;  // selectedNode (set by single-click)
 }
 
+const PREVIEW_OPEN_KEY = "p2s.canvas.previewOpen";
+
+function loadPreviewOpen(): boolean {
+  try {
+    const raw = localStorage.getItem(PREVIEW_OPEN_KEY);
+    if (raw === "0") return false;
+    return true; // default true when absent or invalid
+  } catch {
+    return true;
+  }
+}
+
+function savePreviewOpen(value: boolean): void {
+  try {
+    localStorage.setItem(PREVIEW_OPEN_KEY, value ? "1" : "0");
+  } catch {
+    // quota exceeded or SSR — ignore
+  }
+}
+
 export default function PreviewDock({ referenceUrl, node }: PreviewDockProps) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(loadPreviewOpen);
   const [renderError, setRenderError] = useState(false);
+
+  function toggleOpen(next: boolean): void {
+    setOpen(next);
+    savePreviewOpen(next);
+  }
 
   const runId =
     typeof node?.data?.run_id === "string" ? node.data.run_id : null;
@@ -36,14 +61,10 @@ export default function PreviewDock({ referenceUrl, node }: PreviewDockProps) {
     return (
       <Panel position="bottom-right" style={{ margin: 8 }}>
         <button
-          onClick={() => setOpen(true)}
+          onClick={() => toggleOpen(true)}
           title="展开预览 / Preview"
-          className="flex items-center justify-center w-7 rounded-lg border py-3 transition-all hover:bg-[var(--bg-hover)]"
+          className="canvas-panel flex items-center justify-center w-7 py-3 transition-all hover:bg-[var(--bg-hover)]"
           style={{
-            borderColor: "var(--border-color)",
-            background: "rgba(20, 20, 24, 0.85)",
-            backdropFilter: "blur(8px)",
-            WebkitBackdropFilter: "blur(8px)",
             color: "var(--text-secondary)",
             writingMode: "vertical-rl",
             fontSize: 11,
@@ -59,14 +80,8 @@ export default function PreviewDock({ referenceUrl, node }: PreviewDockProps) {
   return (
     <Panel position="bottom-right" style={{ margin: 8 }}>
       <div
-        className="rounded-lg border"
-        style={{
-          width: 260,
-          borderColor: "var(--border-color)",
-          background: "rgba(20, 20, 24, 0.85)",
-          backdropFilter: "blur(8px)",
-          WebkitBackdropFilter: "blur(8px)",
-        }}
+        className="canvas-panel"
+        style={{ width: 260 }}
       >
         {/* Header */}
         <div
@@ -80,7 +95,7 @@ export default function PreviewDock({ referenceUrl, node }: PreviewDockProps) {
             预览 / Preview
           </span>
           <button
-            onClick={() => setOpen(false)}
+            onClick={() => toggleOpen(false)}
             title="折叠 / Collapse"
             className="flex items-center justify-center w-5 h-5 rounded transition-all hover:bg-[var(--bg-hover)]"
             style={{ color: "var(--text-muted)", fontSize: 13 }}

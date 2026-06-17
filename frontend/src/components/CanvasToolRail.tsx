@@ -21,13 +21,7 @@ export default function CanvasToolRail({
   return (
     <Panel position="top-left" style={{ margin: 8 }}>
       <div
-        className="flex flex-col gap-1.5 rounded-lg border p-1.5"
-        style={{
-          borderColor: "var(--border-color)",
-          background: "rgba(20, 20, 24, 0.7)",
-          backdropFilter: "blur(8px)",
-          WebkitBackdropFilter: "blur(8px)",
-        }}
+        className="canvas-panel flex flex-col gap-1.5 p-1.5"
       >
         {/* Icon action group */}
         <div className="flex items-center gap-1">
