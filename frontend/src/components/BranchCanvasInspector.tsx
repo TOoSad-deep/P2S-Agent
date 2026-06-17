@@ -18,25 +18,11 @@ import type {
   RegionConstraint,
 } from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
+import BranchRefineForm from "./BranchRefineForm";
 import DrawSessionInspector from "./DrawSessionInspector";
 import FineControlPanel, { DEFAULT_CONSTRAINT_SPEC, isMeaningfulConstraint } from "./FineControlPanel";
 import FusionBuilderPanel, { type FusionDraft, type FusionCandidate } from "./FusionBuilderPanel";
 import type { FusionStatus } from "../hooks/usePngShader";
-
-// ─── Modes & Locks (mirrors HumanLoopPanel) ──────────────────────────────────
-
-const MODES: { mode: BranchMode; label: string; sub: string; desc: string }[] = [
-  { mode: "refine", label: "定向", sub: "Refine", desc: "按反馈定向优化（强制至少一轮）" },
-  { mode: "polish", label: "精修", sub: "Polish", desc: "结构尽量不变，仅小幅画质提升" },
-  { mode: "continue", label: "继续", sub: "Continue", desc: "不注入目标，继续自动优化" },
-];
-
-const LOCKS: { key: string; label: string }[] = [
-  { key: "preserve_layout", label: "保持构图 Layout" },
-  { key: "preserve_palette", label: "保持调色 Palette" },
-  { key: "preserve_background", label: "保护背景 Background" },
-  { key: "small_edits_only", label: "仅小幅改动 Small edits" },
-];
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -422,9 +408,6 @@ function BranchActionView({
   const feedbackRequired = exploreMode || mode === "refine" || mode === "polish";
   const canSubmit = !disabled && (!feedbackRequired || feedback.trim().length > 0);
 
-  const toggleLock = (key: string) =>
-    setLocks((prev) => ({ ...prev, [key]: !prev[key] }));
-
   const handleSubmit = () => {
     if (!canSubmit) return;
     const checkpointId = data.source_checkpoint_id ?? data.checkpoint_id ?? "final:selected";
@@ -451,22 +434,17 @@ function BranchActionView({
 
   return (
     <div className="flex flex-col gap-2">
-      {/* Source info */}
-      {data.source_checkpoint_id && (
-        <p className="text-[11px] text-[var(--text-muted)]">
-          起点 Start:{" "}
-          <span className="font-mono text-[var(--text-secondary)]">{data.source_checkpoint_id}</span>
-        </p>
-      )}
-
-      {/* Feedback textarea */}
-      <textarea
-        value={feedback}
-        onChange={(e) => setFeedback(e.target.value)}
+      {/* Shared feedback / mode / locks form — startLabel shows source checkpoint; mode+locks hidden in explore mode */}
+      <BranchRefineForm
+        startLabel={data.source_checkpoint_id ?? null}
+        feedback={feedback}
+        onFeedbackChange={setFeedback}
+        mode={mode}
+        onModeChange={setMode}
+        locks={locks}
+        onLocksChange={setLocks}
+        showModeAndLocks={!exploreMode}
         disabled={disabled}
-        rows={3}
-        placeholder="例如：保持云雾层次，但让水面反射更明显，整体不要变暗。"
-        className="w-full text-xs p-2 rounded bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-primary)] resize-y placeholder:text-[var(--text-muted)] disabled:opacity-40"
       />
 
       {/* Explore variants toggle */}
@@ -493,8 +471,8 @@ function BranchActionView({
         </button>
       )}
 
-      {exploreMode ? (
-        /* Explore controls */
+      {/* Explore controls (variant count + diversity) */}
+      {exploreMode && (
         <div className="flex flex-col gap-1.5">
           {/* Variant count */}
           <div className="flex items-center gap-1.5">
@@ -537,48 +515,6 @@ function BranchActionView({
             </div>
           </div>
         </div>
-      ) : (
-        /* Refine controls (unchanged) */
-        <>
-          {/* Mode segmented */}
-          <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
-            {MODES.map(({ mode: m, label, sub, desc }) => (
-              <button
-                key={m}
-                onClick={() => setMode(m)}
-                disabled={disabled}
-                title={`${sub} — ${desc}`}
-                className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-all disabled:opacity-40 ${
-                  mode === m
-                    ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
-                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-                }`}
-              >
-                {label}
-                <span className="ml-1 opacity-70">{sub}</span>
-              </button>
-            ))}
-          </div>
-
-          {/* Locks */}
-          <div className="grid grid-cols-2 gap-1">
-            {LOCKS.map(({ key, label }) => (
-              <label
-                key={key}
-                className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer"
-              >
-                <input
-                  type="checkbox"
-                  checked={!!locks[key]}
-                  onChange={() => toggleLock(key)}
-                  disabled={disabled}
-                  className="accent-emerald-500"
-                />
-                {label}
-              </label>
-            ))}
-          </div>
-        </>
       )}
 
       {/* Fine controls (collapsible) */}

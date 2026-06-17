@@ -7,20 +7,7 @@ import type {
   BranchRefineRequest,
   PipelineCheckpointMeta,
 } from "../hooks/usePngShader";
-import { fmtScore } from "../lib/format";
-
-const MODES: { mode: BranchMode; label: string; sub: string; desc: string }[] = [
-  { mode: "refine", label: "定向", sub: "Refine", desc: "按反馈定向优化（强制至少一轮）" },
-  { mode: "polish", label: "精修", sub: "Polish", desc: "结构尽量不变，仅小幅画质提升" },
-  { mode: "continue", label: "继续", sub: "Continue", desc: "不注入目标，继续自动优化" },
-];
-
-const LOCKS: { key: string; label: string }[] = [
-  { key: "preserve_layout", label: "保持构图 Layout" },
-  { key: "preserve_palette", label: "保持调色 Palette" },
-  { key: "preserve_background", label: "保护背景 Background" },
-  { key: "small_edits_only", label: "仅小幅改动 Small edits" },
-];
+import BranchRefineForm from "./BranchRefineForm";
 
 interface Props {
   checkpoints: PipelineCheckpointMeta[];
@@ -50,14 +37,10 @@ export default function HumanLoopPanel({
     checkpoints.find((c) => c.id === "final:selected")?.id ??
     checkpoints[checkpoints.length - 1]?.id ??
     null;
-  const selected = checkpoints.find((c) => c.id === effectiveId) ?? null;
 
   const feedbackRequired = mode === "refine" || mode === "polish";
   const canSubmit =
     !!effectiveId && !disabled && !busy && (!feedbackRequired || feedback.trim().length > 0);
-
-  const toggleLock = (key: string) =>
-    setLocks((prev) => ({ ...prev, [key]: !prev[key] }));
 
   const handleSubmit = () => {
     if (!effectiveId || !canSubmit) return;
@@ -86,81 +69,19 @@ export default function HumanLoopPanel({
         </div>
       )}
 
-      {/* Start checkpoint */}
-      {checkpoints.length === 0 ? (
-        <p className="text-[11px] text-[var(--text-muted)]">运行完成后可从任意检查点分支。</p>
-      ) : (
-        <div className="flex flex-wrap gap-1">
-          {checkpoints.map((cp) => (
-            <button
-              key={cp.id}
-              onClick={() => onSelectCheckpoint(cp.id)}
-              disabled={disabled || busy}
-              title={`${cp.id} · score ${fmtScore(cp.score)}`}
-              className={`px-2 py-1 text-[11px] rounded-md transition-all disabled:opacity-40 ${
-                cp.id === effectiveId
-                  ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
-                  : "bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-              }`}
-            >
-              {cp.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {selected && (
-        <p className="text-[11px] text-[var(--text-muted)]">
-          起点 Start: <span className="font-mono text-[var(--text-secondary)]">{selected.id}</span>
-          {" · "}score {fmtScore(selected.score)}
-        </p>
-      )}
-
-      {/* Feedback */}
-      <textarea
-        value={feedback}
-        onChange={(e) => setFeedback(e.target.value)}
-        disabled={disabled || busy}
-        rows={3}
-        placeholder="例如：保持云雾层次，但让水面反射更明显，整体不要变暗。"
-        className="w-full text-xs p-2 rounded bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-[var(--text-primary)] resize-y"
+      <BranchRefineForm
+        checkpoints={checkpoints}
+        selectedCheckpointId={effectiveId}
+        onSelectCheckpoint={onSelectCheckpoint}
+        feedback={feedback}
+        onFeedbackChange={setFeedback}
+        mode={mode}
+        onModeChange={setMode}
+        locks={locks}
+        onLocksChange={setLocks}
+        disabled={disabled}
+        busy={busy}
       />
-
-      {/* Mode */}
-      <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
-        {MODES.map(({ mode: m, label, sub, desc }) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            disabled={disabled || busy}
-            title={`${sub} — ${desc}`}
-            className={`flex-1 px-2 py-1 text-[11px] rounded-md transition-all disabled:opacity-40 ${
-              mode === m
-                ? "bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium"
-                : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-            }`}
-          >
-            {label}
-            <span className="ml-1 opacity-70">{sub}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Locks */}
-      <div className="grid grid-cols-2 gap-1">
-        {LOCKS.map(({ key, label }) => (
-          <label key={key} className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={!!locks[key]}
-              onChange={() => toggleLock(key)}
-              disabled={disabled || busy}
-              className="accent-emerald-500"
-            />
-            {label}
-          </label>
-        ))}
-      </div>
 
       <button
         onClick={handleSubmit}
