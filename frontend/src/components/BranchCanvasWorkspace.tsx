@@ -37,6 +37,7 @@ import BranchCanvas from "./BranchCanvas";
 import CanvasToolRail from "./CanvasToolRail";
 import { branchCanvasNodeTypes } from "./BranchCanvasNode";
 import BranchCanvasInspector from "./BranchCanvasInspector";
+import PreviewDock from "./PreviewDock";
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ interface Props {
   runFusion: (fusionId: string, body?: { quality?: Record<string, unknown>; directed_acceptance?: Record<string, unknown> }) => Promise<{ fusion_id: string; status: string; output_run_id: string } | null>;
   // optional preview callback (wired by parent if desired)
   onPreviewNode?: (node: BranchCanvasNode | null) => void;
+  inputImageUrl?: string | null;
   disabled?: boolean;
 }
 
@@ -127,6 +129,7 @@ export default function BranchCanvasWorkspace({
   generateCompositeTarget,
   runFusion,
   onPreviewNode,
+  inputImageUrl,
   disabled,
 }: Props) {
   // ── State ──────────────────────────────────────────────────────────────────
@@ -923,6 +926,9 @@ export default function BranchCanvasWorkspace({
             </button>
           )}
         </Panel>
+
+        {/* Bottom-right preview dock (single-click shows selected node render vs reference) */}
+        <PreviewDock referenceUrl={inputImageUrl} node={selectedNode} />
       </BranchCanvas>
     </div>
   );

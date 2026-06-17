@@ -33,6 +33,7 @@ export default function CanvasPage() {
     fetchFusion,
     generateCompositeTarget,
     runFusion,
+    inputImageUrl,
   } = usePngShaderContext();
 
   // Default to "canvas" — this is the canvas page.
@@ -87,6 +88,7 @@ export default function CanvasPage() {
                   fetchFusion={fetchFusion}
                   generateCompositeTarget={generateCompositeTarget}
                   runFusion={runFusion}
+                  inputImageUrl={inputImageUrl}
                   disabled={loading}
                 />
               ) : (
