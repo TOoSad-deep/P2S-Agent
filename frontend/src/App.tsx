@@ -2,9 +2,12 @@ import { usePngShader, type LlmMode, type BranchRefineRequest } from './hooks/us
 import { useModels } from './hooks/useModels'
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sparkles, Zap } from 'lucide-react'
-import PngShaderView from './components/PngShaderView'
+import StudioPage from './pages/StudioPage'
+import CanvasPage from './pages/CanvasPage'
 import type { StrategyConfig } from './lib/strategy-presets'
 import { PngShaderProvider } from './context/PngShaderContext'
+
+type Page = 'studio' | 'canvas'
 
 export default function App() {
   const {
@@ -50,6 +53,39 @@ export default function App() {
 
   const [inputImageUrl, setInputImageUrl] = useState<string | null>(null)
   const inputImageUrlRef = useRef<string | null>(null)
+
+  // branchCheckpointId is shared across the page boundary (HumanLoopPanel on
+  // Studio + BranchWorkspacePanel on Canvas), so App owns it and passes it via
+  // context.
+  const [branchCheckpointId, setBranchCheckpointId] = useState<string | null>(null)
+
+  // Page shell: Studio (build/analysis) ⇄ Canvas (branch lineage graph).
+  const [page, setPage] = useState<Page>(() =>
+    new URLSearchParams(window.location.search).get('view') === 'canvas' ? 'canvas' : 'studio'
+  )
+  // Canvas only becomes valid once a run exists; clamp to Studio otherwise.
+  const showCanvas = !!(result && runId)
+  const effectivePage: Page = showCanvas ? page : 'studio'
+
+  const goToPage = useCallback((p: Page) => {
+    setPage(p)
+    history.pushState(
+      {},
+      '',
+      p === 'canvas' ? '?view=canvas' : window.location.pathname
+    )
+  }, [])
+
+  // Keep page in sync with browser back/forward. effectivePage clamps to Studio
+  // when no run exists, so only the "canvas" intent needs to be honored here.
+  useEffect(() => {
+    const onPopState = () => {
+      const view = new URLSearchParams(window.location.search).get('view')
+      setPage(view === 'canvas' ? 'canvas' : 'studio')
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
 
   const ssimValue =
     typeof result?.objective_metrics?.simple_ssim === 'number'
@@ -127,6 +163,28 @@ export default function App() {
 
           {/* Status & Actions */}
           <div className="flex items-center gap-4">
+            {/* Studio ⇄ Canvas page toggle (only once a run exists) */}
+            {showCanvas && (
+              <div className="flex items-center gap-0.5 bg-[var(--bg-tertiary)] rounded-md p-0.5">
+                {([
+                  { page: 'studio' as Page, label: '工作台 Studio' },
+                  { page: 'canvas' as Page, label: '画布 Canvas' },
+                ]).map(({ page: p, label }) => (
+                  <button
+                    key={p}
+                    onClick={() => goToPage(p)}
+                    className={`px-2.5 py-1 text-xs rounded-md transition-all ${
+                      effectivePage === p
+                        ? 'bg-gradient-to-r from-emerald-500 to-emerald-600 text-white font-medium shadow-sm shadow-emerald-500/25'
+                        : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Pipeline Status */}
             {loading && (
               <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{ background: 'var(--glow-emerald)' }}>
@@ -189,6 +247,8 @@ export default function App() {
           parameterizeGlsl,
           onBranchRefine: handleBranchRefine,
           runId,
+          branchCheckpointId,
+          setBranchCheckpointId,
           fetchTimeline,
           fetchBranches,
           updateRunMetadata,
@@ -213,7 +273,16 @@ export default function App() {
           generateCompositeTarget,
           runFusion,
         }}>
-          <PngShaderView />
+          {/* Render BOTH pages and toggle via CSS visibility so the canvas
+              stays mounted across switches → its polling effects keep running. */}
+          <div style={{ display: effectivePage === 'studio' ? undefined : 'none' }}>
+            <StudioPage />
+          </div>
+          {showCanvas && (
+            <div style={{ display: effectivePage === 'canvas' ? undefined : 'none' }}>
+              <CanvasPage />
+            </div>
+          )}
         </PngShaderProvider>
       </main>
 
