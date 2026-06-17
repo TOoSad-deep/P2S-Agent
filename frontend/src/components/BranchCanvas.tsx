@@ -1,4 +1,5 @@
 import "@xyflow/react/dist/style.css";
+import type { ReactNode } from "react";
 import {
   ReactFlow,
   Background,
@@ -21,6 +22,8 @@ interface Props {
   onNodeDoubleClick?: (id: string) => void;
   onSelectionChange?: (ids: string[]) => void;
   onNodeDragStop?: (id: string, pos: { x: number; y: number }) => void;
+  /** Floating <Panel> overlays rendered inside <ReactFlow> (over the flow). */
+  children?: ReactNode;
 }
 
 export default function BranchCanvas({
@@ -31,12 +34,12 @@ export default function BranchCanvas({
   onNodeDoubleClick,
   onSelectionChange,
   onNodeDragStop,
+  children,
 }: Props) {
   return (
     <div
-      className="w-full h-[520px] rounded-md border overflow-hidden"
+      className="w-full h-full min-h-0 overflow-hidden"
       style={{
-        borderColor: "var(--border-color)",
         background: "var(--bg-secondary)",
       }}
     >
@@ -56,6 +59,7 @@ export default function BranchCanvas({
         <Background />
         <Controls />
         <MiniMap />
+        {children}
       </ReactFlow>
     </div>
   );

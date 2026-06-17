@@ -126,11 +126,11 @@ export default function App() {
   }, [])
 
   return (
-    <div className="min-h-screen text-white" style={{ background: 'var(--bg-primary)' }}>
+    <div className="h-screen flex flex-col text-white" style={{ background: 'var(--bg-primary)' }}>
       {/* Header */}
-      <header 
-        className="border-b px-6 py-4 backdrop-blur-xl sticky top-0 z-50"
-        style={{ 
+      <header
+        className="flex-none border-b px-6 py-4 backdrop-blur-xl z-50"
+        style={{
           borderColor: 'var(--border-color)',
           background: 'rgba(10, 10, 12, 0.85)',
         }}
@@ -228,8 +228,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="max-w-[1600px] mx-auto px-6 py-6">
+      {/* Content area — fills remaining viewport below the header. */}
+      <div className="flex-1 min-h-0">
         <PngShaderProvider value={{
           result,
           loading,
@@ -275,33 +275,44 @@ export default function App() {
         }}>
           {/* Render BOTH pages and toggle via CSS visibility so the canvas
               stays mounted across switches → its polling effects keep running. */}
-          <div style={{ display: effectivePage === 'studio' ? undefined : 'none' }}>
-            <StudioPage />
+          {/* Studio: scrolls internally; owns the page footer (canvas is full-bleed/footer-less). */}
+          <div
+            className="h-full overflow-y-auto"
+            style={{ display: effectivePage === 'studio' ? undefined : 'none' }}
+          >
+            <main className="max-w-[1600px] mx-auto px-6 py-6">
+              <StudioPage />
+            </main>
+
+            {/* Footer */}
+            <footer
+              className="border-t py-4 mt-8"
+              style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}
+            >
+              <div className="max-w-[1600px] mx-auto px-6 flex items-center justify-between">
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  P2S-Agent • Powered by LangGraph & FastAPI
+                </p>
+                <div className="flex items-center gap-4">
+                  <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    Built with React + Vite + Tailwind
+                  </span>
+                </div>
+              </div>
+            </footer>
           </div>
+
+          {/* Canvas: full-bleed, fills the content area. */}
           {showCanvas && (
-            <div style={{ display: effectivePage === 'canvas' ? undefined : 'none' }}>
+            <div
+              className="h-full min-h-0"
+              style={{ display: effectivePage === 'canvas' ? undefined : 'none' }}
+            >
               <CanvasPage />
             </div>
           )}
         </PngShaderProvider>
-      </main>
-
-      {/* Footer */}
-      <footer 
-        className="border-t py-4 mt-8"
-        style={{ borderColor: 'var(--border-color)', background: 'var(--bg-secondary)' }}
-      >
-        <div className="max-w-[1600px] mx-auto px-6 flex items-center justify-between">
-          <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-            P2S-Agent • Powered by LangGraph & FastAPI
-          </p>
-          <div className="flex items-center gap-4">
-            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              Built with React + Vite + Tailwind
-            </span>
-          </div>
-        </div>
-      </footer>
+      </div>
     </div>
   )
 }

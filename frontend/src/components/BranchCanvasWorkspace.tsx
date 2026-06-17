@@ -2,7 +2,7 @@
 // Fetches V2 data, builds the canvas model + layout, and renders the canvas + inspector
 // with selection / run-switch / drag-persistence / branch-draft submit flow.
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { RotateCcw } from "lucide-react";
+import { Panel } from "@xyflow/react";
 import type {
   PngShaderResult,
   CheckpointTimelineEntry,
@@ -34,6 +34,7 @@ import {
 } from "../lib/branchCanvasModel";
 import { layoutBranchCanvas, COLUMN_WIDTH } from "../lib/branchCanvasLayout";
 import BranchCanvas from "./BranchCanvas";
+import CanvasToolRail from "./CanvasToolRail";
 import { branchCanvasNodeTypes } from "./BranchCanvasNode";
 import BranchCanvasInspector from "./BranchCanvasInspector";
 
@@ -148,6 +149,8 @@ export default function BranchCanvasWorkspace({
   const [fusionDraft, setFusionDraft] = useState<FusionDraft | null>(null);
   const [activeFusionId, setActiveFusionId] = useState<string | null>(null);
   const [fusionStatus, setFusionStatus] = useState<FusionStatus | null>(null);
+  // ── Inspector collapse (P4 layout only; not persisted) ─────────────────────
+  const [inspectorOpen, setInspectorOpen] = useState(true);
 
   // ── runId ref: kept in sync so async callbacks read the latest value ──────
   const runIdRef = useRef(runId);
@@ -780,10 +783,9 @@ export default function BranchCanvasWorkspace({
   if (!runId || !branchInfo) {
     return (
       <div
-        className="flex items-center justify-center rounded-lg border"
+        className="flex items-center justify-center w-full h-full"
         style={{
           minHeight: 200,
-          borderColor: "var(--border-color)",
           background: "var(--bg-secondary)",
         }}
       >
@@ -811,111 +813,117 @@ export default function BranchCanvasWorkspace({
   const activeRunShort = activeRunId ? activeRunId.slice(-8) : "—";
   const statusLabel = result?.status ?? "—";
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Render — full-bleed canvas with floating <Panel> overlays (P4) ─────────
   return (
     <div
-      className="flex flex-col gap-2 rounded-lg border overflow-hidden"
-      style={{
-        borderColor: "var(--border-color)",
-        background: "var(--bg-primary)",
-      }}
+      className="relative w-full h-full min-h-0"
+      style={{ background: "var(--bg-primary)" }}
     >
-      {/* Toolbar */}
-      <div
-        className="flex items-center gap-2 px-3 py-2 border-b shrink-0"
-        style={{ borderColor: "var(--border-color)" }}
+      <BranchCanvas
+        nodes={displayNodes}
+        edges={displayEdges}
+        nodeTypes={branchCanvasNodeTypes}
+        onNodeClick={handleNodeClick}
+        onNodeDoubleClick={handleNodeDoubleClick}
+        onNodeDragStop={handleDragStop}
       >
-        <span
-          className="text-[11px] font-mono px-1.5 py-0.5 rounded"
-          style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
-          title={activeRunId ?? ""}
-        >
-          {activeRunShort}
-        </span>
-        <span
-          className="text-[11px]"
-          style={{ color: "var(--text-muted)" }}
-        >
-          {statusLabel}
-        </span>
+        {/* Left floating tool rail (fit-view / reset-layout / run badge + status) */}
+        <CanvasToolRail
+          onResetLayout={handleResetLayout}
+          activeRunShort={activeRunShort}
+          statusLabel={statusLabel}
+        />
 
-        <div className="flex-1" />
-
-        <button
-          onClick={handleResetLayout}
-          title="重置布局 / Reset layout"
-          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded transition-all hover:bg-[var(--bg-hover)]"
-          style={{ color: "var(--text-muted)" }}
-        >
-          <RotateCcw className="w-3 h-3" />
-          <span>重置布局 / Reset layout</span>
-        </button>
-      </div>
-
-      {/* Canvas + Inspector split */}
-      <div className="flex gap-2 px-2 pb-2" style={{ minHeight: 520 }}>
-        {/* Canvas — flex-1 */}
-        <div className="flex-1 min-w-0">
-          <BranchCanvas
-            nodes={displayNodes}
-            edges={displayEdges}
-            nodeTypes={branchCanvasNodeTypes}
-            onNodeClick={handleNodeClick}
-            onNodeDoubleClick={handleNodeDoubleClick}
-            onNodeDragStop={handleDragStop}
-          />
-        </div>
-
-        {/* Inspector — fixed width */}
-        <div className="shrink-0" style={{ width: 280 }}>
-          <BranchCanvasInspector
-            node={selectedNode}
-            activeRunId={activeRunId}
-            onSwitchRun={switchRun}
-            onUpdateMetadata={handleUpdateMetadata}
-            onRefineFromCheckpoint={handleRefineFromCheckpoint}
-            onContinueFromRun={handleContinueFromRun}
-            onSubmitBranch={handleSubmitBranch}
-            onCancelBranch={handleCancelBranch}
-            onExploreVariants={handleExploreVariants}
-            variantGroup={variantGroup}
-            onSelectWinner={handleSelectWinner}
-            onStopGroup={handleStopGroup}
-            onRateVariant={handleRateVariant}
-            drawSession={drawSession}
-            onStartDraw={handleStartDraw}
-            onDrawMore={handleDrawMore}
-            onRedrawCard={handleRedrawCard}
-            onCardEvent={handleCardEvent}
-            onPreviewCard={handlePreviewCard}
-            onContinueCard={handleContinueCard}
-            onSelectDrawWinner={handleSelectDrawWinner}
-            onStopDraw={handleStopDraw}
-            fusionEnabled={true}
-            fusionDraft={fusionDraft}
-            fusionStatus={fusionStatus}
-            fusionCandidates={
-              drawSession?.cards?.map((c) => ({
-                run_id: c.run_id,
-                label: c.label,
-                thumbnail_url: c.thumbnail_url,
-              })) ?? []
-            }
-            fusionBaseImageUrl={
-              fusionDraft?.base_run_id
-                ? `/png-shader/runs/${fusionDraft.base_run_id}/artifacts/selected_render`
-                : null
-            }
-            onFusionDraftChange={handleFusionDraftChange}
-            onCreateFusion={handleCreateFusion}
-            onComposite={handleComposite}
-            onRunFusion={handleRunFusion}
-            submitError={submitError}
-            disabled={disabled}
-            onRegionsChange={handleRegionsChange}
-          />
-        </div>
-      </div>
+        {/* Right floating inspector (collapsible) */}
+        <Panel position="top-right" style={{ margin: 8 }}>
+          {inspectorOpen ? (
+            <div
+              className="rounded-lg border"
+              style={{
+                width: 380,
+                maxHeight: "calc(100% - 16px)",
+                overflowY: "auto",
+                borderColor: "var(--border-color)",
+                background: "rgba(20, 20, 24, 0.85)",
+                backdropFilter: "blur(8px)",
+                WebkitBackdropFilter: "blur(8px)",
+              }}
+            >
+              <div className="flex justify-end p-1">
+                <button
+                  onClick={() => setInspectorOpen(false)}
+                  title="折叠 / Collapse"
+                  className="flex items-center justify-center w-6 h-6 rounded transition-all hover:bg-[var(--bg-hover)]"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  «
+                </button>
+              </div>
+              <BranchCanvasInspector
+                node={selectedNode}
+                activeRunId={activeRunId}
+                onSwitchRun={switchRun}
+                onUpdateMetadata={handleUpdateMetadata}
+                onRefineFromCheckpoint={handleRefineFromCheckpoint}
+                onContinueFromRun={handleContinueFromRun}
+                onSubmitBranch={handleSubmitBranch}
+                onCancelBranch={handleCancelBranch}
+                onExploreVariants={handleExploreVariants}
+                variantGroup={variantGroup}
+                onSelectWinner={handleSelectWinner}
+                onStopGroup={handleStopGroup}
+                onRateVariant={handleRateVariant}
+                drawSession={drawSession}
+                onStartDraw={handleStartDraw}
+                onDrawMore={handleDrawMore}
+                onRedrawCard={handleRedrawCard}
+                onCardEvent={handleCardEvent}
+                onPreviewCard={handlePreviewCard}
+                onContinueCard={handleContinueCard}
+                onSelectDrawWinner={handleSelectDrawWinner}
+                onStopDraw={handleStopDraw}
+                fusionEnabled={true}
+                fusionDraft={fusionDraft}
+                fusionStatus={fusionStatus}
+                fusionCandidates={
+                  drawSession?.cards?.map((c) => ({
+                    run_id: c.run_id,
+                    label: c.label,
+                    thumbnail_url: c.thumbnail_url,
+                  })) ?? []
+                }
+                fusionBaseImageUrl={
+                  fusionDraft?.base_run_id
+                    ? `/png-shader/runs/${fusionDraft.base_run_id}/artifacts/selected_render`
+                    : null
+                }
+                onFusionDraftChange={handleFusionDraftChange}
+                onCreateFusion={handleCreateFusion}
+                onComposite={handleComposite}
+                onRunFusion={handleRunFusion}
+                submitError={submitError}
+                disabled={disabled}
+                onRegionsChange={handleRegionsChange}
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => setInspectorOpen(true)}
+              title="展开检查器 / Inspector"
+              className="flex items-center justify-center w-7 rounded-lg border py-3 transition-all hover:bg-[var(--bg-hover)]"
+              style={{
+                borderColor: "var(--border-color)",
+                background: "rgba(20, 20, 24, 0.85)",
+                backdropFilter: "blur(8px)",
+                WebkitBackdropFilter: "blur(8px)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              »
+            </button>
+          )}
+        </Panel>
+      </BranchCanvas>
     </div>
   );
 }
