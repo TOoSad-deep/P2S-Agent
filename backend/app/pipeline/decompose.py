@@ -42,7 +42,16 @@ def _merge_similar_colors(labels: np.ndarray, palette: list[int], max_colors: in
 
     Returns (merged_labels, merged_palette) where palette has length max_colors
     but unused slots are filled with (0,0,0).
+
+    Pillow's ``getpalette()`` returns only as many RGB triples as the image
+    actually used, which can be fewer than *max_colors* for flat / few-color
+    images. Pad the working palette to ``max_colors * 3`` so all index math
+    stays in bounds, and bound the merge loops by the real number of colors.
     """
+    # Pad the source palette to max_colors * 3 with (0,0,0) so every index used
+    # below is valid even when the quantizer produced fewer colors.
+    palette = list(palette) + [0] * (max_colors * 3 - len(palette))
+
     colors = np.array([[palette[i * 3], palette[i * 3 + 1], palette[i * 3 + 2]] for i in range(max_colors)], dtype=np.float32)
     merge_map = list(range(max_colors))
 

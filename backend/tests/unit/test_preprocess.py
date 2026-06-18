@@ -12,7 +12,13 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app.pipeline.preprocess import preprocess_image, save_preprocess_artifacts
+from app.pipeline.preprocess import (
+    MAX_WORKING_DIM,
+    _bounded_working_image,
+    feature_num,
+    preprocess_image,
+    save_preprocess_artifacts,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -305,3 +311,81 @@ def test_save_preprocess_artifacts_composites_model_reference_over_black(tmp_pat
     assert model_img.mode == "RGB"
     assert model_img.getpixel((0, 0)) == (0, 0, 0)
     assert model_img.getpixel((3, 3)) == (255, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# feature_num — coalescing numeric accessor (Bug 4)
+# ---------------------------------------------------------------------------
+
+
+def test_feature_num_returns_value_when_present_and_finite():
+    features = {"gradient_score": 0.42, "color_count_estimate": 12}
+    assert feature_num(features, "gradient_score", 0.0) == pytest.approx(0.42)
+    assert feature_num(features, "color_count_estimate", 5) == pytest.approx(12.0)
+
+
+def test_feature_num_returns_default_for_none():
+    features = {"gradient_score": None}
+    assert feature_num(features, "gradient_score", 0.3) == pytest.approx(0.3)
+
+
+def test_feature_num_returns_default_for_missing_key():
+    assert feature_num({}, "edge_sharpness", 0.0) == pytest.approx(0.0)
+
+
+def test_feature_num_returns_default_for_non_finite_and_unparseable():
+    assert feature_num({"x": float("nan")}, "x", 1.0) == pytest.approx(1.0)
+    assert feature_num({"x": float("inf")}, "x", 2.0) == pytest.approx(2.0)
+    assert feature_num({"x": "not-a-number"}, "x", 7.0) == pytest.approx(7.0)
+
+
+def test_feature_num_coerces_numeric_strings():
+    assert feature_num({"x": "0.75"}, "x", 0.0) == pytest.approx(0.75)
+
+
+# ---------------------------------------------------------------------------
+# Bounded working image — DoS guard against full-res pixel materialization
+# (Bug 5)
+# ---------------------------------------------------------------------------
+
+
+def test_bounded_working_image_downscales_oversized():
+    """An image larger than the working cap is downscaled so its pixel count
+    is bounded before any per-pixel iteration."""
+    oversized = Image.new("RGB", (MAX_WORKING_DIM * 3, MAX_WORKING_DIM * 2), (10, 20, 30))
+    work = _bounded_working_image(oversized)
+    w, h = work.size
+    assert max(w, h) <= MAX_WORKING_DIM
+    assert w * h <= MAX_WORKING_DIM * MAX_WORKING_DIM
+    # Aspect ratio preserved (3:2).
+    assert abs((w / h) - 1.5) < 0.05
+
+
+def test_bounded_working_image_leaves_normal_size_unchanged():
+    """A normal-size image (within the cap) is returned with identical
+    dimensions so existing feature values do not regress."""
+    normal = Image.new("RGB", (64, 48), (200, 100, 50))
+    work = _bounded_working_image(normal)
+    assert work.size == (64, 48)
+
+
+def test_preprocess_oversized_image_reports_original_dims_and_bounds_work(tmp_path):
+    """Preprocessing a huge image must still report the ORIGINAL dimensions in
+    the output, but must not materialize the full-resolution pixel grid."""
+    side = MAX_WORKING_DIM * 2
+    img = Image.new("RGB", (side, side), (0, 0, 0))
+    # A bright square so there is some structure (non-degenerate features).
+    for yy in range(side // 4, side // 2):
+        for xx in range(side // 4, side // 2):
+            img.putpixel((xx, yy), (255, 0, 0))
+    path = tmp_path / "huge.png"
+    img.save(path)
+
+    result = preprocess_image(path)
+
+    # Original dimensions are preserved in the reported features.
+    assert result["width"] == side
+    assert result["height"] == side
+    # Sanity: produces the full feature set with finite scores.
+    for key in ("edge_sharpness", "gradient_score", "photo_like_score"):
+        assert 0.0 <= result[key] <= 1.0

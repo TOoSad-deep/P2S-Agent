@@ -7,6 +7,7 @@ Used to verify the compiler works end-to-end.
 from __future__ import annotations
 
 from app.dsl.schema import DSL_SCHEMA_VERSION
+from app.pipeline.preprocess import feature_num
 
 
 def generate_rule_candidate(
@@ -37,12 +38,12 @@ def generate_rule_candidate(
         A fully valid DSL dict ready for dsl_validator.validate_dsl and
         compiler.compile_dsl.
     """
-    gradient_score = float(preprocess.get("gradient_score", 0.0))
-    alpha_coverage = float(preprocess.get("alpha_coverage", 0.0))
-    edge_sharpness = float(preprocess.get("edge_sharpness", 0.0))
+    gradient_score = feature_num(preprocess, "gradient_score", 0.0)
+    alpha_coverage = feature_num(preprocess, "alpha_coverage", 0.0)
+    edge_sharpness = feature_num(preprocess, "edge_sharpness", 0.0)
     has_alpha = bool(preprocess.get("has_alpha", False))
-    photo_like_score = float(preprocess.get("photo_like_score", 0.0))
-    color_count = int(preprocess.get("color_count_estimate", 10))
+    photo_like_score = feature_num(preprocess, "photo_like_score", 0.0)
+    color_count = int(feature_num(preprocess, "color_count_estimate", 10))
     palette: list[str] = preprocess.get("palette", ["#ffffff"])
     if not palette:
         palette = ["#ffffff"]

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.dsl.schema import DSL_SCHEMA_VERSION
+from app.pipeline.preprocess import feature_num
 from app.services.logging_config import log_event
 from app.utils.glsl_postprocess import (
     build_visual_strategy,
@@ -183,10 +184,10 @@ def _choose_implementation(
     if strategy.get("routing_hint") == "direct_glsl":
         return "shadertoy_glsl"
 
-    photo_like = float(preprocess.get("photo_like_score", 0.0))
-    texture = float(preprocess.get("texture_score", 0.0))
-    colors = int(preprocess.get("color_count_estimate", 0))
-    components = int(preprocess.get("component_count_estimate", 1))
+    photo_like = feature_num(preprocess, "photo_like_score", 0.0)
+    texture = feature_num(preprocess, "texture_score", 0.0)
+    colors = int(feature_num(preprocess, "color_count_estimate", 0))
+    components = int(feature_num(preprocess, "component_count_estimate", 1))
 
     if photo_like >= 0.65 or texture >= 0.55 or colors >= 180 or components >= 16:
         return "shadertoy_glsl"
@@ -202,7 +203,7 @@ def _build_prompts(
     visual_strategy: dict | None = None,
 ) -> tuple[str, str]:
     alpha_note = ""
-    if bool(preprocess.get("has_alpha")) and float(preprocess.get("alpha_coverage", 1.0)) < 0.999:
+    if bool(preprocess.get("has_alpha")) and feature_num(preprocess, "alpha_coverage", 1.0) < 0.999:
         alpha_note = (
             " The attached reference is an opaque RGB preview composited over "
             f"{preprocess.get('llm_reference_background', '#000000')}; match the visible colors and "
@@ -637,7 +638,36 @@ def _normalize_gradient_fills(dsl: dict) -> None:
             _normalize_gradient_stop(stop, idx, len(stops))
             for idx, stop in enumerate(stops)
         ]
-        fill["stops"] = [stop for stop in normalized if stop is not None]
+        survived = [stop for stop in normalized if stop is not None]
+        # The validator requires >=2 stops. Dropping unparseable stops can leave
+        # 0 or 1, turning a malformed-but-rescuable gradient into an invalid DSL.
+        # Guarantee a 2-stop minimum so normalization always rescues rather than
+        # invalidates.
+        fill["stops"] = _ensure_two_stops(survived)
+
+
+_GRADIENT_FALLBACK_STOPS = [
+    {"color": "#000000", "position": 0.0},
+    {"color": "#ffffff", "position": 1.0},
+]
+
+
+def _ensure_two_stops(stops: list[dict]) -> list[dict]:
+    """Return a list of at least two gradient stops.
+
+    - 0 survivors → a default black→white gradient.
+    - 1 survivor → duplicate it at positions 0.0 and 1.0.
+    - 2+ survivors → returned unchanged.
+    """
+    if len(stops) >= 2:
+        return stops
+    if len(stops) == 1:
+        color = stops[0].get("color", "#000000")
+        return [
+            {"color": color, "position": 0.0},
+            {"color": color, "position": 1.0},
+        ]
+    return [dict(stop) for stop in _GRADIENT_FALLBACK_STOPS]
 
 
 def _normalize_gradient_stop(stop: Any, idx: int, total: int) -> dict | None:
@@ -899,20 +929,27 @@ def _extract_glsl(text: str) -> str:
         stripped = stripped[:self_check_idx].strip()
 
     if "void mainImage" in stripped:
-        start_candidates = [
-            idx for idx in (
-                stripped.find("#version"),
-                stripped.find("#define"),
-                stripped.find("precision "),
-                stripped.find("const "),
-                stripped.find("float "),
-                stripped.find("vec2 "),
-                stripped.find("vec3 "),
-                stripped.find("vec4 "),
-                stripped.find("void mainImage"),
-            )
-            if idx >= 0
-        ]
+        # Anchor start-token detection to start-of-line declarations so that a
+        # token appearing *inside* a leading line comment (e.g.
+        # "// helper returns vec3 color value") is not mistaken for the start
+        # of the shader body. Without the anchor, ``find`` would slice into the
+        # comment text and the extracted GLSL would begin with prose.
+        start_tokens = (
+            "#version",
+            "#define",
+            "precision ",
+            "const ",
+            "float ",
+            "vec2 ",
+            "vec3 ",
+            "vec4 ",
+            "void mainImage",
+        )
+        start_candidates: list[int] = []
+        for token in start_tokens:
+            m = re.search(rf"^[ \t]*{re.escape(token)}", stripped, re.MULTILINE)
+            if m is not None:
+                start_candidates.append(m.start())
         start = min(start_candidates) if start_candidates else stripped.find("void mainImage")
         return stripped[start:].strip()
     if "void main()" in stripped or "#version" in stripped:

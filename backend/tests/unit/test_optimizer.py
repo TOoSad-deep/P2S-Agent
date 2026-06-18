@@ -6,6 +6,7 @@ No LLM, no browser. Uses a mock render_fn that writes a synthetic PNG.
 from __future__ import annotations
 
 import copy
+import random
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,54 @@ FIXTURE_CIRCLE_OPACITY = {
             "fill": {"type": "solid", "color": "#aaaaaa"},
             "params": {"center": [0.5, 0.5], "radius": 0.25},
             "opacity": 0.8,
+            "transform": None,
+            "effects": [],
+        }
+    ],
+}
+
+# linearGradient with a negative-axis (right-to-left) direction.
+FIXTURE_BOX_NEG_GRADIENT = {
+    "schema_version": 1,
+    "canvas": {"width": 512, "height": 512, "background": "#000000"},
+    "layers": [
+        {
+            "id": "ng_box",
+            "type": "box",
+            "fill": {
+                "type": "linearGradient",
+                "stops": [
+                    {"color": "#ff0000", "position": 0.0},
+                    {"color": "#0000ff", "position": 1.0},
+                ],
+                "direction": [-1.0, 0.0],
+            },
+            "params": {"center": [0.5, 0.5], "size": [0.4, 0.3]},
+            "opacity": 1.0,
+            "transform": None,
+            "effects": [],
+        }
+    ],
+}
+
+# radialGradient using the canonical 'center' fill accessor.
+FIXTURE_RADIAL_GRADIENT = {
+    "schema_version": 1,
+    "canvas": {"width": 512, "height": 512, "background": "#000000"},
+    "layers": [
+        {
+            "id": "rg_box",
+            "type": "box",
+            "fill": {
+                "type": "radialGradient",
+                "stops": [
+                    {"color": "#ffffff", "position": 0.0},
+                    {"color": "#000000", "position": 1.0},
+                ],
+                "center": [0.4, 0.6],
+            },
+            "params": {"center": [0.5, 0.5], "size": [0.4, 0.3]},
+            "opacity": 1.0,
             "transform": None,
             "effects": [],
         }
@@ -357,3 +406,163 @@ def test_optimize_gradient_dsl_runs(tmp_path):
     )
     assert isinstance(result, OptimizeResult)
     assert result.best_dsl["layers"][0]["type"] == "box"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1: gradient direction must keep its sign (not clamped to [0, 1])
+# ---------------------------------------------------------------------------
+
+def test_perturb_vec2_preserves_negative_direction_sign():
+    """A 'direction' vec2 with a negative component must NOT be clamped to 0.0.
+
+    Clamping a -1.0 component to 0.0 silently degenerates the gradient axis.
+    """
+    random.seed(0)
+    # Perturb a [-1.0, 0.0] direction many times with a small scale; the first
+    # component must remain negative (sign preserved), never clamped to 0.0.
+    for _ in range(50):
+        result = _perturb_vec2([-1.0, 0.0], is_direction=True)
+        assert len(result) == 2
+        assert result[0] < 0.0, f"direction x lost its sign: {result}"
+
+
+def test_coordinate_descent_direction_keeps_sign(tmp_path):
+    """Coordinate-descent perturbation of a negative direction keeps it negative.
+
+    The render improves on every trial so the direction perturbation IS
+    accepted and written into best_dsl — exposing the [0, 1] clamp that
+    degenerates the -1.0 x component to 0.0.
+    """
+    ref_path = make_ref_image(tmp_path)
+
+    # Monotonically improving render so coordinate-descent always accepts and
+    # the perturbed direction lands in best_dsl.
+    state = {"n": 0}
+
+    def render_fn(glsl: str) -> Path:
+        shade = min(60 + state["n"] * 12, 200)
+        img = Image.new("RGBA", (64, 64), (shade, shade, shade, 255))
+        p = tmp_path / f"dir_{state['n']}.png"
+        state["n"] += 1
+        img.save(p)
+        return p
+
+    # Enough iterations for coordinate descent to reach the fill 'direction'
+    # param (collected after params/opacity) and accept a perturbation.
+    result = optimize_candidate(
+        FIXTURE_BOX_NEG_GRADIENT,
+        ref_path,
+        render_fn,
+        max_iterations=12,
+        strategy="coordinate_descent",
+        seed=11,
+    )
+    direction = result.best_dsl["layers"][0]["fill"]["direction"]
+    # The x component started at -1.0; a +/-0.05 coordinate step must not flip
+    # it across zero into a degenerate/positive axis.
+    assert direction[0] < 0.0, f"direction x lost its sign: {direction}"
+
+
+# ---------------------------------------------------------------------------
+# Bug 2: radialGradient 'center' must actually be collected/optimized
+# ---------------------------------------------------------------------------
+
+def test_collect_params_radial_gradient_center(tmp_path):
+    """radialGradient 'center' must appear in the collected optimizable params."""
+    params = _collect_optimizable_params(FIXTURE_RADIAL_GRADIENT)
+    paths = [p for p, _, _ in params]
+    assert any("fill.center" in path for path in paths), (
+        f"radialGradient center not collected: {paths}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: optimizer must NOT seed the process-global random module
+# ---------------------------------------------------------------------------
+
+def test_optimize_does_not_disturb_global_random(tmp_path):
+    """optimize_candidate(seed=...) must not reseed the global random module."""
+    ref_path = make_ref_image(tmp_path)
+    render_fn = make_mock_render_fn(tmp_path)
+
+    random.seed(1234)
+    expected_sequence = [random.random() for _ in range(3)]
+
+    random.seed(1234)
+    optimize_candidate(
+        FIXTURE_CIRCLE_SOLID, ref_path, render_fn, max_iterations=5, seed=42
+    )
+    after_optimize = [random.random() for _ in range(3)]
+
+    assert after_optimize == expected_sequence, (
+        "optimize_candidate disturbed the process-global random state"
+    )
+
+
+def test_optimize_seed_is_deterministic(tmp_path):
+    """A fixed seed must give reproducible optimizer logs via a local RNG."""
+    ref_path = make_ref_image(tmp_path, color=(10, 200, 50, 255))
+    render_fn = make_mock_render_fn(tmp_path, color=(200, 10, 50, 255))
+
+    r1 = optimize_candidate(
+        FIXTURE_CIRCLE_GLOW, ref_path, render_fn, max_iterations=8, seed=7
+    )
+    r2 = optimize_candidate(
+        FIXTURE_CIRCLE_GLOW, ref_path, render_fn, max_iterations=8, seed=7
+    )
+    assert [s.param_path for s in r1.optimizer_log] == [
+        s.param_path for s in r2.optimizer_log
+    ]
+    assert [s.new_value for s in r1.optimizer_log] == [
+        s.new_value for s in r2.optimizer_log
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: coordinate-descent log score_before must reflect the actual pre-step score
+# ---------------------------------------------------------------------------
+
+def test_coordinate_descent_score_before_matches_accept_decision(tmp_path):
+    """The logged score_before must be the baseline the accept decision used.
+
+    Within one coordinate-descent step the +scale trial can be accepted first;
+    the -scale trial is then judged against the accepted score, not the stale
+    pre-step best_score. The log must stay internally consistent:
+    accepted == (score_after > score_before).
+    """
+    ref_path = make_ref_image(tmp_path)
+
+    # Trial order per step: [+scale, -scale]. Make +scale the best (closest),
+    # and -scale better than the pre-step start but worse than +scale. With the
+    # buggy stale score_before, the 2nd trial logs before=start, after>start,
+    # yet accepted=False -> inconsistent.
+    colors = [
+        (60, 60, 60, 255),     # initial render (farthest from ref 200)
+        (199, 199, 199, 255),  # +scale trial — closest => accepted
+        (120, 120, 120, 255),  # -scale trial — better than start, worse than +scale
+    ]
+    state = {"n": 0}
+
+    def render_fn(glsl: str) -> Path:
+        idx = min(state["n"], len(colors) - 1)
+        img = Image.new("RGBA", (64, 64), colors[idx])
+        p = tmp_path / f"cd_{state['n']}.png"
+        state["n"] += 1
+        img.save(p)
+        return p
+
+    result = optimize_candidate(
+        FIXTURE_CIRCLE_SOLID,
+        ref_path,
+        render_fn,
+        max_iterations=2,
+        strategy="coordinate_descent",
+        seed=3,
+    )
+
+    # Every logged step must satisfy accepted == (score_after > score_before).
+    for step in result.optimizer_log:
+        assert step.accepted == (step.score_after > step.score_before), (
+            f"inconsistent log: before={step.score_before} "
+            f"after={step.score_after} accepted={step.accepted}"
+        )

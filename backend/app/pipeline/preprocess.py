@@ -7,6 +7,7 @@ No LLM, no browser, no numpy required.
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter, deque
 from pathlib import Path
 from typing import Any
@@ -14,9 +15,55 @@ from typing import Any
 from PIL import Image
 
 
+# Cap on the working image's longest side. Per-pixel feature extraction below
+# is O(width * height); for huge PNGs materializing every pixel (``getdata()``)
+# would allocate multiple GB and effectively become a DoS vector. We downscale
+# to this bound BEFORE any pixel iteration. The cap is generous so typical
+# inputs (icons, sprites, screenshots up to ~1024px) are processed untouched and
+# their existing feature values are preserved exactly.
+MAX_WORKING_DIM = 1024
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _bounded_working_image(img: Image.Image) -> Image.Image:
+    """Return *img* downscaled so its longest side is <= ``MAX_WORKING_DIM``.
+
+    Images already within the cap are returned unchanged (same object), so
+    normal-size inputs keep byte-identical pixels and feature values. Aspect
+    ratio is preserved for oversized images.
+    """
+    w, h = img.size
+    if max(w, h) <= MAX_WORKING_DIM:
+        return img
+    work = img.copy()
+    work.thumbnail((MAX_WORKING_DIM, MAX_WORKING_DIM), Image.LANCZOS)
+    return work
+
+
+def feature_num(features: dict, key: str, default: float) -> float:
+    """Read a numeric preprocess feature, coalescing None/missing/non-finite.
+
+    Preprocess features can legitimately be absent or ``None`` (e.g. when a
+    feature could not be computed). Candidate generators that do
+    ``float(features.get(key))`` then crash with ``TypeError`` on ``None`` or
+    ``ValueError`` on junk. This helper returns *default* whenever the value is
+    missing, ``None``, non-finite (NaN/inf), or otherwise not coercible to a
+    finite float, and the coerced ``float`` value when it is usable.
+    """
+    value = features.get(key, default)
+    if value is None:
+        return float(default)
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(result):
+        return float(default)
+    return result
 
 
 def preprocess_image(image_path: "str | Path") -> dict[str, Any]:
@@ -36,15 +83,21 @@ def preprocess_image(image_path: "str | Path") -> dict[str, Any]:
     - ``gradient_score`` — 0.0–1.0, high ↔ smooth colour gradients.
     """
     img = Image.open(image_path)
-    width, height = img.size
+    width, height = img.size  # ORIGINAL dimensions — reported as-is.
+
+    # Per-pixel feature extraction runs on a size-bounded working copy so huge
+    # inputs cannot force multi-GB pixel materialization. Normal-size images are
+    # returned unchanged by _bounded_working_image, preserving feature values.
+    work_img = _bounded_working_image(img)
+    width_w, height_w = work_img.size
 
     # ---- Alpha channel analysis ----------------------------------------
-    has_alpha = img.mode in ("RGBA", "LA", "PA") or (
-        img.mode == "P" and img.info.get("transparency") is not None
+    has_alpha = work_img.mode in ("RGBA", "LA", "PA") or (
+        work_img.mode == "P" and work_img.info.get("transparency") is not None
     )
 
     if has_alpha:
-        rgba = img.convert("RGBA")
+        rgba = work_img.convert("RGBA")
         pixels_rgba = list(rgba.getdata())
         total = len(pixels_rgba)
         non_transparent = sum(1 for p in pixels_rgba if p[3] > 0)
@@ -53,7 +106,7 @@ def preprocess_image(image_path: "str | Path") -> dict[str, Any]:
         alpha_coverage = 1.0
 
     # ---- Palette (top-5 colours, 16-level RGB quantisation) -------------
-    rgb_img = img.convert("RGB")
+    rgb_img = work_img.convert("RGB")
     pixels_rgb = list(rgb_img.getdata())
     total = len(pixels_rgb)
 
@@ -84,13 +137,13 @@ def preprocess_image(image_path: "str | Path") -> dict[str, Any]:
     # Compare each pixel with its right and bottom neighbours.
     edge_count = 0
     edge_total = 0
-    for y in range(height):
-        for x in range(width):
-            idx = y * width + x
+    for y in range(height_w):
+        for x in range(width_w):
+            idx = y * width_w + x
             pr, pg, pb = pixels_rgb[idx]
 
             # Right neighbour
-            if x + 1 < width:
+            if x + 1 < width_w:
                 nr, ng, nb = pixels_rgb[idx + 1]
                 if (
                     abs(pr - nr) > 20
@@ -101,8 +154,8 @@ def preprocess_image(image_path: "str | Path") -> dict[str, Any]:
                 edge_total += 1
 
             # Bottom neighbour
-            if y + 1 < height:
-                br, bg, bb = pixels_rgb[idx + width]
+            if y + 1 < height_w:
+                br, bg, bb = pixels_rgb[idx + width_w]
                 if (
                     abs(pr - br) > 20
                     or abs(pg - bg) > 20
@@ -114,10 +167,10 @@ def preprocess_image(image_path: "str | Path") -> dict[str, Any]:
     edge_sharpness = edge_count / edge_total if edge_total > 0 else 0.0
 
     # ---- Component count (BFS on downsampled mask) -----------------------
-    component_count_estimate = _count_components(img, has_alpha, width, height)
+    component_count_estimate = _count_components(work_img, has_alpha, width_w, height_w)
 
     # ---- Texture score ---------------------------------------------------
-    texture_score = _compute_texture_score(pixels_rgb, width, height)
+    texture_score = _compute_texture_score(pixels_rgb, width_w, height_w)
 
     # ---- Derived scores --------------------------------------------------
     photo_raw = (

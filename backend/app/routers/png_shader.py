@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import io
 import json
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -22,7 +24,7 @@ from time import time
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import ModelConfig, use_active_model
@@ -152,6 +154,121 @@ _DRAW_CARD_EVENT_TYPES: frozenset[str] = frozenset({
 # V4.2: allowlist regex for region_id — mirrors _CANDIDATE_ID_RE in checkpoints.py.
 # Rejects path-traversal characters (/, ..) and leading dots.
 _REGION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+
+
+# ---------------------------------------------------------------------------
+# Security / input-validation guards (configurable via env).
+# ---------------------------------------------------------------------------
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive int from the environment, falling back to *default*."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# Item 1 — cap the multipart upload body so an unauthenticated client cannot
+# OOM the worker by streaming an enormous image. Default ~25 MB.
+_MAX_UPLOAD_BYTES = _env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
+
+# Item 1 — content-type allowlist for the uploaded image.
+_ALLOWED_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset({
+    "image/png", "image/jpeg", "image/jpg", "image/webp",
+})
+
+# Item 3 — length caps (chars) for free-text / code inputs. Over-cap → 422.
+_MAX_SEED_GLSL_CHARS = _env_int("MAX_SEED_GLSL_CHARS", 256 * 1024)
+_MAX_INPUT_SPEC_CHARS = _env_int("MAX_INPUT_SPEC_CHARS", 256 * 1024)
+_MAX_FEEDBACK_CHARS = _env_int("MAX_FEEDBACK_CHARS", 8 * 1024)
+_MAX_MODIFIED_DSL_CHARS = _env_int("MAX_MODIFIED_DSL_CHARS", 256 * 1024)
+
+# Item 2 — allowlist regex for client-supplied ids used in filesystem paths.
+# Allows only [A-Za-z0-9_-]; rejects empty, "..", "/", and any other char.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def validate_safe_id(value: object, *, field: str = "id") -> str:
+    """Return *value* if it is a path-safe id, else raise HTTPException(422).
+
+    A safe id contains only ``[A-Za-z0-9_-]`` and is non-empty. This blocks
+    path-traversal payloads (``../``, ``/``, ``..``) before any id is joined
+    into a filesystem path.
+    """
+    if not isinstance(value, str) or not _SAFE_ID_RE.match(value):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} contains disallowed characters",
+        )
+    return value
+
+
+def _enforce_text_cap(value: Optional[str], cap: int, *, field: str) -> None:
+    """Reject (422) a free-text/code input whose length exceeds *cap* chars."""
+    if value is not None and len(value) > cap:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} exceeds maximum length of {cap} characters",
+        )
+
+
+def _guard_upload(request: Request, image: UploadFile, contents: bytes) -> None:
+    """Validate an uploaded image: content-type allowlist + real-image bytes.
+
+    Content-Length is checked separately (up front) before the body is read.
+    Here we verify the declared content-type is an allowed image type (415)
+    and that the bytes actually decode as an image (422).
+    """
+    content_type = (image.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type not in _ALLOWED_IMAGE_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported image content-type: {image.content_type!r}",
+        )
+    # Enforce the size cap on the actual bytes too (Content-Length can lie or
+    # be absent under chunked transfer-encoding).
+    if len(contents) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload exceeds maximum size of {_MAX_UPLOAD_BYTES} bytes",
+        )
+    # Verify the bytes are a real image (defends against content-type spoofing).
+    try:
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(io.BytesIO(contents)) as img:
+            img.verify()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="uploaded file is not a valid image",
+        ) from exc
+
+
+def _check_content_length(request: Request) -> None:
+    """Reject (413) up front when the declared Content-Length exceeds the cap.
+
+    Used as a FastAPI route dependency so it runs BEFORE the multipart body is
+    parsed/validated — i.e. before the worker buffers the body in memory.
+    """
+    raw = request.headers.get("content-length")
+    if not raw:
+        return
+    try:
+        declared = int(raw)
+    except (TypeError, ValueError):
+        return
+    if declared > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload exceeds maximum size of {_MAX_UPLOAD_BYTES} bytes",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -625,13 +742,19 @@ def _start_pipeline_worker(
     ).start()
 
 
-@router.post("/run")
+@router.post("/run", dependencies=[Depends(_check_content_length)])
 async def run_png_shader(
+    request: Request,
     image: UploadFile = File(...),
     input_spec_json: Optional[str] = Form(default=None),
     seed_glsl: Optional[str] = Form(default=None),
 ) -> dict:
     """Submit an image and run the PNG-to-Shader pipeline in the background."""
+    # Item 3 — cap free-text/code inputs. (Item 1's Content-Length guard runs as
+    # a route dependency, before the multipart body is parsed.)
+    _enforce_text_cap(input_spec_json, _MAX_INPUT_SPEC_CHARS, field="input_spec_json")
+    _enforce_text_cap(seed_glsl, _MAX_SEED_GLSL_CHARS, field="seed_glsl")
+
     input_spec: Optional[dict] = None
     if input_spec_json:
         try:
@@ -688,6 +811,23 @@ async def run_png_shader(
         image_path = upload_dir / f"input{suffix}"
         try:
             contents = await image.read()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to read uploaded image: {exc}",
+            ) from exc
+
+        # Item 1 — content-type allowlist + size cap + real-image verification.
+        try:
+            _guard_upload(request, image, contents)
+        except HTTPException:
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            raise
+
+        try:
             image_path.write_bytes(contents)
         except Exception as exc:
             shutil.rmtree(upload_dir, ignore_errors=True)
@@ -815,6 +955,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     checkpoint_id = str(payload.get("checkpoint_id") or "final:selected")
     mode = str(payload.get("mode") or "refine")
     feedback = str(payload.get("feedback") or "")
+    _enforce_text_cap(feedback, _MAX_FEEDBACK_CHARS, field="feedback")
     locks = payload.get("locks") or {}
     stop_parent = bool(payload.get("stop_parent"))
     quality_overrides = payload.get("quality") or {}
@@ -1236,6 +1377,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     diversity = str(payload.get("diversity") or "medium")
     mode = str(payload.get("mode") or "explore")
     feedback = str(payload.get("feedback") or "")
+    _enforce_text_cap(feedback, _MAX_FEEDBACK_CHARS, field="feedback")
     checkpoint_id_raw = payload.get("checkpoint_id")
     quality_overrides = payload.get("quality") or {}
     stop_parent = bool(payload.get("stop_parent"))
@@ -1460,6 +1602,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     feedback = str(payload.get("feedback") or "")
     if not feedback.strip():
         raise HTTPException(status_code=422, detail="feedback is required for draw-session")
+    _enforce_text_cap(feedback, _MAX_FEEDBACK_CHARS, field="feedback")
 
     card_count = _coerce_int(payload.get("card_count"), "card_count", 8, 2, 12)
 
@@ -1958,6 +2101,10 @@ async def refine_png_shader(
     Returns:
         Updated result dict with refinement applied.
     """
+    # Item 3 — cap free-text / code inputs before doing any work.
+    _enforce_text_cap(feedback, _MAX_FEEDBACK_CHARS, field="feedback")
+    _enforce_text_cap(modified_dsl_json, _MAX_MODIFIED_DSL_CHARS, field="modified_dsl_json")
+
     log_event(
         logger,
         "human_refine_request",
@@ -2963,6 +3110,7 @@ async def create_fusion(payload: dict) -> dict:
 @router.get("/fusions/{fusion_id}")
 async def get_fusion(fusion_id: str) -> dict:
     """Return a fusion plan's status + regions (FusionStatus shape)."""
+    validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
     record = load_plan(fusion_id, root=_FUSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
@@ -2991,6 +3139,7 @@ async def create_composite_target(fusion_id: str) -> dict:
     On a build failure the fusion is marked ``failed`` and 200 is returned with
     the error (per design: composite failure → fusion status failed, not 500).
     """
+    validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
     record = load_plan(fusion_id, root=_FUSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
@@ -3061,6 +3210,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
+    validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
     record = load_plan(fusion_id, root=_FUSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
@@ -3222,6 +3372,7 @@ async def get_fusion_artifact(fusion_id: str, artifact_id: str) -> FileResponse:
     Mirrors the checkpoint artifacts endpoint's suffix allowlist + path
     containment (``.resolve().relative_to(dir)``) safety.
     """
+    validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
     fusion_dir = _fusion_artifacts_dir(fusion_id)
 
     if artifact_id == "composite_target":

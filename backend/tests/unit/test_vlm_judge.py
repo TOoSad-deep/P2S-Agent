@@ -4,6 +4,7 @@ import json
 from PIL import Image
 
 import app.llm.vlm_judge as vj
+from app.config import ModelConfig, use_active_model
 from app.llm.vlm_judge import judge_pairwise, judge_rubric
 
 
@@ -119,3 +120,47 @@ def test_directed_pairwise_none_on_failure(tmp_path):
         judge_client=lambda s, u, i: None,
     )
     assert out is None
+
+
+# --- Bug 2: cache keyed by model identity + bounded -----------------------
+
+def _model(model="gpt-4o"):
+    return ModelConfig(api_key="k", base_url="https://api.openai.com/v1", model=model)
+
+
+def test_cache_key_includes_model_identity():
+    # Same prompt+images, two different models -> two DISTINCT cache entries.
+    with use_active_model(_model("model-A")):
+        key_a = vj._cache_key("rubric", "deadbeef")
+    with use_active_model(_model("model-B")):
+        key_b = vj._cache_key("rubric", "deadbeef")
+    assert key_a != key_b
+
+
+def test_no_cross_model_verdict_contamination(tmp_path):
+    ref = _img(tmp_path, "ref.png", (255, 0, 0))
+    a = _img(tmp_path, "a.png", (250, 0, 0))
+    b = _img(tmp_path, "b.png", (0, 0, 255))
+
+    with use_active_model(_model("model-A")):
+        out_a = judge_pairwise(ref, a, b, work_dir=tmp_path, judge_client=lambda s, u, i: '{"winner": "A"}')
+    assert out_a == "tie"
+
+    # A different model must NOT read model-A's cached verdict.
+    calls = []
+
+    def fake(system_prompt, user_prompt, image_paths):
+        calls.append(1)
+        return '{"winner": "A"}' if len(calls) == 1 else '{"winner": "B"}'
+
+    with use_active_model(_model("model-B")):
+        out_b = judge_pairwise(ref, a, b, work_dir=tmp_path, judge_client=fake)
+    assert out_b == "A"
+    assert len(calls) == 2, "model-B must recompute, not reuse model-A's cache entry"
+
+
+def test_cache_is_bounded(tmp_path):
+    # Insert far more entries than the cap; the cache must not grow without limit.
+    for i in range(vj._CACHE_MAX + 50):
+        vj._cache_put(vj._cache_key("rubric", f"digest{i}"), {"i": i})
+    assert len(vj._CACHE) <= vj._CACHE_MAX

@@ -3870,3 +3870,126 @@ def test_fusion_run_completion_marks_plan_completed(tmp_path, monkeypatch):
 
     assert record is not None
     assert record.status == "completed", f"fusion status stuck at {record.status!r}"
+
+
+# ---------------------------------------------------------------------------
+# Security hardening: path-traversal on fusion_id (Item 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_id", ["..", "....", "%2e%2e", "a%2Fb", "a.b", "a:b"])
+def test_get_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch, bad_id):
+    """A fusion_id with path-traversal / non-allowlisted chars is rejected 4xx
+    and never touches the filesystem outside the fusions root."""
+    import app.routers.png_shader as mod
+
+    fusions_root = tmp_path / "fusions_root"
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", str(fusions_root))
+
+    # Spy on load_plan to prove no filesystem lookup happens for a rejected id.
+    calls: list = []
+    orig = mod.load_plan
+    monkeypatch.setattr(
+        mod, "load_plan", lambda *a, **k: (calls.append(a), orig(*a, **k))[1]
+    )
+
+    client = _client()
+    resp = client.get(f"/png-shader/fusions/{bad_id}")
+    # Either our validator (422) or the router not matching a "/" id (404) — both
+    # are safe rejections; what matters is it is a 4xx and load_plan never ran for
+    # ids that DID reach the handler.
+    assert resp.status_code in (404, 422), resp.text
+    if resp.status_code == 422:
+        assert calls == [], "load_plan must not run for a rejected fusion_id"
+
+
+def test_run_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.routers.png_shader._FUSIONS_ROOT", str(tmp_path / "fusions_root")
+    )
+    client = _client()
+    resp = client.post("/png-shader/fusions/..%2e/run", json={})
+    assert resp.status_code in (404, 422), resp.text
+
+
+def test_fusion_artifact_rejects_unsafe_fusion_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.routers.png_shader._FUSIONS_ROOT", str(tmp_path / "fusions_root")
+    )
+    client = _client()
+    resp = client.get("/png-shader/fusions/..../artifacts/composite_target")
+    assert resp.status_code in (404, 422), resp.text
+
+
+def test_valid_fusion_id_still_accepted(tmp_path, monkeypatch):
+    """A normal fusion_id passes validate_safe_id (regression for Item 2)."""
+    monkeypatch.setattr(
+        "app.routers.png_shader._FUSIONS_ROOT", str(tmp_path / "fusions_root")
+    )
+    client = _client()
+    # Unknown-but-safe id → 404 (not a 422 validation error).
+    resp = client.get("/png-shader/fusions/fusion_abcd1234")
+    assert resp.status_code == 404, resp.text
+
+
+def test_validate_safe_id_helper():
+    """Unit-level check of the allowlist helper (Item 2)."""
+    from fastapi import HTTPException
+
+    from app.routers.png_shader import validate_safe_id
+
+    assert validate_safe_id("fusion_abcd1234") == "fusion_abcd1234"
+    assert validate_safe_id("Run-01_x") == "Run-01_x"
+    for bad in ["", "..", "../x", "a/b", "a.b", "a b", "a:b", None, 5]:
+        with pytest.raises(HTTPException) as ei:
+            validate_safe_id(bad)
+        assert ei.value.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Security hardening: free-text / code length caps (Item 3)
+# ---------------------------------------------------------------------------
+
+def test_run_rejects_oversized_seed_glsl(tmp_path, monkeypatch):
+    """An over-cap seed_glsl is rejected 422 before any pipeline work."""
+    from app.routers.png_shader import _MAX_SEED_GLSL_CHARS
+
+    _run_store.clear()
+    client = _client()
+    oversized = "a" * (_MAX_SEED_GLSL_CHARS + 1)
+
+    resp = client.post(
+        "/png-shader/run",
+        data={"seed_glsl": oversized},
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_run_rejects_oversized_input_spec_json(tmp_path):
+    from app.routers.png_shader import _MAX_INPUT_SPEC_CHARS
+
+    _run_store.clear()
+    client = _client()
+    oversized = "x" * (_MAX_INPUT_SPEC_CHARS + 1)
+
+    resp = client.post(
+        "/png-shader/run",
+        data={"input_spec_json": oversized},
+        files={"image": ("input.png", _png_bytes(tmp_path), "image/png")},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_branch_refine_rejects_oversized_feedback(tmp_path):
+    from app.routers.png_shader import _MAX_FEEDBACK_CHARS
+
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+    oversized = "f" * (_MAX_FEEDBACK_CHARS + 1)
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={"feedback": oversized, "mode": "refine"},
+    )
+    assert resp.status_code == 422, resp.text

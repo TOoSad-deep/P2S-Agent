@@ -103,7 +103,7 @@ def add_residual_layers(
             break
         layer["id"] = f"res_{step:02d}_{layer['type']}"
 
-        candidate = {**current, "layers": [*current["layers"], layer]}
+        candidate = {**current, "layers": [*current.get("layers", []), layer]}
         new_score = score_fn(candidate)
         accepted = new_score >= current_score + ACCEPT_MIN_DELTA
         log.append({

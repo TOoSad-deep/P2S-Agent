@@ -18,6 +18,26 @@ export function nextShaderTime(
   return frozenTime !== null ? frozenTime : clockElapsed;
 }
 
+/**
+ * Pure decision for what to do when a WebGL context is restored after a
+ * `webglcontextlost` event (Bug 2: context-loss recovery).
+ *
+ * After restoration the GL program/buffers are gone, so the renderer must:
+ *  - recompile the last fragment source — but only if one was ever compiled
+ *    (a non-empty saved source), otherwise there is nothing to restore;
+ *  - resume the rAF render loop — but only if it was actively rendering when
+ *    the context was lost, so we don't spin up a loop the caller had paused.
+ */
+export function restoreActions(
+  wasRenderingBeforeLoss: boolean,
+  savedFragSource: string | null,
+): { shouldRecompile: boolean; shouldResume: boolean } {
+  return {
+    shouldRecompile: !!savedFragSource,
+    shouldResume: wasRenderingBeforeLoss,
+  };
+}
+
 const VERTEX_SHADER = `
 varying vec2 vUv;
 void main() {
@@ -70,6 +90,14 @@ export class ShaderRenderer {
   // setTime()/__setShaderTime) and the rAF loop must not overwrite it with the
   // free-running clock. null = follow the running clock.
   private frozenTime: number | null = null;
+  // Bug 2: WebGL context-loss recovery state. We keep the last compiled
+  // fragment source so a restored context can recompile it, and we remember
+  // whether the rAF loop was running so restore can resume it.
+  private lastFragSource: string | null = null;
+  private contextLost = false;
+  private wasRenderingBeforeLoss = false;
+  private readonly onContextLost: (event: Event) => void;
+  private readonly onContextRestored: () => void;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -88,9 +116,41 @@ export class ShaderRenderer {
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, 1, 1);
     this.defaultTexture = new THREE.CanvasTexture(canvas);
+
+    // Bug 2: handle WebGL context loss/restore. Context loss is common under
+    // context exhaustion; without these handlers a lost context silently
+    // black-screens with no recovery. preventDefault() on loss tells the
+    // browser the context is recoverable so it will fire a restore event.
+    this.onContextLost = (event: Event) => {
+      event.preventDefault();
+      this.contextLost = true;
+      // Remember whether we were actively rendering so restore can resume it,
+      // then pause the loop (its GL program is now invalid).
+      this.wasRenderingBeforeLoss = this.animationId !== null;
+      this.stopRendering();
+    };
+    this.onContextRestored = () => {
+      this.contextLost = false;
+      const { shouldRecompile, shouldResume } = restoreActions(
+        this.wasRenderingBeforeLoss,
+        this.lastFragSource,
+      );
+      // GL resources (programs/buffers/textures) were destroyed with the old
+      // context; recompile the last shader to rebuild the mesh + material.
+      if (shouldRecompile && this.lastFragSource !== null) {
+        this.compileShader(this.lastFragSource);
+      }
+      if (shouldResume) {
+        this.startRendering();
+      }
+    };
+    this.renderer.domElement.addEventListener("webglcontextlost", this.onContextLost, false);
+    this.renderer.domElement.addEventListener("webglcontextrestored", this.onContextRestored, false);
   }
 
   compileShader(fragShaderSource: string): { success: boolean; error: string | null } {
+    // Remember the source so a restored WebGL context (Bug 2) can recompile it.
+    this.lastFragSource = fragShaderSource;
     const fullFrag = wrapFragmentShader(fragShaderSource);
     let compileError: string | null = null;
 
@@ -165,6 +225,17 @@ export class ShaderRenderer {
   }
 
   startRendering() {
+    // Idempotent: never run two concurrent rAF loops (e.g. a restore that
+    // resumes while one is already scheduled, or a redundant caller).
+    if (this.animationId !== null) {
+      return;
+    }
+    // While the context is lost rendering would throw; resume happens via the
+    // webglcontextrestored handler instead.
+    if (this.contextLost) {
+      this.wasRenderingBeforeLoss = true;
+      return;
+    }
     this.clock.start();
     const animate = () => {
       this.animationId = requestAnimationFrame(animate);
@@ -234,6 +305,11 @@ export class ShaderRenderer {
 
   dispose() {
     this.stopRendering();
+
+    // Bug 2: detach context-loss listeners before tearing down the canvas so
+    // they cannot fire (or leak) after disposal.
+    this.renderer.domElement.removeEventListener("webglcontextlost", this.onContextLost, false);
+    this.renderer.domElement.removeEventListener("webglcontextrestored", this.onContextRestored, false);
 
     // Free GPU resources that the renderer's own dispose() does not own:
     // the current mesh, and every texture this instance allocated. Leaking

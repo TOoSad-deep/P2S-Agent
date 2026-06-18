@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,29 @@ def _make_score_driver(monkeypatch, score_for_glsl):
 
     monkeypatch.setattr("app.pipeline.glsl_optimizer.score_glsl", fake_score)
     return calls
+
+
+def test_optimize_glsl_does_not_disturb_global_random(monkeypatch, tmp_path):
+    """optimize_glsl_candidate(seed=...) must not reseed the global random module."""
+    glsl = "#define RADIUS 0.35\nvoid main() {}"
+    _make_score_driver(monkeypatch, lambda _g: 0.5)
+
+    random.seed(987)
+    expected = [random.random() for _ in range(3)]
+
+    random.seed(987)
+    optimize_glsl_candidate(
+        glsl,
+        tmp_path / "ref.png",
+        render_glsl_fn=lambda _g: tmp_path / "render.png",
+        max_iterations=4,
+        seed=42,
+    )
+    after = [random.random() for _ in range(3)]
+
+    assert after == expected, (
+        "optimize_glsl_candidate disturbed the process-global random state"
+    )
 
 
 def test_optimize_returns_unchanged_when_no_defines(monkeypatch, tmp_path):

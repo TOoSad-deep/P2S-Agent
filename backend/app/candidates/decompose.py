@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from app.pipeline.decompose import DECOMPOSE_AVAILABLE, decompose_to_dsl
+from app.pipeline.preprocess import feature_num
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ def generate_decompose_candidate(
     if not DECOMPOSE_AVAILABLE or image_path is None:
         return None
     # photo-like inputs decompose into fragments — leave them to other candidates
-    if float(preprocess.get("photo_like_score", 0.0)) > PHOTO_LIKE_SKIP_THRESHOLD:
+    if feature_num(preprocess, "photo_like_score", 0.0) > PHOTO_LIKE_SKIP_THRESHOLD:
         return None
     dsl = decompose_to_dsl(image_path, canvas_width, canvas_height)
     if dsl is None:

@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Optional, Union
 
@@ -24,7 +26,49 @@ logger = logging.getLogger(__name__)
 
 JudgeClient = Callable[[str, str, "Optional[list[str]]"], "Union[str, dict, None]"]
 
-_CACHE: dict[str, object] = {}
+# Verdict cache. Bounded (LRU) so it cannot grow without limit across a long
+# run, and keyed by model identity so concurrent multi-model runs do not read
+# each other's verdicts (cross-model contamination).
+_CACHE_MAX = 512
+_CACHE: "OrderedDict[str, object]" = OrderedDict()
+_CACHE_LOCK = threading.Lock()
+
+
+def _model_identity() -> str:
+    """Stable short identity for the active judge model.
+
+    Distinguishes verdicts produced by different models so their cache entries
+    never collide. Falls back gracefully if ``settings.llm`` is unconfigured.
+    """
+    cfg = getattr(settings, "llm", None)
+    if cfg is None:
+        return "default"
+    raw = "|".join(
+        str(getattr(cfg, attr, "") or "")
+        for attr in ("model", "base_url")
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def _cache_key(kind: str, *parts: str) -> str:
+    """Compose a cache key from the model identity, a kind tag, and content parts."""
+    return ":".join((_model_identity(), kind, *parts))
+
+
+def _cache_get(key: str):
+    with _CACHE_LOCK:
+        if key not in _CACHE:
+            return None, False
+        _CACHE.move_to_end(key)
+        return _CACHE[key], True
+
+
+def _cache_put(key: str, value: object) -> None:
+    with _CACHE_LOCK:
+        _CACHE[key] = value
+        _CACHE.move_to_end(key)
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.popitem(last=False)
 
 PANEL_HEIGHT = 384
 
@@ -79,9 +123,9 @@ def _compose_panel(labeled_paths: "list[tuple[str, Path]]", out_path: Path) -> P
 def _default_client(system_prompt: str, user_prompt: str, image_paths: "Optional[list[str]]"):
     if not settings.llm.api_key:
         return None
-    from app.llm.client import BaseAgent
+    from app.llm.client import get_agent
 
-    agent = BaseAgent(settings.llm)
+    agent = get_agent(settings.llm)
     paths = image_paths if image_paths and settings.llm.supports_image else None
     return agent.chat(
         system_prompt=system_prompt,
@@ -122,9 +166,10 @@ def judge_rubric(
     "revision_hints": [...], "differences": [...]} or None on any failure.
     """
     try:
-        cache_key = "rubric:" + _file_digest(reference_path, render_path)
-        if cache_key in _CACHE:
-            return _CACHE[cache_key]  # type: ignore[return-value]
+        cache_key = _cache_key("rubric", _file_digest(reference_path, render_path))
+        cached, hit = _cache_get(cache_key)
+        if hit:
+            return cached  # type: ignore[return-value]
         panel = _compose_panel(
             [("REFERENCE", Path(reference_path)), ("RENDER", Path(render_path))],
             Path(work_dir) / "rubric_panel.png",
@@ -146,7 +191,7 @@ def judge_rubric(
             "revision_hints": [str(x) for x in data.get("revision_hints", [])][:5],
             "differences": [str(x) for x in data.get("differences", [])][:8],
         }
-        _CACHE[cache_key] = result
+        _cache_put(cache_key, result)
         return result
     except Exception:
         logger.warning("VLM rubric judge failed", exc_info=True)
@@ -163,9 +208,10 @@ def judge_pairwise(
 ) -> "Optional[str]":
     """Return "A", "B", or "tie" (order-debiased), or None on any failure."""
     try:
-        cache_key = "pair:" + _file_digest(reference_path, a_path, b_path)
-        if cache_key in _CACHE:
-            return _CACHE[cache_key]  # type: ignore[return-value]
+        cache_key = _cache_key("pair", _file_digest(reference_path, a_path, b_path))
+        cached, hit = _cache_get(cache_key)
+        if hit:
+            return cached  # type: ignore[return-value]
         client = judge_client or _default_client
         verdicts: list[str] = []
         for tag, first, second in (("fwd", a_path, b_path), ("rev", b_path, a_path)):
@@ -180,7 +226,7 @@ def judge_pairwise(
         fwd, rev = verdicts
         rev_mapped = {"A": "B", "B": "A"}.get(rev, "tie")  # rev call had panels swapped
         result = fwd if fwd == rev_mapped and fwd in ("A", "B") else "tie"
-        _CACHE[cache_key] = result
+        _cache_put(cache_key, result)
         return result
     except Exception:
         logger.warning("VLM pairwise judge failed", exc_info=True)
@@ -205,14 +251,14 @@ def judge_directed_pairwise(
     """
     try:
         goal = (user_feedback or "").strip()
-        cache_key = (
-            "directed:"
-            + hashlib.sha1(goal.encode("utf-8")).hexdigest()[:10]
-            + ":"
-            + _file_digest(reference_path, current_render_path, candidate_render_path)
+        cache_key = _cache_key(
+            "directed",
+            hashlib.sha1(goal.encode("utf-8")).hexdigest()[:10],
+            _file_digest(reference_path, current_render_path, candidate_render_path),
         )
-        if cache_key in _CACHE:
-            return _CACHE[cache_key]  # type: ignore[return-value]
+        cached, hit = _cache_get(cache_key)
+        if hit:
+            return cached  # type: ignore[return-value]
         system_prompt = (
             "You compare two shader renders (A and B) against a reference image, "
             "given a user's goal.\n"
@@ -243,7 +289,7 @@ def judge_directed_pairwise(
         fwd, rev = verdicts
         rev_mapped = {"A": "B", "B": "A"}.get(rev, "tie")  # rev call had panels swapped
         result = fwd if fwd == rev_mapped and fwd in ("A", "B") else "tie"
-        _CACHE[cache_key] = result
+        _cache_put(cache_key, result)
         return result
     except Exception:
         logger.warning("VLM directed pairwise judge failed", exc_info=True)

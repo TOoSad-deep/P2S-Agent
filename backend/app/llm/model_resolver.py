@@ -13,13 +13,122 @@ memory for the run; they must never be echoed back to the client.
 
 from __future__ import annotations
 
+import ipaddress
+import os
+import socket
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from app.config import ModelConfig, settings
 
 
 class ModelResolutionError(ValueError):
     """Raised when a model selection cannot be resolved to a usable config."""
+
+
+# Item 4 (SSRF) — schemes allowed for a custom-model base_url.
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _allowlisted_hosts() -> frozenset[str]:
+    """Hosts explicitly allowed to bypass the SSRF block (env, comma-separated).
+
+    Configured via ``LLM_BASE_URL_ALLOWLIST`` (e.g. for a self-hosted LLM on
+    localhost). Matched case-insensitively against the URL host and against
+    each resolved IP literal.
+    """
+    raw = os.getenv("LLM_BASE_URL_ALLOWLIST", "")
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+def _is_blocked_ip(ip: "ipaddress._BaseAddress") -> bool:
+    """True for SSRF-relevant internal addresses.
+
+    Blocks the cloud metadata IP (169.254.169.254, link-local), 127.0.0.0/8,
+    ::1, the RFC1918 ranges (10/8, 172.16/12, 192.168/16) and 0.0.0.0.
+
+    Note: ``ipaddress`` classifies RFC1918 + loopback + link-local + unspecified
+    all under ``is_private``; we list the others explicitly for clarity. We do
+    NOT block ``is_reserved``/``is_multicast`` here — those are not the SSRF
+    targets we care about and over-blocking would reject legitimate public hosts
+    in some environments.
+    """
+    return (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_unspecified
+    )
+
+
+def _validate_custom_base_url(base_url: str) -> None:
+    """Reject a custom-model base_url that could enable SSRF.
+
+    Requires an http/https scheme and a host that is not loopback / link-local
+    (incl. the 169.254.169.254 metadata IP) / private / unspecified — unless the
+    host (or a resolved IP) is on the ``LLM_BASE_URL_ALLOWLIST``.
+
+    Raises:
+        ModelResolutionError: when the URL is malformed or points at a blocked
+            (internal / metadata) address.
+    """
+    parts = urlsplit(base_url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise ModelResolutionError(
+            f"custom model base_url scheme must be http or https, got {scheme or 'none'!r}"
+        )
+
+    host = parts.hostname
+    if not host:
+        raise ModelResolutionError("custom model base_url has no host")
+
+    allowlist = _allowlisted_hosts()
+    host_lower = host.lower()
+    if host_lower in allowlist:
+        return
+
+    # If the host is an IP literal, check it directly.
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        ip = None
+
+    if ip is not None:
+        if str(ip) in allowlist:
+            return
+        if _is_blocked_ip(ip):
+            raise ModelResolutionError(
+                f"custom model base_url host {host!r} is a blocked (internal/metadata) address"
+            )
+        return
+
+    # Hostname — block obvious loopback names, then resolve and check every IP.
+    if host_lower in {"localhost"} or host_lower.endswith(".localhost"):
+        raise ModelResolutionError(
+            f"custom model base_url host {host!r} resolves to a blocked (loopback) address"
+        )
+    try:
+        infos = socket.getaddrinfo(host, parts.port or None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        # Cannot resolve — do not let an unresolvable host through.
+        raise ModelResolutionError(
+            f"custom model base_url host {host!r} could not be resolved"
+        )
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        if ip_str in allowlist:
+            continue
+        try:
+            resolved = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if _is_blocked_ip(resolved):
+            raise ModelResolutionError(
+                f"custom model base_url host {host!r} resolves to a blocked "
+                f"(internal/metadata) address {ip_str}"
+            )
 
 
 def list_presets() -> list[dict[str, Any]]:
@@ -92,6 +201,10 @@ def resolve_model_config(selection: Optional[dict[str, Any]]) -> ModelConfig:
         raise ModelResolutionError(
             "custom model is missing required field(s): " + ", ".join(missing)
         )
+
+    # Item 4 (SSRF) — validate the client-supplied base_url before it ever
+    # reaches the LLM client.
+    _validate_custom_base_url(base_url)
 
     label = (selection.get("label") or model).strip()
     return ModelConfig(

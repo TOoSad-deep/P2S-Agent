@@ -14,6 +14,7 @@ from app.candidates.baseline import generate_baseline_candidate
 from app.candidates.fallback import generate_fallback_candidate
 from app.candidates.llm_scene import (
     _call_llm,
+    _extract_glsl,
     _normalize_gradient_fills,
     _normalize_linear_gradient_direction,
     _parse_dsl_response,
@@ -746,3 +747,77 @@ def test_normalize_gradient_fills_repairs_angle_alias():
     assert direction[0] == pytest.approx(0.0, abs=1e-6)
     assert direction[1] == pytest.approx(1.0, abs=1e-6)
     assert validate_dsl(dsl).valid
+
+
+def test_normalize_gradient_fills_keeps_two_stops_when_one_color_bad():
+    """A gradient where one stop color is unparseable must still end with
+    >=2 stops so the validator passes (regression: the bad stop was dropped,
+    leaving a single-stop gradient that failed validation)."""
+    dsl = _gradient_dsl_with_fill(
+        {
+            "type": "radialGradient",
+            "center": [0.5, 0.5],
+            "stops": [
+                {"color": "definitely-not-a-color", "position": 0.0},
+                {"color": "#ffffff", "position": 1.0},
+            ],
+        }
+    )
+    _normalize_gradient_fills(dsl)
+    stops = dsl["layers"][0]["fill"]["stops"]
+    assert len(stops) >= 2, stops
+    assert validate_dsl(dsl).valid, validate_dsl(dsl).errors
+
+
+def test_llm_candidate_radial_gradient_one_bad_stop_stays_valid():
+    """A png_dsl LLM response carrying a radialGradient with a single bad stop
+    color normalizes to a DSL that passes validation."""
+    preprocess = _make_preprocess()
+    llm_response = {
+        "schema_version": "1.0",
+        "canvas": {"width": 64, "height": 64, "background": "#000000"},
+        "layers": [
+            {
+                "id": "grad_0",
+                "type": "circle",
+                "params": {"center": [0.5, 0.5], "radius": 0.48},
+                "fill": {
+                    "type": "radialGradient",
+                    "center": [0.5, 0.5],
+                    "stops": [
+                        {"color": "totally-bogus", "position": 0.0},
+                        {"color": "#ffcc00", "position": 1.0},
+                    ],
+                },
+                "opacity": 1.0,
+            }
+        ],
+    }
+
+    result = generate_llm_scene_candidate(
+        preprocess,
+        llm_enabled=True,
+        implementation="png_dsl",
+        llm_response=json.dumps(llm_response),
+    )
+
+    assert result is not None
+    val = validate_dsl(result)
+    assert val.valid, val.errors
+
+
+def test_extract_glsl_ignores_leading_comment_with_start_token():
+    """A // comment containing a start-token substring (e.g. 'vec3 color')
+    before the first real declaration must not be captured as shader code."""
+    glsl = (
+        "// helper returns vec3 color value\n"
+        "vec3 helper(vec2 p) { return vec3(0.0); }\n"
+        "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
+        "    fragColor = vec4(helper(fragCoord), 1.0);\n"
+        "}\n"
+    )
+    extracted = _extract_glsl(glsl)
+    assert not extracted.startswith("vec3 color value")
+    # The real shader code (the helper declaration and mainImage) survives.
+    assert "vec3 helper(vec2 p)" in extracted
+    assert "void mainImage" in extracted

@@ -274,8 +274,10 @@ def optimize_glsl_candidate(
     DSL optimizer), keep whichever direction improves the score. Stops after
     ``max_iterations`` total renders.
     """
-    if seed is not None:
-        random.seed(seed)
+    # Coordinate descent is deterministic, but keep a local RNG instance so any
+    # future randomized step never mutates the process-global random module —
+    # concurrent variant workers must not see each other's seed.
+    _rng = random.Random(seed)  # noqa: F841 — reserved for future randomized steps
 
     best_glsl = glsl
     initial_score = score_glsl(

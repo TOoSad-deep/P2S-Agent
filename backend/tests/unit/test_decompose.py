@@ -75,3 +75,35 @@ def test_decompose_candidate_skips_photo_like(tmp_path):
     dsl = generate_decompose_candidate({"photo_like_score": 0.1}, path)
     assert dsl is not None
     assert dsl["_meta"] == {"source": "decompose", "priority": 1}
+
+
+def test_decompose_low_color_image_does_not_raise(tmp_path):
+    """A flat / few-color image whose quantized palette has fewer than
+    ``max_colors`` entries must not raise IndexError in _merge_similar_colors
+    and must still return a usable DSL (or None), never crash."""
+    img = Image.new("RGB", (128, 128), (10, 20, 30))
+    path = _save(tmp_path, "flat.png", img)
+
+    # Must not raise (regression: getpalette() len 3 vs max_colors=6 -> IndexError)
+    dsl = decompose_to_dsl(path, 512, 512, max_colors=6)
+
+    # A single flat color has no foreground regions, so None is acceptable;
+    # the contract is "does not crash". When a DSL is produced it must be valid.
+    if dsl is not None:
+        assert validate_dsl(dsl).valid
+        assert compile_dsl(dsl).success
+
+
+def test_decompose_few_color_shape_returns_valid_dsl(tmp_path):
+    """A simple two-color image (foreground shape on flat bg) where the
+    quantized palette is smaller than max_colors yields a usable DSL."""
+    img = Image.new("RGB", (128, 128), (10, 20, 30))
+    ImageDraw.Draw(img).ellipse((40, 40, 88, 88), fill=(220, 30, 40))
+    path = _save(tmp_path, "fewcolor.png", img)
+
+    dsl = decompose_to_dsl(path, 512, 512, max_colors=6)
+
+    assert dsl is not None
+    assert len(dsl["layers"]) >= 1
+    assert validate_dsl(dsl).valid
+    assert compile_dsl(dsl).success

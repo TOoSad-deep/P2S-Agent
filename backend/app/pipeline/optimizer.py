@@ -30,10 +30,18 @@ OPTIMIZABLE_LAYER_PARAMS = {
     "center", "radius", "size", "opacity", "edge_softness"
 }
 
+# Canonical DSL fill accessors (see app.dsl.validator):
+#   * radialGradient uses 'center' (a vec2 in [0, 1])
+#   * linearGradient uses 'direction' (a vec2 that may be negative, e.g.
+#     [-1.0, 0.0] for a right-to-left gradient)
 OPTIMIZABLE_FILL_PARAMS = {
-    "gradient_center", "gradient_direction",  # radialGradient
-    "direction",                               # linearGradient direction
+    "center",      # radialGradient center
+    "direction",   # linearGradient direction (sign-bearing axis)
 }
+
+# Fill params whose components are a signed axis/direction and must NOT be
+# clamped to [0, 1] (that would degenerate a negative axis to 0).
+DIRECTION_PARAM_KEYS = {"direction"}
 
 OPTIMIZABLE_EFFECT_PARAMS = {
     "radius", "intensity",  # glow
@@ -71,13 +79,15 @@ class OptimizeResult:
 # Perturbation helpers
 # ---------------------------------------------------------------------------
 
-def _perturb_scalar(value: float, scale: float = 0.05) -> float:
+def _perturb_scalar(
+    value: float, scale: float = 0.05, *, rng: "random.Random | None" = None
+) -> float:
     """Add Gaussian noise to a scalar value.
 
     Clamps to [0.0, 1.0] for values already in that range;
     otherwise clamps to [0.0, max(value * 2, 0.01)].
     """
-    new_val = value + random.gauss(0, scale)
+    new_val = value + (rng or random).gauss(0, scale)
     if 0.0 <= value <= 1.0:
         return max(0.0, min(1.0, new_val))
     else:
@@ -85,12 +95,31 @@ def _perturb_scalar(value: float, scale: float = 0.05) -> float:
         return max(0.0, min(upper, new_val))
 
 
-def _perturb_vec2(value: list[float], scale: float = 0.05) -> list[float]:
-    """Perturb each element of a 2-element list, each clamped to [0.0, 1.0]."""
+def _perturb_vec2(
+    value: list[float],
+    scale: float = 0.05,
+    *,
+    is_direction: bool = False,
+    rng: "random.Random | None" = None,
+) -> list[float]:
+    """Perturb each element of a 2-element list.
+
+    For position-style vec2 (e.g. a center) each component is clamped to the
+    canonical [0.0, 1.0] range. For a gradient ``direction`` the components form
+    a signed axis, so they are clamped to the symmetric [-1.0, 1.0] range — this
+    preserves the sign and never collapses a negative axis to 0.0.
+    """
+    gauss = (rng or random).gauss
+    lo = -1.0 if is_direction else 0.0
     return [
-        max(0.0, min(1.0, v + random.gauss(0, scale)))
+        max(lo, min(1.0, v + gauss(0, scale)))
         for v in value
     ]
+
+
+def _is_direction_accessor(accessor_keys: list) -> bool:
+    """True when the accessor points at a sign-bearing gradient direction."""
+    return bool(accessor_keys) and accessor_keys[-1] in DIRECTION_PARAM_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -294,8 +323,9 @@ def optimize_candidate(
     Returns:
         OptimizeResult with the best DSL found and diagnostic information.
     """
-    if seed is not None:
-        random.seed(seed)
+    # Use a local RNG instance so the optimizer never mutates the process-global
+    # random module — concurrent variant workers must not see each other's seed.
+    rng = random.Random(seed)
 
     ref_path = Path(ref_path)
     best_dsl = copy.deepcopy(dsl)
@@ -314,13 +344,17 @@ def optimize_candidate(
                 break
 
             # Pick a random optimizable param
-            param_path, accessor_keys, current_value = random.choice(collected)
+            param_path, accessor_keys, current_value = rng.choice(collected)
 
             # Perturb the value
             if isinstance(current_value, list) and len(current_value) == 2:
-                new_value = _perturb_vec2(current_value)
+                new_value = _perturb_vec2(
+                    current_value,
+                    is_direction=_is_direction_accessor(accessor_keys),
+                    rng=rng,
+                )
             elif isinstance(current_value, (int, float)):
-                new_value = _perturb_scalar(float(current_value))
+                new_value = _perturb_scalar(float(current_value), rng=rng)
             else:
                 continue  # Skip non-numeric params
 
@@ -368,8 +402,12 @@ def optimize_candidate(
 
             # Try both +scale and -scale perturbations
             if isinstance(current_value, list) and len(current_value) == 2:
-                plus = [max(0.0, min(1.0, v + scale)) for v in current_value]
-                minus = [max(0.0, min(1.0, v - scale)) for v in current_value]
+                # A gradient direction is a signed axis: clamp to [-1, 1] so a
+                # negative component (e.g. [-1.0, 0.0]) keeps its sign instead of
+                # degenerating to 0.0. Other vec2 params (center) stay in [0, 1].
+                lo = -1.0 if _is_direction_accessor(accessor_keys) else 0.0
+                plus = [max(lo, min(1.0, v + scale)) for v in current_value]
+                minus = [max(lo, min(1.0, v - scale)) for v in current_value]
                 candidates = [plus, minus]
             elif isinstance(current_value, (int, float)):
                 val = float(current_value)
@@ -403,7 +441,11 @@ def optimize_candidate(
                     param_path=param_path,
                     old_value=current_value,
                     new_value=candidate_value,
-                    score_before=best_score,
+                    # Baseline the accept decision was made against: the running
+                    # best for this param step. After the +scale trial is
+                    # accepted, the -scale trial competes with that score, so the
+                    # log stays consistent (accepted == score_after > score_before).
+                    score_before=best_direction_score,
                     score_after=trial_score,
                     accepted=accepted,
                 ))

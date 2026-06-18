@@ -279,6 +279,10 @@ def run_glsl_refinement_loop(
             revised_glsl, render_path
         )
 
+        # A failed render is signalled by the evaluator returning no screenshot
+        # AND a non-positive score (see _evaluate_glsl_with_webgl: a render
+        # failure raises -> the caller returns (..., 0.0, None)). Such an
+        # iteration is never accepted.
         if actual_render is None and new_score <= 0.0:
             entry["error_type"] = "render_failed"
             entry["error"] = (

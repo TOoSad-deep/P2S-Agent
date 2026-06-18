@@ -56,3 +56,33 @@ def test_residual_adds_missing_circle(tmp_path):
     assert result.final_score > result.initial_score
     new_ids = [l["id"] for l in result.final_dsl["layers"]]
     assert any(i.startswith("res_") for i in new_ids)
+
+
+def test_residual_handles_dsl_without_layers_key(tmp_path):
+    """A starting DSL with no 'layers' key must not raise KeyError when a
+    residual layer is added (regression: current['layers'] was unguarded)."""
+    ref_path = _ref_two_circles(tmp_path)
+    counter = {"n": 0}
+
+    def render_fn(dsl):
+        counter["n"] += 1
+        out = tmp_path / f"r{counter['n']}.png"
+        # Always render black so the residual vs the two-circle ref is high,
+        # guaranteeing a layer is fitted and line 106 is reached.
+        Image.new("RGB", (128, 128), (0, 0, 0)).save(out)
+        return out
+
+    def score_fn(dsl):
+        # Reward added layers so the fitted residual layer is accepted.
+        return 0.3 + 0.1 * len(dsl.get("layers", []))
+
+    dsl_no_layers = {
+        "schema_version": 1,
+        "canvas": {"width": 128, "height": 128, "background": "#000000"},
+        # NOTE: intentionally no "layers" key.
+    }
+    result = add_residual_layers(
+        dsl_no_layers, ref_path, score_fn=score_fn, render_fn=render_fn, max_added=1
+    )
+    assert "layers" in result.final_dsl
+    assert result.layers_added >= 1

@@ -2,6 +2,8 @@
 
 import base64
 import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Optional, Union
 from urllib.parse import urlsplit
@@ -110,6 +112,24 @@ class BaseAgent:
                     http_client=self._http_client,
                 )
             )
+
+    def close(self) -> None:
+        """Close the underlying httpx.Client, releasing pooled sockets/FDs.
+
+        Also evicts this agent from the module-level cache so a subsequent
+        ``get_agent`` for the same config rebuilds a fresh, open client.
+        """
+        try:
+            self._http_client.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+        _evict_agent(self)
+
+    def __enter__(self) -> "BaseAgent":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     def _create_http_client(self, proxy: Optional[str]) -> httpx.Client:
         """创建 httpx client，支持代理和超时配置"""
@@ -356,5 +376,77 @@ class BaseAgent:
                 "finish_reason": finish_reason,
                 "usage": usage_payload,
             }
-        
+
         return response_content
+
+
+# --- BaseAgent cache (Bug 1: avoid leaking one httpx.Client per construction) ---
+#
+# Each BaseAgent owns an httpx.Client with a connection pool. Reconstructing an
+# agent per judge/generation call left those clients (and their sockets/FDs)
+# unclosed, growing without bound across a run. We instead reuse one agent (and
+# its keep-alive client) per ModelConfig identity, bounded with simple LRU
+# eviction so the cache itself cannot grow without limit.
+
+_AGENT_CACHE_MAX = 16
+_AGENT_CACHE: "OrderedDict[tuple, BaseAgent]" = OrderedDict()
+_AGENT_CACHE_LOCK = threading.Lock()
+
+
+def _agent_cache_key(model_config: ModelConfig) -> tuple:
+    """Identity tuple of the fields that change httpx/OpenAI client behaviour."""
+    return (
+        model_config.base_url,
+        model_config.model,
+        model_config.api_key,
+        model_config.proxy,
+        bool(model_config.supports_image),
+    )
+
+
+def get_agent(model_config: ModelConfig) -> BaseAgent:
+    """Return a cached BaseAgent for ``model_config`` identity, building one lazily.
+
+    Repeated calls for an equivalent ModelConfig reuse the same agent and its
+    httpx.Client (keep-alive), instead of leaking a fresh client each time.
+    """
+    key = _agent_cache_key(model_config)
+    with _AGENT_CACHE_LOCK:
+        agent = _AGENT_CACHE.get(key)
+        if agent is not None and not agent._http_client.is_closed:
+            _AGENT_CACHE.move_to_end(key)
+            return agent
+        # Build outside-lock would race; constructing here is cheap (no network).
+        agent = BaseAgent(model_config)
+        _AGENT_CACHE[key] = agent
+        _AGENT_CACHE.move_to_end(key)
+        evicted: list[BaseAgent] = []
+        while len(_AGENT_CACHE) > _AGENT_CACHE_MAX:
+            _, old = _AGENT_CACHE.popitem(last=False)
+            evicted.append(old)
+    for old in evicted:
+        try:
+            old._http_client.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+    return agent
+
+
+def _evict_agent(agent: BaseAgent) -> None:
+    """Remove ``agent`` from the cache (used by ``BaseAgent.close``)."""
+    with _AGENT_CACHE_LOCK:
+        for key, cached in list(_AGENT_CACHE.items()):
+            if cached is agent:
+                del _AGENT_CACHE[key]
+
+
+def clear_agent_cache() -> None:
+    """Close and drop all cached agents (test hygiene / shutdown)."""
+    with _AGENT_CACHE_LOCK:
+        agents = list(_AGENT_CACHE.values())
+        _AGENT_CACHE.clear()
+    for agent in agents:
+        try:
+            agent._http_client.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass

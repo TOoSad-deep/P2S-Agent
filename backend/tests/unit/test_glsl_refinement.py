@@ -159,6 +159,45 @@ def test_loop_feeds_render_failure_back(tmp_path, monkeypatch):
     assert any("[RENDER FAILED]" in n for n in calls[1]["extra_feedback"])
 
 
+def test_loop_does_not_accept_phantom_score_when_render_failed(tmp_path, monkeypatch):
+    """A failed render must not be accepted.
+
+    In production a render failure surfaces as the evaluator returning no
+    screenshot (actual_render is None) together with a 0.0 score (see
+    _evaluate_glsl_with_webgl: a render failure raises and the caller returns
+    ({}, {}, 0.0, None)). The loop must treat that as render_failed and keep the
+    original best rather than accepting a non-rendered candidate.
+    """
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
+    )
+
+    def phantom_eval(glsl: str, render_path: Path):
+        # Render failed: no screenshot produced and a 0.0 score.
+        return {}, {}, 0.0, None
+
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A,
+        0.30,
+        {},
+        {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=phantom_eval,
+        max_iterations=1,
+        threshold=0.80,
+        high_score_stop=0.92,
+        no_improvement_patience=2,
+        max_fresh_restarts=0,
+        loop_dir=tmp_path / "loop",
+    )
+
+    # The failed-render iteration must NOT be accepted; best stays the original.
+    assert result["best_glsl"] == VALID_GLSL_A
+    assert result["best_score"] == pytest.approx(0.30)
+    assert result["history"][0].get("accepted") is not True
+
+
 def test_loop_injects_semantic_feedback_from_rubric(tmp_path, monkeypatch):
     calls: list[dict] = []
 

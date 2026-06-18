@@ -19,6 +19,8 @@ export default function ImageDiffPanel({ inputImageUrl, selectedGlsl, previewGls
   useEffect(() => {
     setShaderError(null);
 
+    // No GLSL: the canvas container is unmounted from the DOM, so tear down the
+    // (now-orphaned) renderer and release its WebGL context.
     if (!activeGlsl || !canvasContainerRef.current) {
       if (rendererRef.current) {
         rendererRef.current.dispose();
@@ -28,32 +30,45 @@ export default function ImageDiffPanel({ inputImageUrl, selectedGlsl, previewGls
     }
 
     try {
-      if (rendererRef.current) {
-        rendererRef.current.dispose();
-        rendererRef.current = null;
+      // Bug 1: reuse a SINGLE ShaderRenderer (one WebGL context) across
+      // shader/param changes. Creating a fresh renderer per change leaks a
+      // context + canvas + CanvasTexture each time and exhausts the browser's
+      // ~16-context limit, silently darkening older panels. We only construct
+      // once per container mount; subsequent changes recompile in place.
+      let renderer = rendererRef.current;
+      if (!renderer) {
+        renderer = new ShaderRenderer(canvasContainerRef.current);
+        rendererRef.current = renderer;
       }
-      const container = canvasContainerRef.current;
-      const renderer = new ShaderRenderer(container);
       const result = renderer.compileShader(toShaderToyFragment(activeGlsl));
       if (!result.success) {
         setShaderError(result.error ?? "Shader compile error");
-        renderer.dispose();
+        // Keep the renderer alive (context reuse); just stop drawing the
+        // broken shader. A subsequent valid GLSL will recompile in place.
+        renderer.stopRendering();
         return;
       }
+      // Idempotent: startRendering() no-ops if a loop is already running, so
+      // recompiles on the reused renderer don't spawn duplicate rAF loops.
       renderer.startRendering();
-      rendererRef.current = renderer;
       setShaderError(null);
     } catch (err) {
       setShaderError(err instanceof Error ? err.message : "Shader error");
     }
+    // No per-change cleanup: the renderer persists across activeGlsl value
+    // changes and is disposed only by the null-GLSL branch above or the
+    // unmount effect below.
+  }, [activeGlsl]);
 
+  // Dispose the single renderer exactly once, on unmount.
+  useEffect(() => {
     return () => {
       if (rendererRef.current) {
         rendererRef.current.dispose();
         rendererRef.current = null;
       }
     };
-  }, [activeGlsl]);
+  }, []);
 
   return (
     <div className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl p-4 h-full flex flex-col overflow-hidden">

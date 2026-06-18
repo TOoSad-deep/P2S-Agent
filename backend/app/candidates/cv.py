@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.utils.cv_features import get_cv_applicability_report
 from app.dsl.schema import DSL_SCHEMA_VERSION
+from app.pipeline.preprocess import feature_num
 
 
 def generate_cv_candidate(
@@ -42,7 +43,7 @@ def generate_cv_candidate(
         palette = ["#ffffff"]
     top_color = palette[0]
 
-    edge_sharpness = float(preprocess.get("edge_sharpness", 0.0))
+    edge_sharpness = feature_num(preprocess, "edge_sharpness", 0.0)
     add_glow = 0.05 <= edge_sharpness <= 0.40
 
     shape_detected: str | None = None
@@ -155,7 +156,7 @@ def _cv_layer_from_preprocess(
     Returns (shape_detected, layer_dict).
     """
     has_alpha = bool(preprocess.get("has_alpha", False))
-    alpha_coverage = float(preprocess.get("alpha_coverage", 0.0))
+    alpha_coverage = feature_num(preprocess, "alpha_coverage", 0.0)
 
     if has_alpha and alpha_coverage > 0.1:
         primitive = "circle"
