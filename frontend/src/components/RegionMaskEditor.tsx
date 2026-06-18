@@ -43,6 +43,21 @@ function normalizeRect(
   return { x, y, w: clamp(w, 0, 1 - x), h: clamp(h, 0, 1 - y) };
 }
 
+/** Next collision-free region id. Uses (highest existing `region_<n>` suffix)+1
+ *  rather than `regions.length + 1`, which collides after a middle region is
+ *  deleted (e.g. delete region_2 of [1,2,3] → length+1 = 3 = existing region_3,
+ *  causing duplicate React keys and id-matched updates/deletes hitting two
+ *  regions). Ids in other formats are ignored — they can't collide with
+ *  `region_<n>` anyway. */
+export function nextRegionId(regions: RegionConstraint[]): string {
+  let max = 0;
+  for (const r of regions) {
+    const m = /^region_(\d+)$/.exec(r.id);
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `region_${max + 1}`;
+}
+
 /** Get pixel coords relative to an SVG element from a mouse event. */
 function svgRelative(
   e: React.MouseEvent<SVGSVGElement>,
@@ -114,8 +129,8 @@ export default function RegionMaskEditor({
     const rect = normalizeRect(drag.startX, drag.startY, drag.currentX, drag.currentY);
     // Ignore degenerate drags (area < 0.001)
     if (rect.w * rect.h >= 0.001) {
-      const n = regions.length + 1;
-      const id = `region_${n}`;
+      const id = nextRegionId(regions);
+      const n = id.slice("region_".length);
       const newRegion: RegionConstraint = {
         id,
         label: `region ${n}`,
