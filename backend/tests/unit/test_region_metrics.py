@@ -319,3 +319,91 @@ def test_identical_images_all_metrics_sane(tmp_path):
     assert result["constraint_score"] > 0.99
     md = r["mean_delta"]
     assert all(abs(v) < 1e-5 for v in md)
+
+
+# ---------------------------------------------------------------------------
+# Protect-region hard-veto core (Task 1)
+# ---------------------------------------------------------------------------
+
+from app.pipeline.human_constraints import RegionConstraint
+from app.pipeline.region_metrics import (
+    RegionVetoResult,
+    protect_region_threshold,
+    evaluate_protect_veto,
+)
+from PIL import Image
+
+
+def _png(path, color, size=(64, 64)):
+    Image.new("RGB", size, color).save(path)
+    return path
+
+
+def _protect_region(rid="r1", x=0.0, y=0.0, w=0.5, h=1.0, strength=0.5):
+    return RegionConstraint(
+        id=rid, label=rid, mode="protect", instruction="",
+        geometry_type="rect", geometry={"x": x, "y": y, "w": w, "h": h},
+        strength=strength,
+    )
+
+
+def test_protect_region_threshold_maps_strength():
+    assert protect_region_threshold(0.0) == 0.85
+    assert protect_region_threshold(0.5) == 0.90
+    assert protect_region_threshold(1.0) == 0.95
+
+
+def test_no_protect_regions_is_not_evaluated_and_not_vetoed(tmp_path):
+    base = _png(tmp_path / "b.png", (10, 20, 30))
+    cand = _png(tmp_path / "c.png", (200, 0, 0))
+    modify = RegionConstraint(
+        id="m", label="m", mode="modify", instruction="",
+        geometry_type="rect", geometry={"x": 0, "y": 0, "w": 1, "h": 1}, strength=0.5,
+    )
+    res = evaluate_protect_veto(base, cand, [modify])
+    assert isinstance(res, RegionVetoResult)
+    assert res.vetoed is False and res.evaluated is False
+
+
+def test_identical_protect_region_not_vetoed(tmp_path):
+    base = _png(tmp_path / "b.png", (10, 20, 30))
+    cand = _png(tmp_path / "c.png", (10, 20, 30))  # identical
+    res = evaluate_protect_veto(base, cand, [_protect_region()])
+    assert res.vetoed is False
+    assert res.constraint_score > 0.95
+    assert res.evaluated is True
+
+
+def test_degraded_protect_region_is_vetoed(tmp_path):
+    base = Image.new("RGB", (64, 64), (10, 20, 30))
+    cand = Image.new("RGB", (64, 64), (10, 20, 30))
+    for px in range(32):
+        for py in range(64):
+            cand.putpixel((px, py), (255, 255, 255))
+    bpath = tmp_path / "b.png"; base.save(bpath)
+    cpath = tmp_path / "c.png"; cand.save(cpath)
+    region = _protect_region(x=0.0, w=0.5)  # protect the left half
+    res = evaluate_protect_veto(bpath, cpath, [region])
+    assert res.vetoed is True
+    assert any(r["violated"] for r in res.regions)
+    assert res.reason and "r1" in res.reason
+
+
+def test_any_violated_region_triggers_veto(tmp_path):
+    base = Image.new("RGB", (64, 64), (10, 20, 30))
+    cand = Image.new("RGB", (64, 64), (10, 20, 30))
+    for px in range(32):           # only left half changes
+        for py in range(64):
+            cand.putpixel((px, py), (255, 255, 255))
+    bpath = tmp_path / "b.png"; base.save(bpath)
+    cpath = tmp_path / "c.png"; cand.save(cpath)
+    left = _protect_region(rid="left", x=0.0, w=0.5)    # degraded -> violated
+    right = _protect_region(rid="right", x=0.5, w=0.5)  # untouched -> ok
+    res = evaluate_protect_veto(bpath, cpath, [left, right])
+    assert res.vetoed is True
+
+
+def test_missing_baseline_is_not_evaluated(tmp_path):
+    cand = _png(tmp_path / "c.png", (10, 20, 30))
+    res = evaluate_protect_veto(tmp_path / "does_not_exist.png", cand, [_protect_region()])
+    assert res.evaluated is False and res.vetoed is False
