@@ -608,3 +608,62 @@ def test_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
     assert [s["len"] for s in snaps] == [1, 2]
     assert snaps[-1]["best"] == pytest.approx(0.55)
     assert "0.55" in snaps[-1]["glsl"]
+
+
+from app.pipeline.region_metrics import RegionVetoResult
+
+
+def _veto_all(_render_path):
+    return RegionVetoResult(
+        vetoed=True, constraint_score=0.40,
+        regions=[{"id": "r1", "label": "sky", "ssim": 0.40, "threshold": 0.90, "violated": True}],
+        reason="protected regions degraded: sky", evaluated=True,
+    )
+
+
+def test_glsl_veto_rejects_globally_better_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
+    )
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A, 0.30, {}, {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r_with_render,
+        initial_render_path=tmp_path / "current.png",
+        max_iterations=1, threshold=0.80, high_score_stop=0.92,
+        no_improvement_patience=2, max_fresh_restarts=0,
+        loop_dir=tmp_path / "loop",
+        region_veto_fn=_veto_all,
+    )
+    assert result["best_glsl"] == VALID_GLSL_A          # not accepted
+    assert result["history"][0].get("accepted") is not True
+    assert result["history"][0].get("rejected_reason") == "protect_region_veto"
+
+
+def test_glsl_veto_overrides_directed_acceptance(tmp_path, monkeypatch):
+    # Candidate scores LOWER than the best (0.28 < 0.30 -> delta<0), so the
+    # ordinary delta-accept path cannot accept it. Only directed acceptance
+    # (judge="B" within score_drop_tolerance) could — the veto must override that.
+    low_glsl = VALID_GLSL_B.replace("#define R 0.50", "#define R 0.28")
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": low_glsl, "_io": {}},
+    )
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A, 0.30, {}, {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r_with_render,
+        initial_render_path=tmp_path / "current.png",
+        max_iterations=1, threshold=0.80, high_score_stop=0.92,
+        no_improvement_patience=2, max_fresh_restarts=0,
+        loop_dir=tmp_path / "loop",
+        directed_acceptance={"score_drop_tolerance": 0.5},
+        directed_pairwise_judge=lambda a, b: "B",
+        region_veto_fn=_veto_all,
+    )
+    assert result["best_glsl"] == VALID_GLSL_A
+    assert result["history"][0].get("accepted") is not True
+    # The directed-acceptance override must NOT have fired (veto ran first).
+    assert result["history"][0].get("human_goal_override") is None
+    assert result["history"][0].get("rejected_reason") == "protect_region_veto"
