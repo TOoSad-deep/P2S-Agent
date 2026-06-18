@@ -1212,6 +1212,13 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
                 "force_first_refinement_iteration": True,
                 "lineage": lineage,
                 "extra_artifacts": extra_artifacts,
+                # V4.5 region veto: forward protect-mode regions so the pipeline
+                # can hard-veto candidates that mutate them. Empty list when no
+                # constraints → pipeline no-op (backward compatible).
+                "protect_regions": (
+                    [r for r in _constraint_spec.regions if r.mode == "protect"]
+                    if _constraint_spec is not None else []
+                ),
             },
         )
     except WorkerCapacityError as exc:
@@ -1402,6 +1409,12 @@ def _create_variant_group(
                 "force_first_refinement_iteration": True,
                 "lineage": variant_lineage,
                 "extra_artifacts": extra_artifacts,
+                # V4.5 region veto: forward protect-mode regions (empty when no
+                # constraints → pipeline no-op, backward compatible).
+                "protect_regions": (
+                    [r for r in constraint_spec.regions if r.mode == "protect"]
+                    if constraint_spec is not None else []
+                ),
             },
             variant_semaphore=_variant_worker_semaphore,
         )

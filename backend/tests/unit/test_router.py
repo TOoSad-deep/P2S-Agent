@@ -2742,6 +2742,148 @@ def test_explore_variants_invalid_constraints_returns_422(tmp_path):
     assert "constraint_errors" in resp.json()["detail"]
 
 
+# --- Region veto: protect_regions forwarding (Task 6) -----------------------
+
+_PROTECT_CONSTRAINTS = {
+    "edit_strength": 0.4,
+    "regions": [
+        {
+            "id": "logo",
+            "label": "Brand logo",
+            "mode": "protect",
+            "instruction": "do not touch",
+            "geometry_type": "rect",
+            "geometry": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+            "strength": 0.9,
+        },
+        {
+            "id": "sky",
+            "label": "Sky area",
+            "mode": "modify",
+            "instruction": "make warmer",
+            "geometry_type": "rect",
+            "geometry": {"x": 0.5, "y": 0.0, "w": 0.4, "h": 0.4},
+            "strength": 0.5,
+        },
+    ],
+}
+
+
+def _capturing_protect_pipeline(captured):
+    """Fake pipeline that records the protect_regions kwarg (arrives via **kwargs)."""
+    def fake_pipeline(image_path, input_spec=None, run_id=None, *, seed_glsl=None,
+                      lineage=None, **kwargs):
+        captured["protect_regions"] = kwargs.get("protect_regions")
+        return {
+            "run_id": run_id,
+            "selected_glsl": seed_glsl or "",
+            "scoreboard": {},
+            "quality_router": {},
+            "refinement_summary": {},
+            "lineage": lineage,
+        }
+    return fake_pipeline
+
+
+def test_branch_refine_forwards_protect_regions(tmp_path, monkeypatch):
+    """branch_refine WITH a protect-mode region → run_png_shader_pipeline is called
+    with protect_regions=[<that region>] (modify-mode regions are excluded)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _capturing_protect_pipeline(captured),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the reflection stronger",
+            "mode": "refine",
+            "constraints": _PROTECT_CONSTRAINTS,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    assert "protect_regions" in captured
+    assert captured["protect_regions"], "protect_regions was empty"
+    assert len(captured["protect_regions"]) == 1
+    assert captured["protect_regions"][0].mode == "protect"
+    assert captured["protect_regions"][0].id == "logo"
+
+
+def test_branch_refine_no_constraints_forwards_empty_protect_regions(tmp_path, monkeypatch):
+    """branch_refine WITHOUT constraints → protect_regions forwarded as empty list
+    (no behavior change / pipeline no-op)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _capturing_protect_pipeline(captured),
+    )
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "checkpoint_id": "final:selected",
+            "feedback": "make the reflection stronger",
+            "mode": "refine",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    _wait_for_completion(client, resp.json()["run_id"])
+
+    assert captured["protect_regions"] == []
+
+
+def test_explore_variants_forwards_protect_regions(tmp_path, monkeypatch):
+    """explore_variants WITH a protect-mode region → each child run_png_shader_pipeline
+    call receives protect_regions with the protect region."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    captures: list[dict] = []
+
+    def _fake(image_path, input_spec=None, run_id=None, *, seed_glsl=None,
+              lineage=None, **kwargs):
+        captures.append({"protect_regions": kwargs.get("protect_regions")})
+        return {
+            "run_id": run_id,
+            "selected_glsl": seed_glsl or "",
+            "scoreboard": {},
+            "quality_router": {},
+            "refinement_summary": {},
+            "lineage": lineage,
+        }
+
+    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", _fake)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={
+            "feedback": "add more warmth",
+            "variant_count": 2,
+            "constraints": _PROTECT_CONSTRAINTS,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    for cid in resp.json()["child_run_ids"]:
+        _wait_for_variant_completion(client, cid)
+
+    assert len(captures) == 2
+    for cap in captures:
+        assert cap["protect_regions"], "protect_regions was empty for a variant"
+        assert len(cap["protect_regions"]) == 1
+        assert cap["protect_regions"][0].mode == "protect"
+        assert cap["protect_regions"][0].id == "logo"
+
+
 def test_draw_session_create_with_constraints_children_carry_notes(tmp_path, monkeypatch):
     """draw-session create WITH constraints → children carry [GLOBAL LOCK] notes
     and constraints.json in extra_artifacts."""
