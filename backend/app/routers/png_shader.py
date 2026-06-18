@@ -107,6 +107,7 @@ from app.pipeline.run_index import (
     append_run_updated,
     build_branch_tree,
     load_run_index,
+    maybe_compact_run_index,
     update_run_metadata,
 )
 from app.services.langsmith_tracing import trace_context
@@ -301,11 +302,24 @@ def _index_created(record: RunLineageRecord) -> None:
         logger.warning("run index append_created failed", exc_info=True)
 
 
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
 def _index_updated(run_id: str, fields: dict) -> None:
     try:
         append_run_updated(run_id, fields, path=_RUN_INDEX_PATH)
     except Exception:
         logger.warning("run index append_updated failed", exc_info=True)
+        return
+    # Opportunistic, threshold-gated compaction at a run's terminal transition —
+    # the natural low-frequency checkpoint to keep run_index.jsonl from growing
+    # unbounded. Best-effort: maybe_compact never raises, but guard anyway so a
+    # compaction hiccup can never affect the worker.
+    if fields.get("status") in _TERMINAL_RUN_STATUSES:
+        try:
+            maybe_compact_run_index(path=_RUN_INDEX_PATH)
+        except Exception:
+            logger.warning("run index opportunistic compaction failed", exc_info=True)
 
 
 def _finalize_fusion_for_run(run_id: str, status: str) -> None:
