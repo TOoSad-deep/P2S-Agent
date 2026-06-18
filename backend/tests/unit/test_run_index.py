@@ -16,12 +16,15 @@ from pathlib import Path
 import pytest
 
 from app.pipeline.run_index import (
+    SCHEMA_VERSION,
     RunIndexError,
     RunLineageRecord,
     append_run_created,
     append_run_updated,
     build_branch_tree,
+    compact_run_index,
     load_run_index,
+    maybe_compact_run_index,
     update_run_metadata,
 )
 
@@ -808,3 +811,165 @@ def test_non_terminal_status_still_progresses(tmp_path):
 
     index = load_run_index(path=idx)
     assert index["t5"].status == "running"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: JSONL schema version + atomic compaction / rotation
+# ---------------------------------------------------------------------------
+
+
+def test_created_line_has_schema_version(tmp_path):
+    """Every created line carries the current schema version under "v"."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("sv-1"), path=p)
+
+    first_line = p.read_text().splitlines()[0]
+    data = json.loads(first_line)
+    assert data["v"] == SCHEMA_VERSION
+
+
+def test_updated_line_has_schema_version(tmp_path):
+    """Every updated line carries the current schema version under "v"."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("sv-2"), path=p)
+    append_run_updated("sv-2", {"status": "running"}, path=p)
+
+    last_line = p.read_text().splitlines()[-1]
+    data = json.loads(last_line)
+    assert data["event"] == "updated"
+    assert data["v"] == SCHEMA_VERSION
+
+
+def test_fold_tolerates_legacy_line_without_version(tmp_path):
+    """A legacy created line with no "v" key folds identically (back-compat)."""
+    p = tmp_path / "idx.jsonl"
+    legacy = {
+        "event": "created",
+        "run_id": "legacy-1",
+        "root_run_id": "legacy-1",
+        "status": "completed",
+        "created_at": 100.0,
+        "final_score": 0.7,
+    }
+    with p.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(legacy) + "\n")
+
+    index = load_run_index(path=p)
+    assert "legacy-1" in index
+    assert index["legacy-1"].status == "completed"
+    assert index["legacy-1"].final_score == 0.7
+
+
+def test_fold_warns_on_future_version_but_still_folds(tmp_path, caplog):
+    """A created line with a future schema version warns but is still folded."""
+    import logging
+
+    p = tmp_path / "idx.jsonl"
+    future = {
+        "event": "created",
+        "v": 999,
+        "run_id": "future-1",
+        "root_run_id": "future-1",
+        "status": "running",
+        "created_at": 200.0,
+    }
+    with p.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(future) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.run_index"):
+        index = load_run_index(path=p)
+
+    assert "future-1" in index
+    assert index["future-1"].status == "running"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a warning for the future schema version"
+    joined = " ".join(r.getMessage() for r in warnings)
+    assert "future schema version" in joined or "999" in joined
+
+
+def test_compact_is_fold_equivalent_and_shrinks(tmp_path):
+    """compact collapses N append events into 1 line per run, fold-equivalent."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("rc1", status="pending"), path=p)
+    append_run_updated("rc1", {"status": "running"}, path=p)
+    append_run_updated("rc1", {"status": "completed", "final_score": 0.91}, path=p)
+    append_run_created(_record("rc2", status="pending"), path=p)
+    append_run_updated("rc2", {"status": "running", "final_score": 0.5}, path=p)
+
+    before = load_run_index(path=p)
+    assert set(before.keys()) == {"rc1", "rc2"}
+
+    n = compact_run_index(path=p)
+    assert n == 2
+
+    lines = p.read_text().splitlines()
+    assert len(lines) == 2
+    # every surviving line is a "created" event with the schema version
+    for line in lines:
+        data = json.loads(line)
+        assert data["event"] == "created"
+        assert data["v"] == SCHEMA_VERSION
+
+    after = load_run_index(path=p)
+    assert set(after.keys()) == set(before.keys())
+    for rid in before:
+        assert after[rid].status == before[rid].status
+        assert after[rid].final_score == before[rid].final_score
+        assert after[rid].root_run_id == before[rid].root_run_id
+        assert after[rid].created_at == before[rid].created_at
+
+    # a single .bak snapshot of the prior file exists
+    bak = p.with_suffix(p.suffix + ".bak")
+    assert bak.exists()
+
+
+def test_compact_no_op_for_missing_file(tmp_path):
+    """compact on an absent file returns 0 and creates nothing."""
+    missing = tmp_path / "no_such.jsonl"
+    assert compact_run_index(path=missing) == 0
+    assert not missing.exists()
+
+
+def test_compact_invalidates_cache(tmp_path):
+    """After compaction, load returns the compacted fold, not a stale cache."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("ic1", status="pending"), path=p)
+    append_run_updated("ic1", {"status": "completed", "final_score": 0.8}, path=p)
+
+    before = load_run_index(path=p)  # populate cache
+    compact_run_index(path=p)
+    after = load_run_index(path=p)
+
+    assert set(after.keys()) == set(before.keys())
+    assert after["ic1"].status == before["ic1"].status
+    assert after["ic1"].final_score == before["ic1"].final_score
+
+
+def test_maybe_compact_respects_threshold(tmp_path):
+    """maybe_compact is a no-op below min_lines, compacts when bloated."""
+    p = tmp_path / "idx.jsonl"
+    # 1 created + many updated events for a single run => high lines:runs ratio.
+    append_run_created(_record("mc1", status="pending"), path=p)
+    for i in range(20):
+        append_run_updated("mc1", {"status": "running", "final_score": float(i)}, path=p)
+
+    lines_before = len(p.read_text().splitlines())
+    assert lines_before == 21
+
+    # Below min_lines: no compaction, file untouched.
+    assert maybe_compact_run_index(path=p, min_lines=10_000) is False
+    assert len(p.read_text().splitlines()) == lines_before
+
+    # Low min_lines + bloat ratio the data exceeds: compaction happens.
+    assert maybe_compact_run_index(path=p, min_lines=5, bloat_ratio=3.0) is True
+    assert len(p.read_text().splitlines()) == 1
+
+    index = load_run_index(path=p)
+    assert set(index.keys()) == {"mc1"}
+    assert index["mc1"].final_score == 19.0
+
+
+def test_maybe_compact_no_op_for_missing_file(tmp_path):
+    """maybe_compact on an absent file is False and never raises."""
+    missing = tmp_path / "no_such.jsonl"
+    assert maybe_compact_run_index(path=missing) is False

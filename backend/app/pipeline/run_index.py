@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,6 +40,14 @@ from typing import Any
 from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Schema version
+# ---------------------------------------------------------------------------
+# Stamped onto every written JSONL line under the "v" key. The fold tolerates
+# legacy lines without "v" (treated as v1) and best-effort-folds lines whose
+# version is in the future (with a WARNING).
+SCHEMA_VERSION = 1
 
 # ---------------------------------------------------------------------------
 # Default path
@@ -182,7 +192,7 @@ def append_run_created(record: RunLineageRecord, *, path: Path | str | None = No
     ``{"event": "created", <all record fields>}``.
     """
     resolved = _resolve_path(path)
-    data: dict[str, Any] = {"event": "created"}
+    data: dict[str, Any] = {"event": "created", "v": SCHEMA_VERSION}
     data.update(_record_to_dict(record))
     _append_line(data, resolved)
 
@@ -199,7 +209,7 @@ def append_run_updated(
     ``{"event": "updated", "run_id": run_id, **fields}``.
     """
     resolved = _resolve_path(path)
-    data: dict[str, Any] = {"event": "updated", "run_id": run_id}
+    data: dict[str, Any] = {"event": "updated", "v": SCHEMA_VERSION, "run_id": run_id}
     data.update(fields)
     _append_line(data, resolved)
 
@@ -241,18 +251,31 @@ def _fold_index_file(resolved: Path) -> dict[str, RunLineageRecord]:
                 )
                 continue
 
+            # Schema version: legacy lines (no "v") are treated as v1. A line
+            # from a *future* schema is folded best-effort but flagged so the
+            # operator knows the reader may not understand every field.
+            ver = data.get("v", 1)
+            if isinstance(ver, int) and ver > SCHEMA_VERSION:
+                logger.warning(
+                    "run_index: line %d has future schema version %s (current %s); "
+                    "folding best-effort",
+                    lineno,
+                    ver,
+                    SCHEMA_VERSION,
+                )
+
             event = data.get("event")
             run_id = data.get("run_id")
             if not run_id:
                 continue
 
             if event == "created":
-                # Exclude the 'event' key before building the record.
-                payload = {k: v for k, v in data.items() if k != "event"}
+                # Exclude the 'event' / 'v' keys before building the record.
+                payload = {k: v for k, v in data.items() if k not in ("event", "v")}
                 records[run_id] = _dict_to_record(payload)
 
             elif event == "updated":
-                fields = {k: v for k, v in data.items() if k not in ("event", "run_id")}
+                fields = {k: v for k, v in data.items() if k not in ("event", "v", "run_id")}
                 if run_id in records:
                     existing = records[run_id]
                     # Terminal-status stickiness: once a run reaches a terminal
@@ -322,6 +345,88 @@ def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRec
         _INDEX_CACHE[key] = (signature, folded)
 
     return dict(folded)
+
+
+# ---------------------------------------------------------------------------
+# Compaction / rotation
+# ---------------------------------------------------------------------------
+
+
+def compact_run_index(*, path: Path | str | None = None) -> int:
+    """Atomically rewrite the index as one 'created' line per run (folded state).
+
+    Collapses N append events into 1 line per run. Fold-equivalent: load_run_index
+    returns the same records before and after. Writes a single '.bak' of the prior
+    file, replaces atomically, and invalidates the cache for this path.
+    Returns the number of records written. No-op (returns 0) if the file is absent.
+    """
+    resolved = _resolve_path(path)
+
+    if not resolved.exists():
+        return 0
+
+    tmp = resolved.with_suffix(resolved.suffix + ".tmp")
+    bak = resolved.with_suffix(resolved.suffix + ".bak")
+
+    # Hold the append lock for the whole read+write so no append interleaves
+    # with the snapshot, which would otherwise be silently dropped.
+    with _APPEND_LOCK:
+        # Fold the file directly (not via the cache) to get authoritative state.
+        records = _fold_index_file(resolved)
+
+        with tmp.open("w", encoding="utf-8") as fh:
+            for rec in records.values():
+                line_data: dict[str, Any] = {"event": "created", "v": SCHEMA_VERSION}
+                line_data.update(_record_to_dict(rec))
+                fh.write(json.dumps(line_data, ensure_ascii=False) + "\n")
+
+        # Back up the original by COPY (so `resolved` is never missing), then
+        # atomically swap the compacted temp file into place. A concurrent
+        # load_run_index (which does not hold _APPEND_LOCK) therefore always
+        # stats a complete file — the pre- or post-compaction one, never a gap.
+        shutil.copy2(resolved, bak)
+        os.replace(tmp, resolved)
+
+    # Invalidate the cache so the next load re-folds the compacted file.
+    with _CACHE_LOCK:
+        _INDEX_CACHE.pop(str(resolved), None)
+
+    return len(records)
+
+
+def maybe_compact_run_index(
+    *, path: Path | str | None = None, min_lines: int = 2000, bloat_ratio: float = 3.0
+) -> bool:
+    """Compact only when the file is bloated: >= min_lines AND lines >= bloat_ratio*runs.
+
+    Best-effort: returns True if it compacted, False otherwise. Never raises
+    (wrap the work so a failure here never breaks the caller).
+    """
+    resolved = _resolve_path(path)
+
+    if not resolved.exists():
+        return False
+
+    try:
+        records = load_run_index(path=resolved)
+        num_runs = len(records)
+
+        with resolved.open("r", encoding="utf-8") as fh:
+            num_lines = sum(1 for _ in fh)
+
+        if (
+            num_lines >= min_lines
+            and num_runs > 0
+            and num_lines >= bloat_ratio * num_runs
+        ):
+            compact_run_index(path=resolved)
+            return True
+        return False
+    except Exception as exc:  # noqa: BLE001 — best-effort, must never break caller
+        logger.warning(
+            "run_index: maybe_compact_run_index failed for %s: %s", resolved, exc
+        )
+        return False
 
 
 def build_branch_tree(
