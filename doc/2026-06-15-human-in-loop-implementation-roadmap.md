@@ -7,7 +7,9 @@
 > - [V2 branch workspace](2026-06-15-human-in-loop-v2-branch-workspace-design.md)
 > - [V2.1 branch canvas workspace](2026-06-16-human-in-loop-v2-1-branch-canvas-workspace-design.md)
 > - [V3 variant exploration](2026-06-15-human-in-loop-v3-variant-exploration-design.md)
+> - [V3.5 batch draw](2026-06-16-human-in-loop-v3-5-batch-draw-design.md)
 > - [V4 local control/preferences](2026-06-15-human-in-loop-v4-local-control-preferences-design.md)
+> - [V4.5 local fusion](2026-06-16-human-in-loop-v4-5-local-fusion-design.md)
 
 ## 总体原则
 
@@ -28,10 +30,12 @@ M4: V2 branch workspace UI
 M5: V2.1 Branch Canvas Workspace
 M6: V3.1 VariantGroup backend
 M7: V3.2 Variant Canvas / Explorer frontend
-M8: V4.1 structured constraints
-M9: V4.2 region/mask constraints
-M10: V4.3 preference events/profile
-M11: V4.4 preference-assisted generation/ranking
+M8: V3.5 Batch Draw / 抽卡式多结果生成
+M9: V4.1 structured constraints
+M10: V4.2 region/mask constraints
+M11: V4.3 preference events/profile
+M12: V4.4 preference-assisted generation/ranking
+M13: V4.5 Local Fusion / 局部叠加融合
 ```
 
 ## M0: Preflight
@@ -254,7 +258,41 @@ M11: V4.4 preference-assisted generation/ranking
 
 - `cd frontend && npm run build`
 
-## M8: V4.1 Structured Constraints
+## M8: V3.5 Batch Draw / 抽卡式多结果生成
+
+目标：在 V3 VariantGroup 稳定后，把多 variants 产品化成抽卡批次，支持追加抽卡、单卡重抽、收藏、淘汰、筛选，并为 V4.5 局部融合提供来源池。
+
+后端顺序：
+
+1. 新增 `backend/app/pipeline/draw_sessions.py`。
+2. 抽出 V3 group creation helper，供 `/explore-variants` 和 `/draw-session` 复用。
+3. 新增 `POST /png-shader/runs/{run_id}/draw-session`。
+4. 新增 `GET /png-shader/draw-sessions/{draw_id}`。
+5. 新增 draw-more、redraw、card-event endpoints。
+6. `VariantGroupRecord` / `RunLineageRecord` 增加 draw session 可选字段。
+
+前端顺序：
+
+1. `usePngShader` 增加 draw session API。
+2. Branch Canvas 新增 `DrawSessionNode` / `DrawCardNode`。
+3. Inspector 新增 DrawSessionInspector。
+4. 支持 Draw more、Redraw card、Favorite、Eliminate、Tag。
+5. 预留 Use as base / Use region 动作给 V4.5。
+
+验收：
+
+- 一次可创建 4/8/12 张卡，超过单 group 上限时可拆分多个 VariantGroup。
+- 卡片逐个完成展示，失败卡不阻塞其他卡。
+- draw-more 追加结果，不覆盖原结果。
+- redraw 不删除原卡，replacement 关系可追溯。
+- favorite/eliminate/tag 写入 session events。
+
+测试门禁：
+
+- `cd backend && python -m pytest tests/unit/test_draw_sessions.py tests/unit/test_variant_groups.py tests/unit/test_router.py -v`
+- `cd frontend && npm run build`
+
+## M9: V4.1 Structured Constraints
 
 目标：全局结构化约束进入 prompt 和 artifacts。
 
@@ -280,7 +318,7 @@ M11: V4.4 preference-assisted generation/ranking
 - constraints 能写入 artifacts。
 - constraints notes 进入 LLM prompt。
 
-## M9: V4.2 Region / Mask Constraints
+## M10: V4.2 Region / Mask Constraints
 
 目标：支持 rectangle 区域约束和局部指标。
 
@@ -306,7 +344,7 @@ M11: V4.4 preference-assisted generation/ranking
 - 越界 region 返回 422。
 - region metrics 只计算区域内像素。
 
-## M10: V4.3 Preference Events / Profile
+## M11: V4.3 Preference Events / Profile
 
 目标：把用户选择沉淀为可审计偏好。
 
@@ -332,7 +370,7 @@ M11: V4.4 preference-assisted generation/ranking
 - profile 可编辑。
 - `enabled=false` 时不注入 preference notes。
 
-## M11: V4.4 Preference-assisted Generation / Ranking
+## M12: V4.4 Preference-assisted Generation / Ranking
 
 目标：偏好辅助 prompt 和 variant ranking。
 
@@ -355,12 +393,50 @@ M11: V4.4 preference-assisted generation/ranking
 - 用户可禁用偏好。
 - preference ranking 不自动替用户选 winner。
 
+## M13: V4.5 Local Fusion / 局部叠加融合
+
+目标：从多张抽卡结果中选择局部优点，生成 composite target，并从 base shader 定向优化出一个统一 shader。
+
+后端顺序：
+
+1. 新增 `backend/app/pipeline/fusion_plans.py`。
+2. 新增 `backend/app/pipeline/image_composite.py`。
+3. 新增 `/png-shader/fusions` create/get/artifacts endpoints。
+4. 新增 `/png-shader/fusions/{fusion_id}/composite-target`。
+5. 新增 fusion notes 和 fusion directed acceptance。
+6. 新增 `/png-shader/fusions/{fusion_id}/run`，创建 fusion child run。
+7. run lineage 增加 `fusion_id`、`base_run_id`、`source_run_ids`。
+
+前端顺序：
+
+1. 新增 FusionBuilderPanel。
+2. DrawCard 增加 Use as base / Use region。
+3. Main Preview 复用 RegionMaskEditor 画融合区域。
+4. Inspector 支持预览 composite target。
+5. Branch Canvas 新增 `FusionPlanNode` 和 source/output edges。
+6. 启动 fusion refine 后切换或高亮 output run。
+
+验收：
+
+- 用户能选择 base card 和多个 source card。
+- 能生成 `composite_target.png` 和 region masks。
+- fusion run 输出一个新的 child run，不覆盖 base/source。
+- Branch Canvas 能显示 source cards -> fusion plan -> fusion result。
+- source 缺 render/GLSL 时返回明确错误。
+
+测试门禁：
+
+- `cd backend && python -m pytest tests/unit/test_fusion_plans.py tests/unit/test_image_composite.py tests/unit/test_glsl_refinement.py tests/unit/test_router.py -v`
+- `cd frontend && npm run build`
+
 ## 不建议并行的任务
 
 - 不要在 V1 branch-refine 未稳定前做 V3 variants。
 - 不要在 V2 run index 未完成前做复杂 branch tree。
 - 不要在 V2.1 canvas model 未稳定前，把 V3/V4 的主 UI 只做成 canvas-only；必须保留 fallback。
+- 不要在 V3 VariantGroup backend 未稳定前做 V3.5 draw-more/redraw。
 - 不要在 V4.1 constraints 未完成前做 mask。
+- 不要在 V4.2 region/mask 未稳定前做 V4.5 local fusion。
 - 不要在 V3 group events 未稳定前做 preference profile。
 
 ## 可以并行的任务
@@ -369,7 +445,9 @@ M11: V4.4 preference-assisted generation/ranking
 - V2 run index 与 BranchWorkspace UI mock 可以并行。
 - V2.1 BranchCanvas 静态节点/布局与 inspector UI 可以并行。
 - V3 backend VariantGroup 与前端 VariantCard 静态组件可以并行。
+- V3.5 DrawSessionInspector 静态 UI 可与 draw_sessions.py 并行。
 - V4 PreferencePanel UI 可以在后端 preferences endpoint 前用 mock 数据并行。
+- V4.5 FusionBuilder 静态 UI 可与 image_composite.py 并行。
 
 ## 最小首发范围
 
