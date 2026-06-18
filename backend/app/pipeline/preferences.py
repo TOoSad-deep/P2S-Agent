@@ -140,36 +140,39 @@ def load_preference_events(
         return []
 
     events: list[PreferenceEvent] = []
-    with path.open("r", encoding="utf-8") as fh:
-        for raw_line in fh:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            # Tolerant reconstruction — missing keys get defaults.
-            try:
-                ev = PreferenceEvent(
-                    event_id=obj.get("event_id", ""),
-                    event_type=obj.get("event_type", ""),
-                    timestamp=float(obj.get("timestamp", 0.0)),
-                    run_id=obj.get("run_id"),
-                    group_id=obj.get("group_id"),
-                    feedback=obj.get("feedback"),
-                    winner_run_id=obj.get("winner_run_id"),
-                    loser_run_ids=list(obj.get("loser_run_ids") or []),
-                    rating=obj.get("rating"),
-                    reason=obj.get("reason"),
-                    tags=list(obj.get("tags") or []),
-                    context=dict(obj.get("context") or {}),
-                )
-                events.append(ev)
-            except (TypeError, ValueError):
-                continue
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                # Tolerant reconstruction — missing keys get defaults.
+                try:
+                    ev = PreferenceEvent(
+                        event_id=obj.get("event_id", ""),
+                        event_type=obj.get("event_type", ""),
+                        timestamp=float(obj.get("timestamp", 0.0)),
+                        run_id=obj.get("run_id"),
+                        group_id=obj.get("group_id"),
+                        feedback=obj.get("feedback"),
+                        winner_run_id=obj.get("winner_run_id"),
+                        loser_run_ids=list(obj.get("loser_run_ids") or []),
+                        rating=obj.get("rating"),
+                        reason=obj.get("reason"),
+                        tags=list(obj.get("tags") or []),
+                        context=dict(obj.get("context") or {}),
+                    )
+                    events.append(ev)
+                except (TypeError, ValueError):
+                    continue
+    except OSError:
+        return []
 
     if limit is not None:
         events = events[-limit:]

@@ -973,3 +973,47 @@ def test_maybe_compact_no_op_for_missing_file(tmp_path):
     """maybe_compact on an absent file is False and never raises."""
     missing = tmp_path / "no_such.jsonl"
     assert maybe_compact_run_index(path=missing) is False
+
+
+# ---------------------------------------------------------------------------
+# Graceful degradation: read path must not propagate PermissionError (OSError)
+# ---------------------------------------------------------------------------
+
+
+def test_load_run_index_empty_on_permission_error_during_read(tmp_path, monkeypatch):
+    """A PermissionError on the underlying open() degrades to an empty index.
+
+    A uvicorn --reload worker on macOS can lose TCC access to ~/Documents; every
+    open() under it then raises PermissionError (errno 1). The read path must
+    return the documented empty value instead of propagating into an HTTP 500.
+    """
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("perm-read-1", status="running"), path=idx)
+
+    real_open = Path.open
+
+    def _denying_open(self, *args, **kwargs):
+        if self == idx:
+            raise PermissionError(1, "Operation not permitted")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _denying_open)
+
+    assert load_run_index(path=idx) == {}
+
+
+def test_load_run_index_empty_on_permission_error_during_stat(tmp_path, monkeypatch):
+    """A PermissionError on stat() degrades to an empty index instead of a 500."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("perm-stat-1", status="running"), path=idx)
+
+    real_stat = Path.stat
+
+    def _denying_stat(self, *args, **kwargs):
+        if self == idx:
+            raise PermissionError(1, "Operation not permitted")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _denying_stat)
+
+    assert load_run_index(path=idx) == {}

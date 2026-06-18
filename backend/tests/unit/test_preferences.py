@@ -141,6 +141,21 @@ class TestAppendAndLoad:
         assert r.rating == 1
         assert r.context == {"variant_label": "detail_texture", "locks": {"small_edits_only": True}}
 
+    def test_load_preference_events_returns_empty_on_permission_error(self, tmp_path, monkeypatch):
+        # A valid events.jsonl exists, but the read open() is denied (TCC/EPERM).
+        append_preference_event(_make_event(event_id="e1"), root=tmp_path)
+        events_path = tmp_path / "preferences" / "events.jsonl"
+
+        real_open = Path.open
+
+        def fake_open(self, *args, **kwargs):
+            if self == events_path:
+                raise PermissionError(1, "Operation not permitted")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fake_open)
+        assert load_preference_events(root=tmp_path) == []
+
 
 # ---------------------------------------------------------------------------
 # Profile persistence

@@ -328,6 +328,14 @@ def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRec
         stat = resolved.stat()
     except (FileNotFoundError, NotADirectoryError):
         return {}
+    except OSError as exc:
+        # A uvicorn --reload worker on macOS can lose TCC access to the data
+        # root; stat() then raises PermissionError. Degrade to an empty index
+        # rather than propagating into an HTTP 500.
+        logger.warning(
+            "run_index: cannot stat %s (%s); returning empty index", resolved, exc
+        )
+        return {}
 
     key = str(resolved)
     signature = (stat.st_mtime_ns, stat.st_size)
@@ -339,7 +347,15 @@ def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRec
             # cached mapping. RunLineageRecord values are treated as immutable.
             return dict(cached[1])
 
-    folded = _fold_index_file(resolved)
+    try:
+        folded = _fold_index_file(resolved)
+    except OSError as exc:
+        # PermissionError on the underlying open() (lost TCC access) degrades
+        # to an empty index; do not poison the cache with the error path.
+        logger.warning(
+            "run_index: cannot read %s (%s); returning empty index", resolved, exc
+        )
+        return {}
 
     with _CACHE_LOCK:
         _INDEX_CACHE[key] = (signature, folded)

@@ -337,6 +337,24 @@ class TestGroupEvents:
         if real_dir.exists():
             assert not (real_dir / "grp-isolation_events.jsonl").exists()
 
+    def test_load_group_events_returns_empty_on_permission_error(
+        self, tmp_path, monkeypatch
+    ):
+        """A PermissionError on open() (TCC loss) degrades to [] rather than 500."""
+        group_id = "grp-perm"
+        append_group_event(group_id, {"type": "ev1", "ts": 1.0}, root=tmp_path)
+        target = tmp_path / "variant_groups" / f"{group_id}_events.jsonl"
+
+        real_open = Path.open
+
+        def fake_open(self, *args, **kwargs):
+            if self == target:
+                raise PermissionError(1, "Operation not permitted")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fake_open)
+        assert load_group_events(group_id, root=tmp_path) == []
+
 
 # ---------------------------------------------------------------------------
 # aggregate_group_status

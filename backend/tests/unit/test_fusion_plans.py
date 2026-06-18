@@ -869,6 +869,25 @@ class TestPlanEvents:
         if real_dir.exists():
             assert not (real_dir / "fus-isolation-ev_events.jsonl").exists()
 
+    def test_load_plan_events_returns_empty_on_permission_error(
+        self, tmp_path, monkeypatch
+    ):
+        """If open() raises PermissionError (TCC loss on macOS Documents),
+        load_plan_events must degrade gracefully and return []."""
+        append_plan_event("fus-perm", {"type": "ev1", "ts": 1.0}, root=tmp_path)
+        ev_path = tmp_path / "fusions" / "fus-perm_events.jsonl"
+        assert ev_path.exists()
+
+        real_open = Path.open
+
+        def fake_open(self, *args, **kwargs):
+            if self == ev_path:
+                raise PermissionError(1, "Operation not permitted")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fake_open)
+        assert load_plan_events("fus-perm", root=tmp_path) == []
+
 
 # ---------------------------------------------------------------------------
 # plan_to_dict

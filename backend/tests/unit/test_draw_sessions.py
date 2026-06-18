@@ -406,6 +406,25 @@ class TestSessionEvents:
         if real_dir.exists():
             assert not (real_dir / "draw-isolation-ev_events.jsonl").exists()
 
+    def test_load_session_events_returns_empty_on_permission_error(
+        self, tmp_path, monkeypatch
+    ):
+        """A PermissionError on open() (lost TCC access) degrades to []."""
+        draw_id = "draw-perm-err"
+        append_session_event(draw_id, {"type": "status_changed"}, root=tmp_path)
+        ev_path = tmp_path / "draw_sessions" / f"{draw_id}_events.jsonl"
+        assert ev_path.exists()  # file is present; the failure is purely an open() denial
+
+        real_open = Path.open
+
+        def _denied_open(self, *args, **kwargs):
+            if self == ev_path:
+                raise PermissionError(1, "Operation not permitted")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", _denied_open)
+        assert load_session_events(draw_id, root=tmp_path) == []
+
 
 # ---------------------------------------------------------------------------
 # aggregate_draw_status — delegate to aggregate_group_status
