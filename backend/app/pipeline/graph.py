@@ -351,7 +351,10 @@ def node_selection(state: P2SPipelineState) -> dict:
 def _build_region_veto_fn(selected, protect_regions, run_dir, canvas_width, canvas_height, *, floor, ceil):
     """Build an injected veto callable for the refinement loops, or None.
 
-    Baseline = the selected candidate's pre-refinement render (what 'protect' guards).
+    Baseline = the selected candidate's render captured HERE, before optimization /
+    revision / refinement mutate the candidate. This is the user-selected checkpoint's
+    look (the "constraint-set-time" anchor per the design's D3) — intentionally the
+    fixed thing 'protect' guards, not a rolling per-iteration render.
     Returns None when there are no protect regions / no selected / no usable baseline,
     so the loops behave exactly as before.
     """

@@ -667,3 +667,26 @@ def test_glsl_veto_overrides_directed_acceptance(tmp_path, monkeypatch):
     # The directed-acceptance override must NOT have fired (veto ran first).
     assert result["history"][0].get("human_goal_override") is None
     assert result["history"][0].get("rejected_reason") == "protect_region_veto"
+
+
+def test_glsl_veto_overrides_force_first_iteration(tmp_path, monkeypatch):
+    # force_first_iteration only relaxes loop-entry/early-exit checks; it must NOT
+    # let a protect-violating candidate be accepted. (spec D1, plan test #8)
+    monkeypatch.setattr(
+        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
+    )
+    result = run_glsl_refinement_loop(
+        VALID_GLSL_A, 0.30, {}, {"final_score": 0.30},
+        tmp_path / "ref.png",
+        evaluate_fn=_evaluate_by_r_with_render,
+        initial_render_path=tmp_path / "current.png",
+        max_iterations=1, threshold=0.80, high_score_stop=0.92,
+        no_improvement_patience=2, max_fresh_restarts=0,
+        loop_dir=tmp_path / "loop",
+        force_first_iteration=True,
+        region_veto_fn=_veto_all,
+    )
+    assert result["best_glsl"] == VALID_GLSL_A
+    assert result["history"][0].get("accepted") is not True
+    assert result["history"][0].get("rejected_reason") == "protect_region_veto"
