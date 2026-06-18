@@ -1,6 +1,6 @@
 // DrawCard.tsx — single draw-card cell (V3.5 Batch Draw).
 // Pure presentational; no data fetching. Mirror VariantCard styling from BranchCanvasInspector.
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Star, Eye, RefreshCw, GitBranch, X, Layers, Crosshair } from "lucide-react";
 import type { DrawCardStatus } from "../hooks/usePngShader";
 import { fmtScore } from "../lib/format";
@@ -55,6 +55,17 @@ const DrawCard = memo(function DrawCard({
   disabled = false,
 }: DrawCardProps) {
   const [imgError, setImgError] = useState(false);
+
+  // Retry the thumbnail when the card's render becomes available. The backend
+  // points thumbnail_url at selected_render for every card regardless of status,
+  // so a still-running/queued card 409s and sets imgError. DrawCard is keyed by
+  // run_id (persists across polls), so without resetting on the status change
+  // the card stays stuck on "No preview" even after it completes and the render
+  // is ready — the <img> is unmounted, so onError/onLoad never fire again.
+  useEffect(() => {
+    setImgError(false);
+  }, [card.thumbnail_url, card.status]);
+
   const isFavorite = isWinner || !!card.favorite;
   const isEliminated = !!card.eliminated;
 

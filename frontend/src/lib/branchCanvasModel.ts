@@ -60,6 +60,46 @@ export interface BranchCanvasEdgeData extends Record<string, unknown> {
 export type BranchCanvasNode = Node<BranchCanvasNodeData>;
 export type BranchCanvasEdge = Edge<BranchCanvasEdgeData>;
 
+// ─── Selection → fetch targets ─────────────────────────────────────────────────
+
+/**
+ * Given the node a user just selected, return which detail data the inspector
+ * needs fetched so its detail view can render — the variant group for a
+ * variant_group/variant_run node, or the draw session for a draw_session/
+ * draw_card node. Non-detail nodes (input/run/checkpoint/…) return all-null so
+ * the caller leaves any in-progress polling untouched.
+ *
+ * The inspector's variant/draw views are gated on the live `variantGroup` /
+ * `drawSession` matching the selected node. Those are fetched only by the
+ * workspace's polling effects, which key off `activeVariantGroupId` /
+ * `activeDrawId`. Without this, selecting a variant/draw node that wasn't the
+ * one a live action just created (e.g. after a page reload) never triggered a
+ * fetch, leaving the inspector stuck on "加载变体中…" / "加载抽卡中…".
+ */
+export function selectionFetchTargets(
+  node: BranchCanvasNode | null,
+): { variantGroupId: string | null; drawId: string | null } {
+  const none = { variantGroupId: null, drawId: null };
+  if (!node) return none;
+  const data = node.data;
+  if (data.type === "variant_group") {
+    return typeof data.group_id === "string"
+      ? { variantGroupId: data.group_id, drawId: null }
+      : none;
+  }
+  if (data.type === "variant_run") {
+    return typeof data.variant_group_id === "string"
+      ? { variantGroupId: data.variant_group_id, drawId: null }
+      : none;
+  }
+  if (data.type === "draw_session" || data.type === "draw_card") {
+    return typeof data.draw_id === "string"
+      ? { variantGroupId: null, drawId: data.draw_id }
+      : none;
+  }
+  return none;
+}
+
 // ─── Adapter (V2.1-2) ────────────────────────────────────────────────────────
 
 export interface BuildBranchCanvasInput {

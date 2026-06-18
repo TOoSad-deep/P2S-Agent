@@ -1,7 +1,7 @@
 // PreviewDock.tsx — bottom-right floating preview dock (P5).
 // Single-click on a canvas node with a run_id shows its selected_render
 // side-by-side with the reference image. Double-click still switches the active run.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Panel } from "@xyflow/react";
 import type { BranchCanvasNode } from "../lib/branchCanvasModel";
 import { fmtScore } from "../lib/format";
@@ -43,8 +43,14 @@ export default function PreviewDock({ referenceUrl, node }: PreviewDockProps) {
   const runId =
     typeof node?.data?.run_id === "string" ? node.data.run_id : null;
 
-  // Reset error state when the node changes so the new img gets a fresh attempt.
-  // Using a key on the img handles this — see renderImgKey below.
+  // Reset error state whenever the selected node changes so the new img gets a
+  // fresh load attempt. A key on the img alone can't recover: once renderError
+  // is true the <img> is unmounted, so its onLoad/onError never fire again and
+  // the dock would stay stuck on "无渲染" for every node thereafter.
+  useEffect(() => {
+    setRenderError(false);
+  }, [runId]);
+
   const renderImgKey = runId ?? "none";
 
   const score =

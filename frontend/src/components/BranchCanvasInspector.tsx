@@ -1021,6 +1021,109 @@ function ReservedNodeView() {
   );
 }
 
+// ─── FusionPlanView (V4.5) ────────────────────────────────────────────────────
+// Read-only detail for a selected fusion_plan node: status, base, sources,
+// region count, and the output run (with a preview switch once it exists).
+// Reads straight from node.data (always populated by buildFusionModel).
+
+function FusionPlanView({
+  node,
+  activeRunId,
+  onSwitchRun,
+}: {
+  node: BranchCanvasNode;
+  activeRunId: string | null;
+  onSwitchRun: (runId: string) => void;
+}) {
+  const data = node.data;
+  const status = typeof data.status === "string" ? data.status : "—";
+  const baseRunId = typeof data.base_run_id === "string" ? data.base_run_id : null;
+  const sourceRunIds = Array.isArray(data.source_run_ids)
+    ? (data.source_run_ids as string[])
+    : [];
+  const outputRunId = typeof data.output_run_id === "string" ? data.output_run_id : null;
+  const regionCount = typeof data.region_count === "number" ? data.region_count : 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Header: merge icon + status */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <GitMerge className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+        <span className="text-[11px] font-medium text-[var(--text-primary)]">
+          融合计划 <span className="text-[var(--text-muted)] font-normal">Fusion plan</span>
+        </span>
+        {statusDot(status)}
+        <span className="text-[11px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-secondary)] font-mono shrink-0">
+          {status}
+        </span>
+      </div>
+
+      {/* Base run */}
+      {baseRunId && (
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] text-[var(--text-muted)] shrink-0">底图 Base</span>
+          <button
+            onClick={() => onSwitchRun(baseRunId)}
+            className="text-[11px] font-mono truncate text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            title={baseRunId}
+          >
+            {baseRunId.slice(-8)}
+          </button>
+        </div>
+      )}
+
+      {/* Sources + region count */}
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] text-[var(--text-muted)]">
+          融合源 Sources ({sourceRunIds.length}) · {regionCount} region{regionCount !== 1 ? "s" : ""}
+        </span>
+        {sourceRunIds.length > 0 ? (
+          <div className="flex flex-col gap-0.5">
+            {sourceRunIds.map((rid) => (
+              <button
+                key={rid}
+                onClick={() => onSwitchRun(rid)}
+                className="text-[11px] font-mono truncate text-left text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                title={rid}
+              >
+                · {rid.slice(-8)}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className="text-[11px] text-[var(--text-muted)]">暂无源 No sources</span>
+        )}
+      </div>
+
+      {/* Output */}
+      {outputRunId ? (
+        <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--border-color)]">
+          <span className="text-[10px] text-[var(--text-muted)] shrink-0">输出 Output</span>
+          <span
+            className="text-[11px] font-mono truncate flex-1 text-[var(--text-primary)]"
+            title={outputRunId}
+          >
+            {outputRunId.slice(-8)}
+          </span>
+          <button
+            onClick={() => onSwitchRun(outputRunId)}
+            disabled={outputRunId === activeRunId}
+            className="px-2 py-0.5 text-[11px] rounded transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          >
+            预览 Preview
+          </button>
+        </div>
+      ) : (
+        <p className="text-[11px] text-[var(--text-muted)] pt-1">
+          尚无输出 — 完成融合后显示
+          <br />
+          <span className="opacity-70">Output appears after fusion completes</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export default function BranchCanvasInspector({
@@ -1191,6 +1294,16 @@ export default function BranchCanvasInspector({
           />
         );
       }
+
+      case "fusion_plan":
+        return (
+          <FusionPlanView
+            key={node.id}
+            node={node}
+            activeRunId={activeRunId}
+            onSwitchRun={onSwitchRun}
+          />
+        );
 
       // Reserved V4 types
       case "region_constraint":

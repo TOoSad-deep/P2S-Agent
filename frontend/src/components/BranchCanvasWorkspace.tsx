@@ -29,6 +29,7 @@ import {
   buildDrawSessionModel,
   buildRegionConstraintModel,
   buildFusionModel,
+  selectionFetchTargets,
   type BranchCanvasNode,
   type BranchCanvasEdge,
 } from "../lib/branchCanvasModel";
@@ -174,6 +175,25 @@ export default function BranchCanvasWorkspace({
     setSelectedNodeId(null);
     setBranchDraft(null);
   }, [runId]);
+
+  // ── Reset per-tree detail state when the ROOT run changes ──────────────────
+  // variantGroup / drawSession / fusionStatus and their polling pointers belong
+  // to one branch tree. drawSession + fusionStatus are merged into the canvas
+  // model unconditionally, so without this they leak onto a newly-loaded tree's
+  // canvas (anchored at run ids that aren't in it) and the polling effects keep
+  // hitting stale ids. A within-tree active-run switch keeps the same root, so
+  // this does NOT fire on those — only on loading a genuinely different tree.
+  const rootRunId = branchInfo?.root_run_id ?? null;
+  useEffect(() => {
+    setActiveVariantGroupId(null);
+    setVariantGroup(null);
+    setActiveDrawId(null);
+    setDrawSession(null);
+    setActiveFusionId(null);
+    setFusionStatus(null);
+    setRegionDraft(null);
+    setFusionDraft(null);
+  }, [rootRunId]);
 
   // ── localStorage key (keyed by root run) ──────────────────────────────────
   const layoutStorageKey = `branchCanvasLayout:${branchInfo?.root_run_id ?? runId ?? "none"}`;
@@ -385,6 +405,13 @@ export default function BranchCanvasWorkspace({
       setSelectedNodeId(id);
       const node = displayNodes.find((n) => n.id === id) ?? null;
       onPreviewNode?.(node);
+      // Selecting a variant/draw node must drive the corresponding fetch so the
+      // inspector can render it — not just nodes a live action created. The
+      // polling effects key off these ids. Only set (never clear) so an
+      // in-progress explore/draw keeps polling when the user clicks elsewhere.
+      const { variantGroupId, drawId } = selectionFetchTargets(node);
+      if (variantGroupId) setActiveVariantGroupId(variantGroupId);
+      if (drawId) setActiveDrawId(drawId);
     },
     [displayNodes, onPreviewNode],
   );
