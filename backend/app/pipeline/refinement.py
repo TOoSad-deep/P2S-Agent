@@ -123,6 +123,7 @@ def run_dsl_refinement_loop(
     pairwise_judge: "Callable[[Path, Path], str | None] | None" = None,
     rubric_judge: "Callable[[Path], dict | None] | None" = None,
     on_iteration: "Callable[[dict], None] | None" = None,
+    region_veto_fn: "Callable[[Path], object] | None" = None,
 ) -> dict:
     """Drive LLM to iteratively revise a DSL candidate.
 
@@ -393,6 +394,28 @@ def run_dsl_refinement_loop(
             max_shader_chars=max_shader_chars,
             protected_aspects=protected_aspects,
         )
+
+        if region_veto_fn is not None and render_path.exists():
+            veto = region_veto_fn(render_path)
+            if getattr(veto, "vetoed", False):
+                entry["score_after"] = round(new_score, 4)
+                entry["delta"] = round(new_score - best_score, 4)
+                entry["rejected_reason"] = "protect_region_veto"
+                entry["region_veto"] = getattr(veto, "regions", [])
+                entry["constraint_score"] = getattr(veto, "constraint_score", None)
+                entry["accepted"] = False
+                entry["best_score_after"] = round(best_score, 4)
+                extra_feedback = [
+                    "[PROTECT VIOLATION] Your last revision degraded a protected "
+                    f"region ({getattr(veto, 'reason', None) or 'protected region'}). "
+                    "You MUST keep those regions unchanged; revise elsewhere."
+                ]
+                no_improvement_count += 1
+                _record(entry)
+                if no_improvement_count >= no_improvement_patience:
+                    stop_reason = "no_improvement_patience"
+                    break
+                continue
 
         entry["score_after"] = round(new_score, 4)
         delta = new_score - best_score
