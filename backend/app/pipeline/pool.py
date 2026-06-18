@@ -54,6 +54,10 @@ class CandidateRecord:
     reason: list[str] = field(default_factory=list)
     llm_io: dict | None = None
     glsl_metadata: dict = field(default_factory=dict)
+    # Structured per-source generation error, surfaced on the scoreboard so a
+    # source that raised is visible (with reason) instead of silently dropped.
+    # Shape: {"source": str, "error_type": str, "message": str}.
+    error: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +105,21 @@ def run_candidate_pool(
     """
     candidates_raw: list[tuple[str, str, int, dict | None, str]] = []
 
+    # Structured per-source errors. When a source raises we capture a compact
+    # record (source name + exception type + short message — NOT the full
+    # traceback) and tag it onto the matching CandidateRecord so the scoreboard
+    # can show *why* a candidate is missing/failed, instead of the failure being
+    # silently dropped to a log line only. The full traceback is still logged
+    # via logger.warning(exc_info=True). Maps cand_id -> structured error dict.
+    raw_errors: dict[str, dict] = {}
+
+    def _record_error(source: str, exc: Exception) -> dict:
+        return {
+            "source": source,
+            "error_type": type(exc).__name__,
+            "message": str(exc) or type(exc).__name__,
+        }
+
     # 1a. Baseline — always first
     try:
         baseline_dsl = generate_baseline_candidate(preprocess, canvas_width, canvas_height)
@@ -110,8 +129,9 @@ def run_candidate_pool(
             len(baseline_dsl.get("layers", []) or []),
             priority,
         )
-    except Exception:
+    except Exception as exc:
         logger.warning("baseline candidate failed", exc_info=True)
+        raw_errors["baseline_0"] = _record_error("baseline", exc)
         baseline_dsl = None
         priority = 0
     candidates_raw.append(("baseline_0", "baseline", priority, baseline_dsl, "dsl"))
@@ -124,8 +144,9 @@ def run_candidate_pool(
             "candidate generated: source=rule layers=%d",
             len(rule_dsl.get("layers", []) or []),
         )
-    except Exception:
+    except Exception as exc:
         logger.warning("rule candidate failed", exc_info=True)
+        raw_errors["rule_0"] = _record_error("rule", exc)
         rule_dsl = None
     candidates_raw.append(("rule_0", "rule", 1, rule_dsl, "dsl"))
 
@@ -141,8 +162,12 @@ def run_candidate_pool(
                     "candidate generated: source=decompose layers=%d",
                     len(dec_dsl.get("layers", []) or []),
                 )
-        except Exception:
+        except Exception as exc:
             logger.warning("decompose candidate failed", exc_info=True)
+            # decompose appends no placeholder on success-with-None; on a raise
+            # we add a visible failed-candidate record so it is not dropped.
+            raw_errors["decompose_0"] = _record_error("decompose", exc)
+            candidates_raw.append(("decompose_0", "decompose", 1, None, "dsl"))
 
     # 1c. CV — optional
     if cv_enabled and _CV_AVAILABLE:
@@ -162,8 +187,12 @@ def run_candidate_pool(
                     len((cv_dsl or {}).get("layers", []) or []),
                     cv_priority,
                 )
-        except Exception:
+        except Exception as exc:
             logger.warning("CV candidate failed", exc_info=True)
+            # CV appends no placeholder on success-with-None; on a raise we add a
+            # visible failed-candidate record so it is not silently dropped.
+            raw_errors["cv_0"] = _record_error("cv", exc)
+            candidates_raw.append(("cv_0", "cv", 2, None, "dsl"))
 
     # 1d. LLM — optional
     _llm_io: dict | None = None
@@ -192,8 +221,9 @@ def run_candidate_pool(
         elif llm_enabled:
             candidates_raw.append(("llm_0", "llm", 3, None, _llm_empty_kind))
             logger.info("candidate generated: source=llm returned none")
-    except Exception:
+    except Exception as exc:
         logger.warning("LLM candidate failed", exc_info=True)
+        raw_errors["llm_0"] = _record_error("llm", exc)
         if _llm_attempted:
             candidates_raw.append(("llm_0", "llm", 3, None, _llm_empty_kind))
 
@@ -205,8 +235,9 @@ def run_candidate_pool(
             "candidate generated: source=fallback layers=%d",
             len(fallback_dsl.get("layers", []) or []),
         )
-    except Exception:
+    except Exception as exc:
         logger.warning("fallback candidate failed", exc_info=True)
+        raw_errors["fallback_0"] = _record_error("fallback", exc)
         fallback_dsl = None
         fb_priority = 99
     candidates_raw.append(("fallback_0", "fallback", fb_priority, fallback_dsl, "dsl"))
@@ -230,6 +261,7 @@ def run_candidate_pool(
                 final_score=0.0,
                 selected=False,
                 reason=["generator returned None"],
+                error=raw_errors.get(cand_id),
             )
             records.append(record)
             continue
@@ -296,6 +328,7 @@ def run_candidate_pool(
             reason=[],
             llm_io=_llm_io if cand_id == "llm_0" else None,
             glsl_metadata=glsl_metadata if isinstance(glsl_metadata, dict) else {},
+            error=raw_errors.get(cand_id),
         )
         logger.info(
             "candidate compiled: id=%s valid=%s compile_ok=%s chars=%d",
@@ -432,9 +465,15 @@ def build_scoreboard(candidates: list[CandidateRecord]) -> dict:
             "compile_glsl": c.compile_glsl,
             "llm_io": c.llm_io,
             "glsl_metadata": c.glsl_metadata,
+            "error": c.error,
         }
         for c in candidates
     ]
+
+    # Aggregate structured per-source generation errors so the scoreboard can
+    # show *why* a candidate source is missing/failed (source + exception type
+    # + short message), instead of the failure being a silent log-only drop.
+    source_errors = [c.error for c in candidates if c.error]
 
     return {
         "total": total,
@@ -442,6 +481,7 @@ def build_scoreboard(candidates: list[CandidateRecord]) -> dict:
         "compiled": compiled,
         "selected_id": selected_id,
         "candidates": candidate_entries,
+        "source_errors": source_errors,
     }
 
 

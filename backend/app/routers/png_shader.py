@@ -141,6 +141,13 @@ _METADATA_MIRROR_KEYS: frozenset[str] = frozenset({"title", "favorite", "tags"})
 _MAX_VARIANT_COUNT = 6
 _MAX_VARIANT_CONCURRENCY = 2
 _variant_worker_semaphore = threading.Semaphore(_MAX_VARIANT_CONCURRENCY)
+
+
+class WorkerCapacityError(Exception):
+    """Raised when the global top-level worker pool is saturated at submission.
+
+    Endpoints translate this into ``HTTPException(429, ...)``.
+    """
 _VARIANT_GROUPS_ROOT: Optional[str] = None  # tests override to isolate
 _DRAW_SESSIONS_ROOT: Optional[str] = None  # tests override to isolate
 _PREFERENCES_ROOT: Optional[str] = None  # tests override to isolate
@@ -186,6 +193,17 @@ _MAX_SEED_GLSL_CHARS = _env_int("MAX_SEED_GLSL_CHARS", 256 * 1024)
 _MAX_INPUT_SPEC_CHARS = _env_int("MAX_INPUT_SPEC_CHARS", 256 * 1024)
 _MAX_FEEDBACK_CHARS = _env_int("MAX_FEEDBACK_CHARS", 8 * 1024)
 _MAX_MODIFIED_DSL_CHARS = _env_int("MAX_MODIFIED_DSL_CHARS", 256 * 1024)
+
+# Global top-level worker backpressure. Every top-level pipeline worker
+# (/run, /branch-refine, fusion) must acquire one of these slots at submission
+# time; if none is free the endpoint returns 429 instead of spawning an
+# unbounded daemon thread. Variant CHILD runs are bounded separately by
+# ``_variant_worker_semaphore`` and do NOT consume a global slot (their parent
+# already held one), so the two pools never double-count or deadlock.
+# Configurable via env MAX_ACTIVE_RUNS (default 6). Bounded so an over-release
+# bug surfaces loudly instead of silently inflating capacity.
+_MAX_ACTIVE_RUNS = _env_int("MAX_ACTIVE_RUNS", 6)
+_global_worker_semaphore = threading.BoundedSemaphore(_MAX_ACTIVE_RUNS)
 
 # Item 2 — allowlist regex for client-supplied ids used in filesystem paths.
 # Allows only [A-Za-z0-9_-]; rejects empty, "..", "/", and any other char.
@@ -408,6 +426,19 @@ def _store_run_locked(run_id: str, payload: dict) -> None:
     _run_store[run_id] = payload
 
 
+def _drop_run(run_id: str) -> None:
+    """Remove a run entry (and its model config) from the in-memory stores.
+
+    Used to roll back a run that was registered but never admitted — e.g. when
+    the global worker pool is saturated and the submission is rejected with 429.
+    Best-effort: missing keys are ignored.
+    """
+    with _run_store_lock:
+        _run_store.pop(run_id, None)
+    with _run_models_lock:
+        _run_models.pop(run_id, None)
+
+
 def _evict_one_run_locked() -> None:
     """Evict the least-recently-used TERMINAL run.
 
@@ -492,6 +523,7 @@ def _run_png_shader_background(
     trace_metadata: dict,
     pipeline_extra: Optional[dict] = None,
     variant_semaphore: Optional[threading.Semaphore] = None,
+    global_slot: Optional[threading.BoundedSemaphore] = None,
 ) -> None:
     """Run the PNG shader pipeline after the submit request has returned.
 
@@ -504,6 +536,9 @@ def _run_png_shader_background(
     ``variant_semaphore`` when provided puts the run through a queued→acquired
     lifecycle: the run waits in "queued" until the semaphore is free, then
     flips to "running"/"acquired".
+    ``global_slot`` (set only for top-level /run, /branch-refine and fusion
+    runs) is the global worker-pool slot acquired at submission; it is released
+    in the ``finally`` so the next top-level submission can be admitted.
     """
     # --- Variant queued lifecycle ---
     if variant_semaphore is not None:
@@ -701,6 +736,10 @@ def _run_png_shader_background(
                 shutil.rmtree(upload_dir, ignore_errors=True)
             if variant_semaphore is not None:
                 variant_semaphore.release()
+            # Release the global top-level worker slot (only set for /run,
+            # /branch-refine and fusion runs) so the next submission is admitted.
+            if global_slot is not None:
+                global_slot.release()
 
 
 def _start_pipeline_worker(
@@ -722,24 +761,50 @@ def _start_pipeline_worker(
     ``/branch-refine`` (parent reference image, ``upload_dir=None``).
     ``variant_semaphore`` is forwarded to the worker for the queued→acquired
     lifecycle used by variant child runs.
+
+    Backpressure: TOP-LEVEL runs (``variant_semaphore is None`` — i.e. /run,
+    /branch-refine, fusion) acquire one global worker slot here, before the
+    thread is spawned. If the pool is saturated this raises
+    ``WorkerCapacityError`` and NO thread is started; callers translate that
+    into HTTP 429. Variant child runs (``variant_semaphore`` set) are bounded by
+    their own semaphore and skip the global slot. The acquired global slot is
+    forwarded to the worker, which releases it in its ``finally``.
     """
-    _store_run_model(run_id, model_config)
-    threading.Thread(
-        target=_run_png_shader_background,
-        kwargs={
-            "run_id": run_id,
-            "image_path": image_path,
-            "upload_dir": upload_dir,
-            "pipeline_input_spec": pipeline_input_spec,
-            "seed_glsl": seed_glsl,
-            "model_config": model_config,
-            "trace_input": trace_input,
-            "trace_metadata": trace_metadata,
-            "pipeline_extra": pipeline_extra,
-            "variant_semaphore": variant_semaphore,
-        },
-        daemon=True,
-    ).start()
+    global_slot: Optional[threading.BoundedSemaphore] = None
+    if variant_semaphore is None:
+        # Resolve via the module attribute so tests can monkeypatch the cap.
+        sem = _global_worker_semaphore
+        if not sem.acquire(blocking=False):
+            raise WorkerCapacityError(
+                "worker pool at capacity; retry shortly"
+            )
+        global_slot = sem
+
+    try:
+        _store_run_model(run_id, model_config)
+        threading.Thread(
+            target=_run_png_shader_background,
+            kwargs={
+                "run_id": run_id,
+                "image_path": image_path,
+                "upload_dir": upload_dir,
+                "pipeline_input_spec": pipeline_input_spec,
+                "seed_glsl": seed_glsl,
+                "model_config": model_config,
+                "trace_input": trace_input,
+                "trace_metadata": trace_metadata,
+                "pipeline_extra": pipeline_extra,
+                "variant_semaphore": variant_semaphore,
+                "global_slot": global_slot,
+            },
+            daemon=True,
+        ).start()
+    except BaseException:
+        # Thread never launched → release the slot we just took so it is not
+        # leaked (the worker's finally only runs if the thread actually starts).
+        if global_slot is not None:
+            global_slot.release()
+        raise
 
 
 @router.post("/run", dependencies=[Depends(_check_content_length)])
@@ -895,6 +960,15 @@ async def run_png_shader(
         return initial_result
     except HTTPException:
         raise
+    except WorkerCapacityError as exc:
+        # No worker slot was available → roll back the registered run and tell
+        # the client to retry later (backpressure, not a server error).
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        _drop_run(run_id)
+        raise HTTPException(
+            status_code=429,
+            detail=f"{exc}. Retry-After: a few seconds.",
+        ) from exc
     except Exception as exc:
         shutil.rmtree(upload_dir, ignore_errors=True)
         raise HTTPException(
@@ -1114,31 +1188,39 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         status="pending", run_dir=None, created_at=time(),
     ))
 
-    _start_pipeline_worker(
-        run_id=child_run_id,
-        image_path=reference_path,
-        upload_dir=None,  # reuse parent reference; never delete the parent run_dir
-        pipeline_input_spec=child_input_spec,
-        seed_glsl=checkpoint.glsl,
-        model_config=_get_run_model(run_id),
-        trace_input={
-            "run_id": child_run_id,
-            "parent_run_id": run_id,
-            "checkpoint_id": checkpoint_id,
-        },
-        trace_metadata={
-            "run_id": child_run_id,
-            "pipeline": "png-shader-branch",
-            "parent_run_id": run_id,
-        },
-        pipeline_extra={
-            "human_feedback_notes": notes,
-            "directed_acceptance": directed_acceptance,
-            "force_first_refinement_iteration": True,
-            "lineage": lineage,
-            "extra_artifacts": extra_artifacts,
-        },
-    )
+    try:
+        _start_pipeline_worker(
+            run_id=child_run_id,
+            image_path=reference_path,
+            upload_dir=None,  # reuse parent reference; never delete the parent run_dir
+            pipeline_input_spec=child_input_spec,
+            seed_glsl=checkpoint.glsl,
+            model_config=_get_run_model(run_id),
+            trace_input={
+                "run_id": child_run_id,
+                "parent_run_id": run_id,
+                "checkpoint_id": checkpoint_id,
+            },
+            trace_metadata={
+                "run_id": child_run_id,
+                "pipeline": "png-shader-branch",
+                "parent_run_id": run_id,
+            },
+            pipeline_extra={
+                "human_feedback_notes": notes,
+                "directed_acceptance": directed_acceptance,
+                "force_first_refinement_iteration": True,
+                "lineage": lineage,
+                "extra_artifacts": extra_artifacts,
+            },
+        )
+    except WorkerCapacityError as exc:
+        # Saturated worker pool → roll back the child run, signal backpressure.
+        _drop_run(child_run_id)
+        raise HTTPException(
+            status_code=429,
+            detail=f"{exc}. Retry-After: a few seconds.",
+        ) from exc
 
     if stop_parent:
         with _run_store_lock:
@@ -2449,6 +2531,8 @@ async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
       - ``selected_shader``          → final:selected shader
       - ``selected_render``          → candidate:selected render PNG
       - ``checkpoint:<cp_id>:<kind>`` → arbitrary checkpoint + kind
+      - ``mask:<region_id>``          → region_masks/<region_id>.json
+        (matches what the ``region-mask`` endpoint advertises + persists)
     """
     # 1. Resolve run result + run_dir.
     with _run_store_lock:
@@ -2476,6 +2560,32 @@ async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
 
     if not run_dir:
         raise HTTPException(status_code=409, detail="run_dir not available")
+
+    # 1b. region-mask artifact (``mask:<region_id>``). The region-mask endpoint
+    # advertises this id/url and writes ``region_masks/<region_id>.json``; serve
+    # that exact file. id-safety mirrors the fusion artifact endpoint: the
+    # region_id must match ``_REGION_ID_RE`` (blocks ``..``/``/``), and the
+    # resolved path must stay contained in ``<run_dir>/region_masks``.
+    if artifact_id.startswith("mask:"):
+        region_id = artifact_id[len("mask:"):]
+        if not region_id or not _REGION_ID_RE.match(region_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"region_id {region_id!r} contains disallowed characters",
+            )
+        masks_dir = Path(run_dir) / "region_masks"
+        target = masks_dir / f"{region_id}.json"
+        try:
+            resolved = target.resolve()
+            resolved.relative_to(masks_dir.resolve())
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=422, detail="invalid artifact path") from exc
+        if not resolved.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"artifact not found: {target.name}",
+            )
+        return FileResponse(resolved)
 
     # 2. Parse artifact_id → (checkpoint_id, kind).
     if artifact_id == "selected_shader":
@@ -3315,32 +3425,42 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
         source_run_ids=list(record.source_run_ids),
     ))
 
-    _start_pipeline_worker(
-        run_id=child_run_id,
-        image_path=base_reference,
-        upload_dir=None,  # reuse base reference; never delete the base run_dir
-        pipeline_input_spec=child_input_spec,
-        seed_glsl=base_selected_glsl,
-        model_config=_get_run_model(base_run_id),
-        trace_input={
-            "run_id": child_run_id,
-            "base_run_id": base_run_id,
-            "fusion_id": fusion_id,
-        },
-        trace_metadata={
-            "run_id": child_run_id,
-            "pipeline": "png-shader-fusion",
-            "base_run_id": base_run_id,
-            "fusion_id": fusion_id,
-        },
-        pipeline_extra={
-            "human_feedback_notes": notes,
-            "directed_acceptance": directed_acceptance,
-            "force_first_refinement_iteration": True,
-            "lineage": lineage,
-            "extra_artifacts": extra_artifacts,
-        },
-    )
+    try:
+        _start_pipeline_worker(
+            run_id=child_run_id,
+            image_path=base_reference,
+            upload_dir=None,  # reuse base reference; never delete the base run_dir
+            pipeline_input_spec=child_input_spec,
+            seed_glsl=base_selected_glsl,
+            model_config=_get_run_model(base_run_id),
+            trace_input={
+                "run_id": child_run_id,
+                "base_run_id": base_run_id,
+                "fusion_id": fusion_id,
+            },
+            trace_metadata={
+                "run_id": child_run_id,
+                "pipeline": "png-shader-fusion",
+                "base_run_id": base_run_id,
+                "fusion_id": fusion_id,
+            },
+            pipeline_extra={
+                "human_feedback_notes": notes,
+                "directed_acceptance": directed_acceptance,
+                "force_first_refinement_iteration": True,
+                "lineage": lineage,
+                "extra_artifacts": extra_artifacts,
+            },
+        )
+    except WorkerCapacityError as exc:
+        # Saturated worker pool → roll back the child run, signal backpressure.
+        # The fusion plan record is left untouched (status unchanged) so the
+        # caller can retry the run.
+        _drop_run(child_run_id)
+        raise HTTPException(
+            status_code=429,
+            detail=f"{exc}. Retry-After: a few seconds.",
+        ) from exc
 
     record.output_run_id = child_run_id
     record.status = "running"

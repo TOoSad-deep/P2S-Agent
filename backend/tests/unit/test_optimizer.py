@@ -330,6 +330,122 @@ def test_optimize_coordinate_descent_strategy(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Tests: convergence / early-stop (no-improvement) + acceptance epsilon
+# ---------------------------------------------------------------------------
+
+def test_coordinate_descent_early_stops_when_no_improvement(tmp_path):
+    """A constant score_fn must early-stop after one full sweep, not run to cap.
+
+    With a render that always produces the SAME image, no perturbation can ever
+    improve the score. The optimizer must detect a full no-improvement sweep and
+    stop early — bounding compile/render/score calls to ~one sweep (2 trials per
+    param) instead of churning through every max_iterations evaluation.
+    """
+    ref_path = make_ref_image(tmp_path, color=(200, 200, 200, 255))
+
+    # Constant render: every trial scores identically => nothing ever improves.
+    call_count = {"n": 0}
+
+    def render_fn(glsl: str) -> Path:
+        call_count["n"] += 1
+        img = Image.new("RGBA", (64, 64), (128, 128, 128, 255))
+        p = tmp_path / f"const_{call_count['n']}.png"
+        img.save(p)
+        return p
+
+    num_params = len(_collect_optimizable_params(FIXTURE_CIRCLE_SOLID))
+    # A generous cap so that running to the cap is clearly distinguishable from
+    # stopping after one sweep.
+    cap = num_params * 2 * 5
+    result = optimize_candidate(
+        FIXTURE_CIRCLE_SOLID,
+        ref_path,
+        render_fn,
+        max_iterations=cap,
+        strategy="coordinate_descent",
+        seed=5,
+    )
+
+    # One full sweep = at most 2 trials per param. The optimizer must stop after
+    # that single no-improvement sweep instead of consuming the full cap.
+    one_sweep_trials = num_params * 2
+    assert result.iterations_run <= one_sweep_trials, (
+        f"expected early-stop within one sweep ({one_sweep_trials} trials), "
+        f"got {result.iterations_run}"
+    )
+    assert result.iterations_run < cap, "optimizer ran to the max cap, no early-stop"
+    # Renders performed (1 initial + per-trial) must also be bounded to one sweep.
+    assert call_count["n"] <= one_sweep_trials + 1
+    # The result must record WHY it stopped.
+    assert result.stop_reason == "converged_no_improvement", (
+        f"unexpected stop_reason: {result.stop_reason!r}"
+    )
+
+
+def test_coordinate_descent_stop_reason_max_iterations(tmp_path):
+    """When improvements keep landing, the optimizer runs to the cap and records it."""
+    ref_path = make_ref_image(tmp_path, color=(200, 200, 200, 255))
+
+    # Monotonically improving render so every step is accepted and early-stop
+    # never fires — the optimizer exhausts max_iterations.
+    state = {"n": 0}
+
+    def render_fn(glsl: str) -> Path:
+        shade = min(40 + state["n"] * 8, 200)
+        img = Image.new("RGBA", (64, 64), (shade, shade, shade, 255))
+        p = tmp_path / f"imp_{state['n']}.png"
+        state["n"] += 1
+        img.save(p)
+        return p
+
+    result = optimize_candidate(
+        FIXTURE_CIRCLE_SOLID,
+        ref_path,
+        render_fn,
+        max_iterations=6,
+        strategy="coordinate_descent",
+        seed=5,
+    )
+    assert result.iterations_run == 6
+    assert result.stop_reason == "max_iterations"
+
+
+def test_coordinate_descent_rejects_sub_epsilon_improvement(tmp_path):
+    """A perturbation improving the score by less than epsilon is NOT accepted.
+
+    The first trial nudges the score up by a hair (< epsilon). That must be
+    treated as noise and rejected, so best_score stays at the initial score and
+    the step is logged accepted=False.
+    """
+    ref_path = make_ref_image(tmp_path, color=(200, 200, 200, 255))
+
+    # Render 0 (initial) and every trial render must yield scores that differ by
+    # less than the acceptance epsilon. Identical images give identical scores,
+    # which trivially fall below ANY positive epsilon, so a previously-accepted
+    # ``> best`` step (floating-point noise) is now rejected.
+    def render_fn(glsl: str) -> Path:
+        img = Image.new("RGBA", (64, 64), (150, 150, 150, 255))
+        p = tmp_path / f"eps_{random.random()}.png"
+        img.save(p)
+        return p
+
+    big_epsilon = 0.5  # No real render can clear a 0.5 score jump here.
+    result = optimize_candidate(
+        FIXTURE_CIRCLE_SOLID,
+        ref_path,
+        render_fn,
+        max_iterations=4,
+        strategy="coordinate_descent",
+        seed=5,
+        accept_epsilon=big_epsilon,
+    )
+    # No trial cleared the epsilon bar => nothing accepted, score unchanged.
+    assert result.best_score == result.initial_score
+    assert all(not step.accepted for step in result.optimizer_log)
+    assert result.improved is False
+
+
+# ---------------------------------------------------------------------------
 # Tests: build_optimization_artifacts
 # ---------------------------------------------------------------------------
 

@@ -640,3 +640,171 @@ def test_build_branch_tree_non_fusion_node_has_default_fusion_fields(tmp_path):
     assert child_node["fusion_id"] is None
     assert child_node["base_run_id"] is None
     assert child_node["source_run_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# Performance: load_run_index caches the folded result by file mtime+size
+# (Task 1 — perf/observability)
+# ---------------------------------------------------------------------------
+
+
+def test_load_run_index_caches_when_file_unchanged(tmp_path, monkeypatch):
+    """Two consecutive loads with no file change must not re-read the file.
+
+    We spy on json.loads (called once per JSONL line during a fold). The first
+    load parses the lines; the second load with an unchanged file must reuse the
+    cached fold and therefore parse nothing.
+    """
+    import app.pipeline.run_index as ri
+
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("c1", status="running"), path=idx)
+    append_run_created(_record("c2", status="running"), path=idx)
+
+    calls = {"n": 0}
+    real_loads = ri.json.loads
+
+    def _counting_loads(s, *a, **kw):
+        calls["n"] += 1
+        return real_loads(s, *a, **kw)
+
+    monkeypatch.setattr(ri.json, "loads", _counting_loads)
+
+    first = load_run_index(path=idx)
+    parsed_after_first = calls["n"]
+    assert parsed_after_first >= 2  # at least one parse per JSONL line
+
+    second = load_run_index(path=idx)
+    # No file change => cache hit => zero additional parses.
+    assert calls["n"] == parsed_after_first
+    assert second == first
+
+
+def test_load_run_index_refolds_after_append(tmp_path):
+    """After an append (mtime/size change), the next load reflects the new record."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("a1", status="running"), path=idx)
+
+    first = load_run_index(path=idx)
+    assert set(first.keys()) == {"a1"}
+
+    # Append a new record; size (and usually mtime) change.
+    append_run_created(_record("a2", status="running"), path=idx)
+
+    second = load_run_index(path=idx)
+    assert set(second.keys()) == {"a1", "a2"}
+
+
+def test_load_run_index_cache_isolated_per_path(tmp_path):
+    """Caching must be keyed per path so two different files don't collide."""
+    idx_a = tmp_path / "a.jsonl"
+    idx_b = tmp_path / "b.jsonl"
+    append_run_created(_record("only-a", status="running"), path=idx_a)
+    append_run_created(_record("only-b", status="running"), path=idx_b)
+
+    res_a = load_run_index(path=idx_a)
+    res_b = load_run_index(path=idx_b)
+
+    assert set(res_a.keys()) == {"only-a"}
+    assert set(res_b.keys()) == {"only-b"}
+
+
+def test_load_run_index_cached_result_is_not_mutated_by_caller(tmp_path):
+    """A caller mutating the returned dict must not corrupt the cache."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("m1", status="running"), path=idx)
+
+    first = load_run_index(path=idx)
+    first["injected"] = first["m1"]  # mutate the returned mapping
+
+    second = load_run_index(path=idx)  # cache hit, file unchanged
+    assert "injected" not in second
+    assert set(second.keys()) == {"m1"}
+
+
+# ---------------------------------------------------------------------------
+# Observability: malformed JSONL lines are logged, not silently dropped
+# (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_line_emits_warning(tmp_path, caplog):
+    """A malformed JSONL line is logged as a warning and skipped, valid records kept."""
+    import logging
+
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("good-1", status="running"), path=idx)
+    with idx.open("a", encoding="utf-8") as fh:
+        fh.write("{this is not valid json\n")
+
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.run_index"):
+        index = load_run_index(path=idx)
+
+    assert "good-1" in index
+    assert len(index) == 1
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "expected a warning for the malformed line"
+    # The warning should help locate the corruption (line number or snippet).
+    joined = " ".join(r.getMessage() for r in warnings)
+    assert "run_index" in joined or "malformed" in joined.lower() or "line" in joined.lower()
+
+
+# ---------------------------------------------------------------------------
+# Terminal-status stickiness in the fold (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_terminal_status_not_regressed_by_stale_updated(tmp_path):
+    """[created(running), updated(completed), updated(running)] => completed (terminal)."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("t1", status="running"), path=idx)
+    append_run_updated("t1", {"status": "completed", "final_score": 0.9}, path=idx)
+    append_run_updated("t1", {"status": "running"}, path=idx)  # stale / out-of-order
+
+    index = load_run_index(path=idx)
+    assert index["t1"].status == "completed"
+    # Non-status fields in the stale event are still allowed to merge.
+
+
+def test_failed_terminal_status_sticks(tmp_path):
+    """A failed run is not flipped back to running by a stale updated."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("t2", status="running"), path=idx)
+    append_run_updated("t2", {"status": "failed"}, path=idx)
+    append_run_updated("t2", {"status": "running"}, path=idx)
+
+    index = load_run_index(path=idx)
+    assert index["t2"].status == "failed"
+
+
+def test_cancelled_terminal_status_sticks(tmp_path):
+    """A cancelled run is not flipped back to running by a stale updated."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("t3", status="running"), path=idx)
+    append_run_updated("t3", {"status": "cancelled"}, path=idx)
+    append_run_updated("t3", {"status": "running"}, path=idx)
+
+    index = load_run_index(path=idx)
+    assert index["t3"].status == "cancelled"
+
+
+def test_terminal_status_allows_non_status_field_updates(tmp_path):
+    """A post-terminal updated may still patch non-status fields (e.g. title)."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("t4", status="running"), path=idx)
+    append_run_updated("t4", {"status": "completed"}, path=idx)
+    append_run_updated("t4", {"status": "running", "title": "late title"}, path=idx)
+
+    index = load_run_index(path=idx)
+    assert index["t4"].status == "completed"  # status sticks
+    assert index["t4"].title == "late title"  # other fields still merge
+
+
+def test_non_terminal_status_still_progresses(tmp_path):
+    """Non-terminal -> non-terminal transitions are unaffected (pending -> running)."""
+    idx = tmp_path / "idx.jsonl"
+    append_run_created(_record("t5", status="pending"), path=idx)
+    append_run_updated("t5", {"status": "running"}, path=idx)
+
+    index = load_run_index(path=idx)
+    assert index["t5"].status == "running"

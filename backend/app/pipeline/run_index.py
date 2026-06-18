@@ -29,12 +29,15 @@ override so the real index is never touched during testing.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Default path
@@ -47,6 +50,20 @@ _DEFAULT_INDEX_PATH = DEFAULT_RESULTS_ROOT / "run_index.jsonl"
 # ---------------------------------------------------------------------------
 
 _APPEND_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# load_run_index cache (perf): fold result keyed by resolved path, validated
+# against the file's (st_mtime_ns, st_size). A separate lock guards the cache
+# because workers append concurrently and may trigger re-folds.
+# ---------------------------------------------------------------------------
+
+_CACHE_LOCK = threading.Lock()
+# path-str -> ((st_mtime_ns, st_size), folded dict[str, RunLineageRecord])
+_INDEX_CACHE: dict[str, tuple[tuple[int, int], dict[str, "RunLineageRecord"]]] = {}
+
+# Statuses that, once reached, must not be regressed by a later stale/out-of-order
+# ``updated`` event flipping the run back to a non-terminal status.
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 # ---------------------------------------------------------------------------
 # Custom error
@@ -187,37 +204,41 @@ def append_run_updated(
     _append_line(data, resolved)
 
 
-def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
-    """Read the JSONL file and fold all events into a dict of RunLineageRecord.
+def _fold_index_file(resolved: Path) -> dict[str, RunLineageRecord]:
+    """Read *resolved* and fold all events into a dict of RunLineageRecord.
 
-    Rules:
-    * ``created`` events initialise a record.
-    * ``updated`` events overlay their fields onto the existing record.
-    * Later events always override earlier ones.
-    * Blank lines and non-JSON lines are silently skipped.
-    * An ``updated`` that arrives before any ``created`` for that run_id
-      creates a best-effort record (root_run_id defaults to run_id,
-      status defaults to "unknown").
-
-    Returns an empty dict if the file does not exist.
+    See :func:`load_run_index` for the fold rules. This helper does the actual
+    line-by-line read; callers handle existence checks and caching.
     """
-    resolved = _resolve_path(path)
-    if not resolved.exists():
-        return {}
-
     records: dict[str, RunLineageRecord] = {}
 
     with resolved.open("r", encoding="utf-8") as fh:
-        for raw_line in fh:
+        for lineno, raw_line in enumerate(fh, start=1):
             line = raw_line.strip()
             if not line:
                 continue
             try:
                 data = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # skip malformed line
+            except json.JSONDecodeError as exc:
+                # Observability: surface corruption instead of dropping it
+                # silently. Truncate the snippet so logs stay readable.
+                snippet = line[:120] + ("…" if len(line) > 120 else "")
+                logger.warning(
+                    "run_index: skipping malformed JSONL line %d in %s: %s (snippet=%r)",
+                    lineno,
+                    resolved,
+                    exc,
+                    snippet,
+                )
+                continue
 
             if not isinstance(data, dict):
+                logger.warning(
+                    "run_index: skipping non-object JSONL line %d in %s (type=%s)",
+                    lineno,
+                    resolved,
+                    type(data).__name__,
+                )
                 continue
 
             event = data.get("event")
@@ -233,7 +254,18 @@ def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRec
             elif event == "updated":
                 fields = {k: v for k, v in data.items() if k not in ("event", "run_id")}
                 if run_id in records:
-                    records[run_id] = _merge_fields(records[run_id], fields)
+                    existing = records[run_id]
+                    # Terminal-status stickiness: once a run reaches a terminal
+                    # status, a later out-of-order / stale ``updated`` must not
+                    # regress it to a non-terminal status. Non-status fields in
+                    # that event are still allowed to merge.
+                    if (
+                        existing.status in _TERMINAL_STATUSES
+                        and "status" in fields
+                        and fields["status"] not in _TERMINAL_STATUSES
+                    ):
+                        fields = {k: v for k, v in fields.items() if k != "status"}
+                    records[run_id] = _merge_fields(existing, fields)
                 else:
                     # Best-effort: create from available fields.
                     synthetic: dict[str, Any] = {"run_id": run_id}
@@ -241,6 +273,55 @@ def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRec
                     records[run_id] = _dict_to_record(synthetic)
 
     return records
+
+
+def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
+    """Read the JSONL file and fold all events into a dict of RunLineageRecord.
+
+    Rules:
+    * ``created`` events initialise a record.
+    * ``updated`` events overlay their fields onto the existing record.
+    * Later events always override earlier ones, EXCEPT a terminal status
+      (completed/failed/cancelled) is never regressed to a non-terminal
+      status by a later stale/out-of-order ``updated``.
+    * Blank lines are skipped; malformed / non-object lines are logged at
+      WARNING (with line number + snippet) and skipped.
+    * An ``updated`` that arrives before any ``created`` for that run_id
+      creates a best-effort record (root_run_id defaults to run_id,
+      status defaults to "unknown").
+
+    Performance: the folded result is cached per resolved path and validated
+    against the file's ``(st_mtime_ns, st_size)``. Repeated calls with no file
+    change reuse the cache instead of re-reading O(total_runs) lines; an append
+    (which changes mtime/size) invalidates the entry and triggers a re-fold.
+
+    Returns an empty dict if the file does not exist. The returned dict is a
+    fresh shallow copy on every call, so callers may mutate it without
+    corrupting the cache.
+    """
+    resolved = _resolve_path(path)
+
+    try:
+        stat = resolved.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+
+    key = str(resolved)
+    signature = (stat.st_mtime_ns, stat.st_size)
+
+    with _CACHE_LOCK:
+        cached = _INDEX_CACHE.get(key)
+        if cached is not None and cached[0] == signature:
+            # Hand back a shallow copy so caller mutations can't corrupt the
+            # cached mapping. RunLineageRecord values are treated as immutable.
+            return dict(cached[1])
+
+    folded = _fold_index_file(resolved)
+
+    with _CACHE_LOCK:
+        _INDEX_CACHE[key] = (signature, folded)
+
+    return dict(folded)
 
 
 def build_branch_tree(

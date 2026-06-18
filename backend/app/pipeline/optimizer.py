@@ -73,6 +73,16 @@ class OptimizeResult:
     loss_curve: list[float]          # score at each accepted step
     optimizer_log: list[OptimizeStep]
     protected_aspects_violations: list[str]
+    # Why the optimizer halted: "max_iterations" (hit the cap),
+    # "converged_no_improvement" (a full sweep produced no accepted step),
+    # or "no_params" (nothing optimizable to perturb).
+    stop_reason: str = "max_iterations"
+
+
+# Smallest score gain that counts as a real improvement. Perturbations below
+# this threshold are treated as noise and rejected, so negligible/floating-point
+# "improvements" don't churn the optimizer or block early-stop.
+DEFAULT_ACCEPT_EPSILON = 1e-4
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +312,7 @@ def optimize_candidate(
     strategy: str = "random",
     protected_aspects: "list[str] | None" = None,
     seed: "int | None" = None,
+    accept_epsilon: float = DEFAULT_ACCEPT_EPSILON,
 ) -> OptimizeResult:
     """Optimize DSL parameters to improve visual similarity to *ref_path*.
 
@@ -319,6 +330,10 @@ def optimize_candidate(
         protected_aspects: Aspects that must not be changed (informational only;
                            enforced by not modifying types/structure).
         seed:             Optional random seed for reproducibility.
+        accept_epsilon:   Minimum score gain for a perturbation to be accepted.
+                          Gains below this are treated as noise and rejected, so
+                          a full sweep of sub-epsilon trials triggers early-stop
+                          (coordinate_descent) instead of running to the cap.
 
     Returns:
         OptimizeResult with the best DSL found and diagnostic information.
@@ -337,8 +352,13 @@ def optimize_candidate(
     best_score = initial_score
     loss_curve: list[float] = [initial_score]
     log: list[OptimizeStep] = []
+    # Default: assume we ran to the cap; the coordinate-descent loop overrides
+    # this when a full no-improvement sweep triggers convergence early-stop.
+    stop_reason = "max_iterations"
 
     if strategy == "random":
+        if not collected:
+            stop_reason = "no_params"
         for i in range(max_iterations):
             if not collected:
                 break
@@ -364,7 +384,9 @@ def optimize_candidate(
                 new_dsl, ref_path, render_fn, render_dsl_fn=render_dsl_fn
             )
 
-            accepted = new_score > best_score
+            # Acceptance epsilon: only a gain of at least ``accept_epsilon``
+            # counts as a real improvement (noise-level gains are rejected).
+            accepted = new_score >= best_score + accept_epsilon
             log.append(OptimizeStep(
                 iteration=i,
                 param_path=param_path,
@@ -386,9 +408,15 @@ def optimize_candidate(
         scale = 0.05
         step_count = 0
         param_idx = 0
+        # Convergence tracker: how many consecutive params have been swept with
+        # NO accepted improvement. Once this reaches len(collected) a full sweep
+        # has produced nothing — the optimizer has converged and stops early.
+        params_since_improvement = 0
 
         # Re-collect with fresh reference
         collected = _collect_optimizable_params(best_dsl)
+        if not collected:
+            stop_reason = "no_params"
 
         while step_count < max_iterations:
             if not collected:
@@ -435,7 +463,10 @@ def optimize_candidate(
                 )
                 step_count += 1
 
-                accepted = trial_score > best_direction_score
+                # Acceptance epsilon: a trial must beat the running best for
+                # this param by at least ``accept_epsilon`` to count. Noise-level
+                # gains are rejected so they never block convergence early-stop.
+                accepted = trial_score >= best_direction_score + accept_epsilon
                 log.append(OptimizeStep(
                     iteration=step_count - 1,
                     param_path=param_path,
@@ -459,7 +490,22 @@ def optimize_candidate(
                 best_score = best_direction_score
                 loss_curve.append(best_score)
                 collected = _collect_optimizable_params(best_dsl)
+                params_since_improvement = 0
+            else:
+                params_since_improvement += 1
             param_idx += 1
+
+            # Convergence / early-stop: once a full sweep over every parameter
+            # has produced no accepted improvement, further sweeps would just
+            # repeat the same wasted compile/render/score passes. Stop early and
+            # record the reason instead of running to ``max_iterations``.
+            if (
+                collected
+                and step_count > 0
+                and params_since_improvement >= len(collected)
+            ):
+                stop_reason = "converged_no_improvement"
+                break
 
     else:
         raise ValueError(f"Unknown strategy: {strategy!r}. Use 'random' or 'coordinate_descent'.")
@@ -473,6 +519,7 @@ def optimize_candidate(
         loss_curve=loss_curve,
         optimizer_log=log,
         protected_aspects_violations=[],
+        stop_reason=stop_reason,
     )
 
 
@@ -494,4 +541,5 @@ def build_optimization_artifacts(result: OptimizeResult) -> dict:
         "steps_accepted": steps_accepted,
         "steps_rejected": steps_rejected,
         "protected_aspects_violations": result.protected_aspects_violations,
+        "stop_reason": result.stop_reason,
     }

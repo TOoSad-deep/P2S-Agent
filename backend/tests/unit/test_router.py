@@ -2820,6 +2820,50 @@ def test_region_mask_valid_rect_200(tmp_path):
     assert data["geometry"] == {"x": 0.05, "y": 0.58, "w": 0.90, "h": 0.34}
 
 
+def test_region_mask_url_is_served_200(tmp_path):
+    """The advertised mask_url must actually resolve: GETting it returns 200
+    with the persisted region-mask JSON (producer/consumer contract agree)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/region-mask",
+        json=_VALID_REGION_BODY,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    mask_url = body["mask_url"]
+    assert body["mask_artifact_id"] == "mask:region_water"
+    assert mask_url == "/png-shader/runs/run_parent/artifacts/mask:region_water"
+
+    got = client.get(mask_url)
+    assert got.status_code == 200, got.text
+    served = got.json()
+    assert served["id"] == "region_water"
+    assert served["geometry"] == {"x": 0.05, "y": 0.58, "w": 0.90, "h": 0.34}
+
+
+def test_region_mask_artifact_traversal_id_422(tmp_path):
+    """A traversal mask id (mask:../x) is rejected, not served."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.get("/png-shader/runs/run_parent/artifacts/mask:../x")
+    assert resp.status_code == 422, resp.text
+
+
+def test_region_mask_artifact_unknown_id_404(tmp_path):
+    """A well-formed but non-existent region mask id returns 404 (not 200)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.get("/png-shader/runs/run_parent/artifacts/mask:never_created")
+    assert resp.status_code == 404, resp.text
+
+
 def test_region_mask_out_of_bounds_rect_422(tmp_path):
     """Out-of-bounds rect (x+w > 1) → 422 with region_errors mentioning region_id."""
     _run_store.clear()

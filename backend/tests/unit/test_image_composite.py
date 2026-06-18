@@ -13,7 +13,7 @@ import pytest
 from PIL import Image
 
 from app.pipeline.fusion_plans import FusionRegion
-from app.pipeline.image_composite import build_composite_target
+from app.pipeline.image_composite import _build_rect_mask, build_composite_target
 
 
 # ---------------------------------------------------------------------------
@@ -454,3 +454,101 @@ class TestNonRectRegion:
         # Base should be preserved since only geometry_type "rect" is supported
         arr = _load_rgb_array(out)
         assert arr[:, :, 0].min() > 0.9, "Non-rect region should be skipped, base preserved"
+
+
+class TestBuildRectMaskFeatherCap:
+    """Bug 1: feather must be capped to the rect interior so small regions
+    still reach full strength (max == 1.0), instead of being silently zeroed.
+    """
+
+    def test_small_rect_with_large_feather_not_zeroed(self) -> None:
+        """A ~10px-wide rect with feather_px=5 must have a non-empty core (max==1.0),
+        not an all-zero mask.
+        """
+        mask = _build_rect_mask(1, 10, 0.0, 0.0, 0.2, 1.0, feather_px=5)
+        assert mask.max() == 1.0, (
+            f"Small rect mask must reach full strength, got max={mask.max()}"
+        )
+
+    def test_51px_rect_with_40px_feather_reaches_one(self) -> None:
+        """A 51px-wide rect with a 40px feather must still reach 1.0 in its center."""
+        mask = _build_rect_mask(512, 512, 0.0, 0.0, 51 / 512, 1.0, feather_px=40)
+        assert mask.max() == 1.0, (
+            f"51px rect with 40px feather must reach 1.0, got max={mask.max()}"
+        )
+        # Center column of the rect interior should be exactly 1.0.
+        x0 = int(round(0.0 * 512))
+        x1 = int(round((51 / 512) * 512))
+        cx = (x0 + x1) // 2
+        assert mask[256, cx] == 1.0
+
+    def test_large_rect_small_feather_unchanged(self) -> None:
+        """A large rect with a small feather is unaffected by the cap:
+        interior reaches 1.0 and the feather ramp still produces intermediate values.
+        """
+        mask = _build_rect_mask(200, 200, 0.2, 0.2, 0.6, 0.6, feather_px=10)
+        assert mask.max() == 1.0
+        # Deep interior is full strength.
+        assert mask[100, 100] == 1.0
+        # A point one pixel inside the left edge (x0=40) is on the ramp → intermediate.
+        intermediate = (mask > 0.0) & (mask < 1.0)
+        assert intermediate.any(), "Small feather on a large rect must still ramp"
+
+
+class TestRegionStatus:
+    """Bug 2: build_composite_target must report which regions were applied
+    vs skipped (and why), without changing the composite output or breaking
+    the Path-returning contract.
+    """
+
+    def test_return_is_still_path(self, tmp_path: Path) -> None:
+        base = _solid_png(tmp_path / "base.png", (255, 0, 0, 255))
+        out = build_composite_target(
+            base_render_path=base,
+            source_render_paths={},
+            regions=[],
+            output_dir=tmp_path / "out",
+        )
+        assert isinstance(out, Path)
+        assert out.name == "composite_target.png"
+
+    def test_status_marks_applied_and_skipped(self, tmp_path: Path) -> None:
+        """One normal region (applied) + one degenerate zero-area region (skipped)."""
+        base = _solid_png(tmp_path / "base.png", (255, 0, 0, 255))
+        source = _solid_png(tmp_path / "src.png", (0, 0, 255, 255))
+        regions = [
+            _make_region("r_ok", "run_a", 0.25, 0.25, 0.5, 0.5, strength=1.0, feather=0.0),
+            # Zero width → degenerate / empty rect → contributes nothing.
+            _make_region("r_empty", "run_a", 0.5, 0.5, 0.0, 0.4, strength=1.0, feather=0.0),
+        ]
+        out = build_composite_target(
+            base_render_path=base,
+            source_render_paths={"run_a": source},
+            regions=regions,
+            output_dir=tmp_path / "out",
+        )
+        status = out.region_status
+        assert len(status) == 2
+        # First region applied.
+        assert status[0]["index"] == 0
+        assert status[0]["region_id"] == "r_ok"
+        assert status[0]["applied"] is True
+        # Second region skipped with a reason.
+        assert status[1]["index"] == 1
+        assert status[1]["region_id"] == "r_empty"
+        assert status[1]["applied"] is False
+        assert status[1]["reason"]
+
+    def test_status_marks_missing_source_skipped(self, tmp_path: Path) -> None:
+        base = _solid_png(tmp_path / "base.png", (255, 0, 0, 255))
+        region = _make_region("r_missing", "run_ghost", 0.0, 0.0, 1.0, 1.0)
+        out = build_composite_target(
+            base_render_path=base,
+            source_render_paths={},
+            regions=[region],
+            output_dir=tmp_path / "out",
+        )
+        status = out.region_status
+        assert len(status) == 1
+        assert status[0]["applied"] is False
+        assert "source" in status[0]["reason"].lower()

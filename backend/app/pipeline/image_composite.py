@@ -28,6 +28,20 @@ PathLike = Union[str, Path]
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:\-]+$")
 
 
+class CompositeTargetPath(type(Path())):  # type: ignore[misc]
+    """A ``Path`` to ``composite_target.png`` that also carries per-region status.
+
+    Behaves exactly like a :class:`pathlib.Path` (``isinstance(x, Path)`` is
+    True, ``.name`` / ``.parent`` / ``.exists()`` all work) so existing callers
+    that treat the return value as a plain path are unaffected. The extra
+    ``region_status`` attribute lets callers surface which regions were applied
+    vs skipped (and why) without changing the composite output.
+    """
+
+    # Default so the attribute always exists even if not populated.
+    region_status: list[dict] = []
+
+
 def _build_rect_mask(
     H: int,
     W: int,
@@ -80,18 +94,40 @@ def _build_rect_mask(
         mask[y0:y1, x0:x1] = 1.0
         return mask
 
+    # Cap the feather to the rect interior, per axis, BEFORE building the ramp.
+    # The per-pixel distance-to-interior is ``min(idx - lo, hi - idx - 1)``; the
+    # most-interior pixel along an axis of extent ``n`` reaches a distance of
+    # ``(n - 1) // 2``. For that pixel to hit full strength the ramp may use at
+    # most that many pixels, so cap ``feather`` to ``(n - 1) // 2``. Without
+    # this, a rect narrower than ``2 * feather_px`` never reaches 1.0 and a
+    # small enough one is zeroed entirely. When an axis is too thin to fit any
+    # ramp (extent <= 2px → cap of 0) we fall back to a hard edge on that axis
+    # rather than re-zeroing the region.
+    rw_px = x1 - x0
+    rh_px = y1 - y0
+    col_feather = min(feather_px, (rw_px - 1) // 2)
+    row_feather = min(feather_px, (rh_px - 1) // 2)
+
     # Signed distance-to-interior along each axis, in pixels.
-    # Positive = inside the rect; clipped to [0, feather_px].
+    # Positive = inside the rect; clipped to [0, feather_eff].
     # col ramp: distance from left edge and right edge
     dist_left  = col_idx - x0           # positive inside, negative outside left
     dist_right = x1 - col_idx - 1.0     # positive inside, negative outside right
     col_dist = np.minimum(dist_left, dist_right)
-    col_ramp = np.clip(col_dist, 0.0, feather_px) / feather_px  # [0,1]
+    if col_feather <= 0:
+        # Too thin to feather → hard edge inside [x0, x1).
+        col_ramp = (col_dist >= 0.0).astype(np.float32)
+    else:
+        col_ramp = np.clip(col_dist, 0.0, col_feather) / col_feather  # [0,1]
 
     dist_top    = row_idx - y0
     dist_bottom = y1 - row_idx - 1.0
     row_dist = np.minimum(dist_top, dist_bottom)
-    row_ramp = np.clip(row_dist, 0.0, feather_px) / feather_px  # [0,1]
+    if row_feather <= 0:
+        # Too thin to feather → hard edge inside [y0, y1).
+        row_ramp = (row_dist >= 0.0).astype(np.float32)
+    else:
+        row_ramp = np.clip(row_dist, 0.0, row_feather) / row_feather  # [0,1]
 
     # 2D mask = min of the two 1D ramps (rectangular feather on all 4 sides)
     mask = np.minimum(col_ramp[np.newaxis, :], row_ramp[:, np.newaxis])
@@ -104,13 +140,17 @@ def build_composite_target(
     source_render_paths: dict[str, Path],
     regions: list[FusionRegion],
     output_dir: PathLike,
-) -> Path:
+) -> "CompositeTargetPath":
     """Composite source renders into the base over feathered rects.
 
     Returns
     -------
-    Path
-        ``output_dir/composite_target.png`` — always written (even with no regions).
+    CompositeTargetPath
+        ``output_dir/composite_target.png`` — always written (even with no
+        regions). This is a :class:`pathlib.Path` subclass; its
+        ``region_status`` attribute holds a per-region list of
+        ``{"index", "region_id", "applied", "reason"}`` dicts so callers can
+        surface which regions were applied vs skipped (and why).
 
     Side effects
     ------------
@@ -129,14 +169,27 @@ def build_composite_target(
     # Work in float; preserve base alpha channel throughout
     composite = base.copy()  # shape (H, W, 4), float32
 
-    for region in regions:
+    # Per-region applied/skipped status, surfaced via the returned path.
+    region_status: list[dict] = []
+
+    def _record(region, index: int, applied: bool, reason: str = "") -> None:
+        region_status.append({
+            "index": index,
+            "region_id": getattr(region, "id", None),
+            "applied": applied,
+            "reason": reason,
+        })
+
+    for index, region in enumerate(regions):
         # Only "rect" geometry type is supported in V4.5
         if region.geometry_type != "rect":
+            _record(region, index, False, f"unsupported geometry_type '{region.geometry_type}'")
             continue
 
         # Resolve source — skip if not in dict
         source_path = source_render_paths.get(region.source_run_id)
         if source_path is None:
+            _record(region, index, False, f"source run '{region.source_run_id}' not provided")
             continue
 
         # Load and resize source to match base
@@ -151,6 +204,7 @@ def build_composite_target(
             rw = float(g["w"])
             rh = float(g["h"])
         except (KeyError, TypeError, ValueError):
+            _record(region, index, False, "invalid rect geometry")
             continue
 
         # Compute feather in pixels (at least 1 if feather > 0, else 0)
@@ -167,6 +221,12 @@ def build_composite_target(
         strength = float(np.clip(region.strength, 0.0, 1.0))
         mask = mask * strength  # still in [0, 1]
 
+        # A degenerate (zero-area) rect or zero strength contributes nothing —
+        # report it as skipped so callers know the source was dropped.
+        if not bool(mask.any()):
+            _record(region, index, False, "degenerate region (empty mask, no contribution)")
+            continue
+
         # Blend RGB channels: composite*(1-mask) + source*mask
         m = mask[:, :, np.newaxis]  # (H, W, 1) for broadcasting
         composite[:, :, :3] = (
@@ -181,9 +241,12 @@ def build_composite_target(
             mask_img = Image.fromarray(mask_uint8, mode="L")
             mask_img.save(masks_dir / f"{region.id}.png")
 
+        _record(region, index, True, "")
+
     # Save composite as RGBA PNG
     composite_uint8 = (np.clip(composite, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-    out_path = output_dir / "composite_target.png"
+    out_path = CompositeTargetPath(output_dir / "composite_target.png")
     Image.fromarray(composite_uint8, mode="RGBA").save(out_path)
 
+    out_path.region_status = region_status
     return out_path
