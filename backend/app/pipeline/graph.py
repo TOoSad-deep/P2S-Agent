@@ -49,6 +49,7 @@ from app.metrics.quality_router import compute_final_score
 from app.pipeline.scoring import (
     _accept_improvement,
     _evaluate_glsl_with_webgl,
+    _gate_quality_score,
     _make_render_dsl_fn,
     _make_render_glsl_fn,
     _make_revision_scorer,
@@ -673,6 +674,15 @@ def _run_post_pipeline(
             })
         except Exception:
             logger.warning("publish_partial (pre-refine) failed", exc_info=True)
+
+    # The refinement gate is an ABSOLUTE quality check. A VLM near-tie may have
+    # bumped selected.final_score purely to win SORTING in select_best_candidate;
+    # re-sync it to the true objective score (quality_router['final_score']) so a
+    # candidate below refinement_threshold cannot be bumped over it and silently
+    # skip refinement. Legitimate optimizer/revision gains keep both in sync, so
+    # this only strips the ordering-only tie-break adjustment.
+    if selected is not None:
+        selected.final_score = _gate_quality_score(selected)
 
     should_refine, refinement_decision = _should_run_refinement(
         effective_refinement_mode,

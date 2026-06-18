@@ -103,6 +103,31 @@ def save_plan(
     return target
 
 
+def update_plan_status(
+    fusion_id: str,
+    status: str,
+    *,
+    updated_at: "float | None" = None,
+    root: "Path | str | None" = None,
+) -> "FusionPlanRecord | None":
+    """Load ``<fusion_id>.json``, set its ``status`` (and ``updated_at``), and
+    re-save it atomically.
+
+    Returns the updated record, or ``None`` if the plan does not exist (or could
+    not be loaded). Intended for best-effort terminal transitions from the
+    pipeline worker, so callers should treat a ``None`` result as a no-op rather
+    than an error.
+    """
+    record = load_plan(fusion_id, root=root)
+    if record is None:
+        return None
+    record.status = status
+    if updated_at is not None:
+        record.updated_at = updated_at
+    save_plan(record, root=root)
+    return record
+
+
 def load_plan(
     fusion_id: str,
     *,

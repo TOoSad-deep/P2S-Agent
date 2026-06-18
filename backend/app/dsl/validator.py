@@ -6,6 +6,7 @@ Returns structured validation results, never raises on bad input.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from app.dsl.schema import (
@@ -144,12 +145,24 @@ def validate_dsl(dsl: dict) -> ValidationResult:
                             f"got {opacity}"
                         )
 
-                # params warning
-                if "params" not in layer:
+                # params (value-level): center/radius/size/ab/sides/etc.
+                if "params" in layer:
+                    params = layer["params"]
+                    if not isinstance(params, dict):
+                        errors.append(f"{layer_prefix}: 'params' must be a dict")
+                    else:
+                        _validate_params(
+                            params, layer.get("type"), layer_prefix, errors
+                        )
+                else:
                     layer_id_str = layer.get("id", f"index {idx}")
                     warnings.append(
                         f"Layer '{layer_id_str}': missing recommended field 'params'"
                     )
+
+                # transform (value-level): scale/rotate/translate shape
+                if layer.get("transform") is not None:
+                    _validate_transform(layer["transform"], layer_prefix, errors)
 
     valid = len(errors) == 0
     return ValidationResult(valid=valid, errors=errors, warnings=warnings)
@@ -175,6 +188,12 @@ def _validate_linear_gradient(fill: dict, layer_prefix: str, errors: list[str]) 
                     errors.append(
                         f"{layer_prefix}: linearGradient stop[{sidx}] must have "
                         "'color' and 'position'"
+                    )
+                else:
+                    _validate_stop_position(
+                        stop["position"],
+                        f"{layer_prefix}: linearGradient stop[{sidx}]",
+                        errors,
                     )
 
     if "direction" not in fill:
@@ -208,6 +227,12 @@ def _validate_radial_gradient(fill: dict, layer_prefix: str, errors: list[str]) 
                         f"{layer_prefix}: radialGradient stop[{sidx}] must have "
                         "'color' and 'position'"
                     )
+                else:
+                    _validate_stop_position(
+                        stop["position"],
+                        f"{layer_prefix}: radialGradient stop[{sidx}]",
+                        errors,
+                    )
 
     if "center" not in fill:
         errors.append(f"{layer_prefix}: radialGradient fill missing 'center'")
@@ -217,3 +242,105 @@ def _validate_radial_gradient(fill: dict, layer_prefix: str, errors: list[str]) 
             errors.append(
                 f"{layer_prefix}: radialGradient 'center' must be [cx, cy]"
             )
+
+
+# ---------------------------------------------------------------------------
+# Value-level helpers (Bug 1)
+#
+# These reject schema-valid-but-numerically-bad DSLs before they reach the
+# compiler, where bad values would otherwise raise (crashing a worker) or
+# compile success=True to GLSL that diverges from the raster renderer.
+# ---------------------------------------------------------------------------
+
+def _is_finite_number(v) -> bool:
+    """True iff v is a real, finite number (rejects bool, inf, nan, strings)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    return math.isfinite(float(v))
+
+
+def _validate_finite(v, label: str, errors: list[str]) -> None:
+    if not _is_finite_number(v):
+        errors.append(f"{label} must be a finite number, got {v!r}")
+
+
+def _validate_number_pair(v, label: str, errors: list[str]) -> None:
+    """Validate a 2-element list/tuple of finite numbers (center/size/ab/etc.)."""
+    if not isinstance(v, (list, tuple)) or len(v) != 2:
+        errors.append(f"{label} must be a list of 2 numbers, got {v!r}")
+        return
+    for i, component in enumerate(v):
+        if not _is_finite_number(component):
+            errors.append(
+                f"{label}[{i}] must be a finite number, got {component!r}"
+            )
+
+
+def _validate_stop_position(pos, label: str, errors: list[str]) -> None:
+    """Gradient stop position must be a finite number in [0, 1]."""
+    if not _is_finite_number(pos):
+        errors.append(f"{label}: 'position' must be a number in [0, 1], got {pos!r}")
+    elif not (0.0 <= float(pos) <= 1.0):
+        errors.append(f"{label}: 'position' must be in [0, 1], got {pos}")
+
+
+def _validate_params(params: dict, ptype, layer_prefix: str, errors: list[str]) -> None:
+    """Value-level checks for a layer's params dict, keyed by primitive type."""
+    if "center" in params:
+        _validate_number_pair(params["center"], f"{layer_prefix}: params 'center'", errors)
+
+    if ptype == "circle":
+        if "radius" in params:
+            _validate_finite(params["radius"], f"{layer_prefix}: params 'radius'", errors)
+    elif ptype == "ellipse":
+        if "ab" in params:
+            _validate_number_pair(params["ab"], f"{layer_prefix}: params 'ab'", errors)
+    elif ptype in ("box", "roundedBox"):
+        if "size" in params:
+            _validate_number_pair(params["size"], f"{layer_prefix}: params 'size'", errors)
+        if ptype == "roundedBox" and "radius" in params:
+            _validate_finite(params["radius"], f"{layer_prefix}: params 'radius'", errors)
+    elif ptype == "ring":
+        if "radius" in params:
+            _validate_finite(params["radius"], f"{layer_prefix}: params 'radius'", errors)
+        if "thickness" in params:
+            _validate_finite(params["thickness"], f"{layer_prefix}: params 'thickness'", errors)
+    elif ptype == "polygon":
+        if "radius" in params:
+            _validate_finite(params["radius"], f"{layer_prefix}: params 'radius'", errors)
+        if "sides" in params:
+            sides = params["sides"]
+            if isinstance(sides, bool) or not isinstance(sides, int):
+                errors.append(
+                    f"{layer_prefix}: params 'sides' must be an int >= 3, got {sides!r}"
+                )
+            elif sides < 3:
+                errors.append(
+                    f"{layer_prefix}: params 'sides' must be >= 3, got {sides}"
+                )
+
+
+def _validate_transform(transform, layer_prefix: str, errors: list[str]) -> None:
+    """Value-level checks for a layer's transform (translate/rotate/scale)."""
+    if not isinstance(transform, dict):
+        errors.append(f"{layer_prefix}: 'transform' must be a dict or null")
+        return
+
+    ttype = transform.get("type")
+    if ttype == "translate":
+        for axis in ("x", "y"):
+            if axis in transform:
+                _validate_finite(
+                    transform[axis], f"{layer_prefix}: transform translate '{axis}'", errors
+                )
+    elif ttype == "rotate":
+        if "angle" in transform:
+            _validate_finite(
+                transform["angle"], f"{layer_prefix}: transform rotate 'angle'", errors
+            )
+    elif ttype == "scale":
+        for axis in ("x", "y"):
+            if axis in transform:
+                _validate_finite(
+                    transform[axis], f"{layer_prefix}: transform scale '{axis}'", errors
+                )

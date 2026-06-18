@@ -6,6 +6,7 @@ Schema-valid input that fails to compile is a compiler bug.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -49,13 +50,23 @@ float sdPolygon(vec2 p, float r, int n) { float a = atan(p.x, p.y) + 3.14159265;
 # ---------------------------------------------------------------------------
 
 def _hex_to_rgb(hex_color: str) -> tuple[float, float, float]:
-    """Convert a CSS hex color string to (r, g, b) floats in [0, 1]."""
-    h = hex_color.lstrip("#")
+    """Convert a CSS hex color string to (r, g, b) floats in [0, 1].
+
+    Accepts #RGB, #RRGGBB, and #RRGGBBAA. For 8-digit RGBA the alpha is
+    dropped and the leading RGB is used (collapsing to white was a bug that
+    also diverged from the renderer). Unparseable colors fall back to white.
+    """
+    h = str(hex_color).lstrip("#")
     if len(h) == 3:
         h = h[0] * 2 + h[1] * 2 + h[2] * 2
+    elif len(h) == 8:
+        h = h[0:6]
     if len(h) != 6:
         h = "ffffff"
-    return int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0
+    try:
+        return int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0
+    except ValueError:
+        return 1.0, 1.0, 1.0
 
 
 def _hex_to_vec3(hex_color: str) -> str:
@@ -65,8 +76,18 @@ def _hex_to_vec3(hex_color: str) -> str:
 
 
 def _float(v) -> str:
-    """Format a number as a GLSL float literal."""
-    return f"{float(v):.6f}"
+    """Format a number as a GLSL float literal.
+
+    Non-finite values (inf/nan) have no valid GLSL float literal — emitting
+    'inf'/'nan' produces a shader that fails to link. Clamp them to a finite
+    sentinel (0.0) so the compiler always emits parseable GLSL. Callers that
+    care surface a warning/error separately; value-level validation
+    (validate_dsl) rejects non-finite numerics up front.
+    """
+    f = float(v)
+    if not math.isfinite(f):
+        f = 0.0
+    return f"{f:.6f}"
 
 
 def _vec2(lst) -> str:
@@ -175,8 +196,13 @@ def _generate_param_defines(dsl: dict) -> str:
             elif ttype == "rotate":
                 lines.append(f"#define {_define_name(idx, 'rotate_angle')} {_float(transform.get('angle', 0.0))}")
             elif ttype == "scale":
-                lines.append(f"#define {_define_name(idx, 'scale_x')} {_float(transform.get('x', 1.0))}")
-                lines.append(f"#define {_define_name(idx, 'scale_y')} {_float(transform.get('y', 1.0))}")
+                # Mirror the renderer's `float(...) or 1.0`: a zero scale would
+                # emit `p /= vec2(0.0, ...)` (div-by-zero); the renderer guards
+                # it by falling back to 1.0, so the compiler must too.
+                sx = float(transform.get("x", 1.0)) or 1.0
+                sy = float(transform.get("y", 1.0)) or 1.0
+                lines.append(f"#define {_define_name(idx, 'scale_x')} {_float(sx)}")
+                lines.append(f"#define {_define_name(idx, 'scale_y')} {_float(sy)}")
 
         for eidx, effect in enumerate(layer.get("effects", []) or []):
             if not isinstance(effect, dict):
@@ -224,7 +250,9 @@ def _sdf_for_layer(layer: dict, var: str, idx: int = 0) -> str:
         return f"float {var} = sdRing(p, {_define_name(idx, 'radius')}, {_define_name(idx, 'thickness')});"
 
     elif ptype == "polygon":
-        n = int((layer.get("params") or {}).get("sides", 6))
+        # Mirror the renderer's max(3, int(sides)): fewer than 3 sides makes
+        # sdPolygon divide by float(n)==0 in GLSL (success=True, broken shader).
+        n = max(3, int((layer.get("params") or {}).get("sides", 6)))
         return f"float {var} = sdPolygon(p, {_define_name(idx, 'radius')}, {n});"
 
     else:
@@ -471,7 +499,21 @@ def compile_dsl(dsl: dict) -> CompileResult:
             layer_errors[layer_id] = msg
             errors.append(f"[{layer_id}] {msg}")
 
-    param_defines = _generate_param_defines(dsl)
+    # _generate_param_defines coerces param values with float()/int() and can
+    # raise TypeError/ValueError on schema-valid-but-bad input (e.g. radius=
+    # 'big', center=0.5). It runs outside the per-layer try/except above, so an
+    # unguarded call would propagate and crash the scoring/refinement worker
+    # thread. compile_dsl must ALWAYS return a CompileResult.
+    try:
+        param_defines = _generate_param_defines(dsl)
+    except Exception as exc:
+        errors.append(f"param define generation error: {exc}")
+        return CompileResult(
+            glsl=_background_only_shader(bg_color),
+            success=False,
+            errors=errors,
+            layer_errors=layer_errors,
+        )
 
     main_lines = [
         "void main() {",

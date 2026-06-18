@@ -1,6 +1,23 @@
 // shader-renderer.ts
 import * as THREE from "three";
 
+/**
+ * Per-frame decision for the value written to `u_time`.
+ *
+ * When `frozenTime` is non-null the shader time is pinned to that value
+ * (deterministic control via setTime()/__setShaderTime), so the free-running
+ * clock cannot overwrite it. When it is null the running clock value is used.
+ *
+ * Note: 0 and negative values are valid frozen times — only `null` means
+ * "not frozen", so this must NOT use a truthiness check.
+ */
+export function nextShaderTime(
+  frozenTime: number | null,
+  clockElapsed: number,
+): number {
+  return frozenTime !== null ? frozenTime : clockElapsed;
+}
+
 const VERTEX_SHADER = `
 varying vec2 vUv;
 void main() {
@@ -49,6 +66,10 @@ export class ShaderRenderer {
   private userTexture: THREE.Texture | null = null;
   private defaultTexture: THREE.Texture;
   private onFrameCallback: (() => void) | null = null;
+  // When non-null, u_time is pinned to this value (deterministic control via
+  // setTime()/__setShaderTime) and the rAF loop must not overwrite it with the
+  // free-running clock. null = follow the running clock.
+  private frozenTime: number | null = null;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -149,7 +170,12 @@ export class ShaderRenderer {
       this.animationId = requestAnimationFrame(animate);
       if (this.mesh) {
         const mat = (this.mesh.material as THREE.ShaderMaterial);
-        mat.uniforms.u_time.value = this.clock.getElapsedTime();
+        // Respect a frozen time so setTime()/__setShaderTime survives across
+        // frames; otherwise track the running clock.
+        mat.uniforms.u_time.value = nextShaderTime(
+          this.frozenTime,
+          this.clock.getElapsedTime(),
+        );
         mat.uniforms.u_resolution.value.set(
           this.renderer.domElement.width,
           this.renderer.domElement.height
@@ -182,12 +208,20 @@ export class ShaderRenderer {
   }
 
   setTime(t: number) {
-    // 设置渲染时间（供 Playwright 截图时控制动画帧）
+    // 设置渲染时间（供 Playwright 截图时控制动画帧）。
+    // Freeze the time so the rAF loop can't overwrite it with the running
+    // clock on the next frame — required for deterministic screenshots.
+    this.frozenTime = t;
     if (this.mesh) {
       const mat = (this.mesh.material as THREE.ShaderMaterial);
       mat.uniforms.u_time.value = t;
     }
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /** Resume the free-running clock after a setTime() freeze. */
+  unfreezeTime() {
+    this.frozenTime = null;
   }
 
   resize(width: number, height: number) {
@@ -200,6 +234,23 @@ export class ShaderRenderer {
 
   dispose() {
     this.stopRendering();
+
+    // Free GPU resources that the renderer's own dispose() does not own:
+    // the current mesh, and every texture this instance allocated. Leaking
+    // these (especially the default CanvasTexture) contributes to WebGL
+    // context/texture exhaustion over long sessions.
+    if (this.mesh) {
+      this.scene.remove(this.mesh);
+      this.mesh.geometry.dispose();
+      (this.mesh.material as THREE.ShaderMaterial).dispose();
+      this.mesh = null;
+    }
+    this.defaultTexture.dispose();
+    this.backdropTexture?.dispose();
+    this.backdropTexture = null;
+    this.userTexture?.dispose();
+    this.userTexture = null;
+
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }

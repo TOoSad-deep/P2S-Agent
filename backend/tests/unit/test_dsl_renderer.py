@@ -29,3 +29,11 @@ def test_render_dsl_to_image_handles_gradient_fill(tmp_path):
     colors = img.getcolors(maxcolors=4096)
     assert colors is not None
     assert len(colors) > 2
+
+
+def test_renderer_hex_to_rgb_parses_8_digit_rgba():
+    """Bug 4 mirror: the renderer's _hex_to_rgb must parse the RGB part of an
+    8-digit #RRGGBBAA color (matching the compiler), not collapse to white."""
+    from app.dsl.renderer import _hex_to_rgb
+
+    assert _hex_to_rgb("#112233ff") == (0x11, 0x22, 0x33)

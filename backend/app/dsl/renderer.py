@@ -307,9 +307,16 @@ def _smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    """Mirror of the compiler's _hex_to_rgb (in 0-255 space).
+
+    Accepts #RGB, #RRGGBB, and #RRGGBBAA; for 8-digit RGBA the alpha is
+    dropped and the leading RGB is used so compiler and renderer agree.
+    """
     h = str(hex_color).lstrip("#")
     if len(h) == 3:
         h = h[0] * 2 + h[1] * 2 + h[2] * 2
+    elif len(h) == 8:
+        h = h[0:6]
     if len(h) != 6:
         h = "ffffff"
     try:

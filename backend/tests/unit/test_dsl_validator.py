@@ -134,3 +134,81 @@ def test_validate_warns_missing_params():
     # Should still be valid (params is optional) but produce a warning
     assert result.valid is True
     assert any("params" in w.lower() for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Value-level param validation (Bug 1)
+# ---------------------------------------------------------------------------
+
+def test_validate_center_must_be_two_numbers():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["params"]["center"] = 0.5
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("center" in e for e in result.errors)
+
+
+def test_validate_radius_must_be_number():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["params"]["radius"] = "big"
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("radius" in e for e in result.errors)
+
+
+def test_validate_polygon_sides_must_be_int_ge_3():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["type"] = "polygon"
+    dsl["layers"][0]["params"] = {"center": [0.5, 0.5], "radius": 0.3, "sides": 2}
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("sides" in e for e in result.errors)
+
+
+def test_validate_radius_must_be_finite():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["params"]["radius"] = float("inf")
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("radius" in e or "finite" in e for e in result.errors)
+
+
+def test_validate_gradient_stop_position_must_be_numeric():
+    dsl = _clone(FIXTURE_BOX_GRADIENT)
+    dsl["layers"][0]["fill"]["stops"][0]["position"] = "start"
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("position" in e for e in result.errors)
+
+
+def test_validate_gradient_stop_position_must_be_in_unit_range():
+    dsl = _clone(FIXTURE_BOX_GRADIENT)
+    dsl["layers"][0]["fill"]["stops"][0]["position"] = 1.5
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("position" in e for e in result.errors)
+
+
+def test_validate_size_must_be_two_numbers():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["type"] = "box"
+    dsl["layers"][0]["params"] = {"center": [0.5, 0.5], "size": [0.3, "wide"]}
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("size" in e for e in result.errors)
+
+
+def test_validate_scale_transform_must_be_numeric():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["transform"] = {"type": "scale", "x": "nope", "y": 1.0}
+    result = validate_dsl(dsl)
+    assert result.valid is False
+    assert any("scale" in e or "transform" in e for e in result.errors)
+
+
+def test_validate_good_polygon_still_valid():
+    dsl = _clone(FIXTURE_CIRCLE_SOLID)
+    dsl["layers"][0]["type"] = "polygon"
+    dsl["layers"][0]["params"] = {"center": [0.5, 0.5], "radius": 0.3, "sides": 6}
+    result = validate_dsl(dsl)
+    assert result.valid is True, result.errors

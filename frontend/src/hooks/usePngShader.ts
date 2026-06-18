@@ -30,6 +30,7 @@ import {
   type StrategyMode,
 } from "../lib/strategy-presets";
 import { logFrontendEvent, makeRequestId } from "../lib/logger";
+import { shouldKeepPolling, mergeStrategyFromServer } from "../lib/runStatus";
 import type { ModelSelection } from "../lib/models";
 
 export interface LlmIO {
@@ -442,11 +443,19 @@ export function usePngShader() {
   const [result, setResult] = useState<PngShaderResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bug 4: side-panel operations (draw sessions, fusion) get a SEPARATE error
+  // channel so their failures don't overwrite / conflate with the main run
+  // error shown for the active pipeline run.
+  const [sidePanelError, setSidePanelError] = useState<string | null>(null);
   const [llmMode, setLlmMode] = useState<LlmMode>("off");
   const [strategy, setStrategy] = useState<StrategyConfig>(FALLBACK_DEFAULT_STRATEGY);
   const [stopPending, setStopPending] = useState(false);
   const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunRef = useRef<string | null>(null);
+  // Field keys with an un-acked local strategy PATCH in flight. The poll
+  // back-sync skips these so a slider edited mid-run is not clobbered by the
+  // server's stale value (Bug 3 last-writer race).
+  const pendingPatchRef = useRef<Partial<StrategyConfig>>({});
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
@@ -473,13 +482,20 @@ export function usePngShader() {
       if (activeRunRef.current !== id) return;
 
       setResult(data);
-      if (data.status === "running") {
-        // Spec §5.2: sync server strategy back so multi-client edits stay coherent
+      // Bug 1: keep polling for ALL non-terminal phases (running/queued/
+      // acquired/pending). Backend emits queued/acquired for variant/draw
+      // children that are not yet terminal; treating them as terminal froze
+      // the result view at the queued snapshot.
+      if (shouldKeepPolling(data.status)) {
+        // Spec §5.2: sync server strategy back so multi-client edits stay
+        // coherent — but Bug 3: skip keys with an un-acked local PATCH so a
+        // slider edited mid-run is not clobbered by the server's stale value.
         if (data.strategy && typeof data.strategy === "object") {
+          const pendingKeys = new Set(Object.keys(pendingPatchRef.current));
           setStrategy((prev) => {
-            const merged = { ...prev, ...data.strategy };
-            merged.mode = detectMode(merged as StrategyConfig);
-            return merged as StrategyConfig;
+            const merged = mergeStrategyFromServer(prev, data.strategy, pendingKeys);
+            merged.mode = detectMode(merged);
+            return merged;
           });
         }
         pollingRef.current = setTimeout(() => pollStatus(id), 1000);
@@ -565,7 +581,7 @@ export function usePngShader() {
       setResult(data);
       activeRunRef.current = data.run_id;
 
-      if (data.status === "running") {
+      if (shouldKeepPolling(data.status)) {
         pollingRef.current = setTimeout(() => pollStatus(data.run_id), 1000);
         return;
       }
@@ -582,8 +598,6 @@ export function usePngShader() {
       setLoading(false);
     }
   }, [llmMode, strategy, pollStatus, stopPolling]);
-
-  const pendingPatchRef = useRef<Partial<StrategyConfig>>({});
 
   // runIdRef keeps the latest runId accessible inside the stable debounced
   // callback without re-creating the debounce timer on every render.
@@ -643,6 +657,14 @@ export function usePngShader() {
         headers: { "x-request-id": requestId, "x-run-id": id },
       });
       logFrontendEvent("api_stop_run", { request_id: requestId, run_id: id, status: response.status }, response.ok ? "info" : "warn");
+      // Bug 2: fetch() does not throw on 4xx/5xx, so a rejected stop would skip
+      // the catch and leave stopPending stuck true forever (Stop button stays
+      // permanently disabled). Re-enable the control on any non-ok response.
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        setStopPending(false);
+        setError(`Stop run failed (${response.status})${text ? `: ${text}` : ""}`);
+      }
     } catch {
       logFrontendEvent("api_stop_run_error", { run_id: id }, "warn");
       setStopPending(false);
@@ -780,7 +802,9 @@ export function usePngShader() {
       setRunId(data.run_id ?? id);
       setResult(data);
       activeRunRef.current = data.run_id ?? id;
-      if (data.status === "running") {
+      // Bug 1: queued/acquired children keep polling — double-clicking a
+      // queued node must re-poll until terminal, not freeze at the snapshot.
+      if (shouldKeepPolling(data.status)) {
         pollingRef.current = setTimeout(() => pollStatus(data.run_id ?? id), 1000);
       } else {
         activeRunRef.current = null;
@@ -830,7 +854,7 @@ export function usePngShader() {
       setRunId(data.run_id);
       setResult(data);
       activeRunRef.current = data.run_id;
-      if (data.status === "running") {
+      if (shouldKeepPolling(data.status)) {
         pollingRef.current = setTimeout(() => pollStatus(data.run_id), 1000);
       } else {
         activeRunRef.current = null;
@@ -958,14 +982,14 @@ export function usePngShader() {
       if (!response.ok) {
         const text = await response.text();
         logFrontendEvent("api_draw_session_create_failed", { request_id: requestId, parent_run_id: parentRunId, status: response.status }, "warn");
-        setError(`Create draw session failed (${response.status}): ${text}`);
+        setSidePanelError(`Create draw session failed (${response.status}): ${text}`);
         return null;
       }
       const data: CreateDrawSessionResponse = await response.json();
       return data;
     } catch (err) {
       logFrontendEvent("api_draw_session_create_failed", { parent_run_id: parentRunId, error: err instanceof Error ? err.message : String(err) }, "warn");
-      setError(err instanceof Error ? err.message : String(err));
+      setSidePanelError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
@@ -999,14 +1023,14 @@ export function usePngShader() {
       if (!response.ok) {
         const text = await response.text();
         logFrontendEvent("api_draw_more_failed", { request_id: requestId, draw_id: drawId, status: response.status }, "warn");
-        setError(`Draw more failed (${response.status}): ${text}`);
+        setSidePanelError(`Draw more failed (${response.status}): ${text}`);
         return null;
       }
       const data: DrawMoreResponse = await response.json();
       return data;
     } catch (err) {
       logFrontendEvent("api_draw_more_failed", { draw_id: drawId, error: err instanceof Error ? err.message : String(err) }, "warn");
-      setError(err instanceof Error ? err.message : String(err));
+      setSidePanelError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
@@ -1027,14 +1051,14 @@ export function usePngShader() {
       if (!response.ok) {
         const text = await response.text();
         logFrontendEvent("api_redraw_card_failed", { request_id: requestId, draw_id: drawId, run_id: runId, status: response.status }, "warn");
-        setError(`Redraw card failed (${response.status}): ${text}`);
+        setSidePanelError(`Redraw card failed (${response.status}): ${text}`);
         return null;
       }
       const data: RedrawCardResponse = await response.json();
       return data;
     } catch (err) {
       logFrontendEvent("api_redraw_card_failed", { draw_id: drawId, run_id: runId, error: err instanceof Error ? err.message : String(err) }, "warn");
-      setError(err instanceof Error ? err.message : String(err));
+      setSidePanelError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
@@ -1158,14 +1182,14 @@ export function usePngShader() {
       if (!response.ok) {
         const text = await response.text();
         logFrontendEvent("api_fusion_create_failed", { request_id: requestId, status: response.status }, "warn");
-        setError(`Create fusion failed (${response.status}): ${text}`);
+        setSidePanelError(`Create fusion failed (${response.status}): ${text}`);
         return null;
       }
       const data = await response.json();
       return data as { fusion_id: string; status: string };
     } catch (err) {
       logFrontendEvent("api_fusion_create_error", { error: err instanceof Error ? err.message : String(err) }, "warn");
-      setError(err instanceof Error ? err.message : String(err));
+      setSidePanelError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
@@ -1195,14 +1219,14 @@ export function usePngShader() {
       if (!response.ok) {
         const text = await response.text();
         logFrontendEvent("api_fusion_composite_failed", { request_id: requestId, fusion_id: fusionId, status: response.status }, "warn");
-        setError(`Generate composite target failed (${response.status}): ${text}`);
+        setSidePanelError(`Generate composite target failed (${response.status}): ${text}`);
         return null;
       }
       const data: FusionStatus = await response.json();
       return data;
     } catch (err) {
       logFrontendEvent("api_fusion_composite_error", { fusion_id: fusionId, error: err instanceof Error ? err.message : String(err) }, "warn");
-      setError(err instanceof Error ? err.message : String(err));
+      setSidePanelError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
@@ -1222,17 +1246,19 @@ export function usePngShader() {
       if (!response.ok) {
         const text = await response.text();
         logFrontendEvent("api_fusion_run_failed", { request_id: requestId, fusion_id: fusionId, status: response.status }, "warn");
-        setError(`Run fusion failed (${response.status}): ${text}`);
+        setSidePanelError(`Run fusion failed (${response.status}): ${text}`);
         return null;
       }
       const data = await response.json();
       return data as { fusion_id: string; status: string; output_run_id: string };
     } catch (err) {
       logFrontendEvent("api_fusion_run_error", { fusion_id: fusionId, error: err instanceof Error ? err.message : String(err) }, "warn");
-      setError(err instanceof Error ? err.message : String(err));
+      setSidePanelError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
+
+  const clearSidePanelError = useCallback(() => setSidePanelError(null), []);
 
   const clearResult = useCallback(() => {
     stopPolling();
@@ -1240,6 +1266,7 @@ export function usePngShader() {
     setRunId(null);
     setResult(null);
     setError(null);
+    setSidePanelError(null);
     setLoading(false);
     setStopPending(false);
   }, [stopPolling]);
@@ -1251,6 +1278,8 @@ export function usePngShader() {
     result,
     loading,
     error,
+    sidePanelError,
+    clearSidePanelError,
     runPngShader,
     parameterizeGlsl,
     clearResult,

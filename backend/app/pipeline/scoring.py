@@ -25,6 +25,27 @@ except ImportError:
     render_multiple_frames = None
 
 
+def _gate_quality_score(selected: CandidateRecord | None) -> float:
+    """Return the TRUE objective quality score used for refinement gating.
+
+    ``node_selection`` may bump a candidate's ``final_score`` by an epsilon so
+    it wins SORTING during a VLM near-tie. That bumped value is a ranking-only
+    sort key and must not gate refinement: a candidate whose objective score is
+    below ``refinement_threshold`` would otherwise be bumped over the threshold
+    and silently skip the LLM refinement loop.
+
+    The router's ``final_score`` is the un-bumped objective score (the tie-break
+    mutates only the record attribute, not ``quality_router``). Prefer it and
+    fall back to the record's ``final_score`` when no router score is present.
+    """
+    if selected is None:
+        return 0.0
+    quality = selected.quality_router
+    if quality is not None and "final_score" in quality:
+        return float(quality["final_score"])
+    return float(selected.final_score)
+
+
 def _sync_selected_record_for_response(
     selected: CandidateRecord | None,
     *,

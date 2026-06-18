@@ -8,6 +8,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import logging
@@ -15,6 +16,7 @@ import re
 import shutil
 import tempfile
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from time import time
 from typing import Optional
@@ -90,6 +92,7 @@ from app.pipeline.fusion_plans import (
     parse_fusion_plan,
     plan_to_dict,
     save_plan,
+    update_plan_status,
     validate_fusion_plan,
 )
 from app.pipeline.image_composite import build_composite_target
@@ -109,17 +112,24 @@ from app.services.logging_config import attach_run_log, log_event, logging_conte
 
 logger = logging.getLogger(__name__)
 
-_run_store: dict[str, dict] = {}
+# Insertion-ordered so that LRU eviction can prefer the least-recently-USED
+# entry. Every read/update calls ``move_to_end`` to keep ordering = recency.
+_run_store: "OrderedDict[str, dict]" = OrderedDict()
 _run_store_lock = threading.Lock()
 _MAX_STORE_SIZE = 100
+
+# Run states that are still "live" — these must never be evicted from either
+# the run store or the per-run model store, even under capacity pressure.
+_LIVE_STATUSES: frozenset[str] = frozenset({"running", "queued"})
 
 # Tests override this to isolate from the real backend/test_results/run_index.jsonl.
 _RUN_INDEX_PATH: Optional[str] = None
 
 # Resolved per-run model configs (may hold api_keys). Kept SEPARATE from
 # _run_store so the selected model — and any secret key — is never returned by
-# the client-facing /status endpoint.
-_run_models: dict[str, ModelConfig] = {}
+# the client-facing /status endpoint. Insertion-ordered for LRU eviction whose
+# lifecycle is aligned with ``_run_store`` liveness (Bug 2).
+_run_models: "OrderedDict[str, ModelConfig]" = OrderedDict()
 _run_models_lock = threading.Lock()
 
 # Metadata fields that are allowed to be patched and mirrored into the in-memory store.
@@ -163,27 +173,162 @@ def _index_updated(run_id: str, fields: dict) -> None:
         logger.warning("run index append_updated failed", exc_info=True)
 
 
+def _finalize_fusion_for_run(run_id: str, status: str) -> None:
+    """Best-effort: close out the fusion plan a finished run belongs to (Bug 5).
+
+    When a worker reaches a terminal state, if the run's lineage carries a
+    ``fusion_id`` we mark the corresponding FusionPlanRecord ``completed`` /
+    ``failed`` so ``GET /fusions/{id}`` stops reporting ``running`` forever and
+    the frontend poll terminates. Fully wrapped so a failure here can never
+    break the worker thread."""
+    try:
+        with _run_store_lock:
+            stored = _run_store.get(run_id) or {}
+            lineage = stored.get("lineage") or {}
+            fusion_id = stored.get("fusion_id") or lineage.get("fusion_id")
+        if not fusion_id:
+            return
+        update_plan_status(
+            str(fusion_id), status, updated_at=time(), root=_FUSIONS_ROOT
+        )
+    except Exception:
+        logger.warning("fusion plan finalize failed for run_id=%s", run_id, exc_info=True)
+
+
+def _run_is_live(run_id: str) -> bool:
+    """True when ``run_id`` exists in the run store with a live status.
+
+    Used to anchor the model store's eviction policy to run liveness so a
+    still-running child never falls back to the .env default model (Bug 2).
+    """
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+        return bool(stored) and stored.get("status") in _LIVE_STATUSES
+
+
+def _coerce_int(value, field_name: str, default: int, lo: int, hi: int) -> int:
+    """Coerce a JSON value to an int in ``[lo, hi]`` or raise HTTPException(422).
+
+    Replaces bare ``int(...)`` coercions on request fields so a non-numeric or
+    out-of-range value yields a clean 422 instead of an uncaught ``ValueError``
+    bubbling up as a 500 (Bug 3). ``None`` / falsy → ``default``. Bools are
+    rejected (a JSON ``true`` is not a valid count)."""
+    if value is None or value == "":
+        value = default
+    if isinstance(value, bool):
+        raise HTTPException(status_code=422, detail=f"{field_name} must be an integer")
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422, detail=f"{field_name} must be an integer, got {value!r}"
+        )
+    if coerced < lo or coerced > hi:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} must be between {lo} and {hi}, got {coerced}",
+        )
+    return coerced
+
+
 def _store_run_model(run_id: str, model_config: ModelConfig) -> None:
+    """Store a per-run model with LRU eviction that never drops a live run's model."""
     with _run_models_lock:
-        if run_id not in _run_models and len(_run_models) >= _MAX_STORE_SIZE:
-            del _run_models[next(iter(_run_models))]
+        if run_id in _run_models:
+            _run_models[run_id] = model_config
+            _run_models.move_to_end(run_id)
+            return
+        if len(_run_models) >= _MAX_STORE_SIZE:
+            _evict_one_model_locked()
         _run_models[run_id] = model_config
+
+
+def _evict_one_model_locked() -> None:
+    """Evict the least-recently-used model whose run is no longer live.
+
+    Caller must hold ``_run_models_lock``. Falls back to the LRU entry only if
+    every model belongs to a live run (avoids unbounded growth in the
+    pathological all-live case)."""
+    for candidate in list(_run_models.keys()):
+        if not _run_is_live(candidate):
+            del _run_models[candidate]
+            return
+    # Every model belongs to a live run — drop the LRU one to respect the cap.
+    _run_models.popitem(last=False)
 
 
 def _get_run_model(run_id: str) -> Optional[ModelConfig]:
     with _run_models_lock:
-        return _run_models.get(run_id)
+        model = _run_models.get(run_id)
+        if model is not None:
+            _run_models.move_to_end(run_id)
+        return model
 
 router = APIRouter(prefix="/png-shader", tags=["png-shader"])
 
 
 def _store_run(run_id: str, payload: dict) -> None:
-    """Store a PNG shader run state with bounded in-memory retention."""
+    """Store a PNG shader run state with bounded, LRU-aware retention.
+
+    Single capped setter for ALL write paths (including direct terminal/queued
+    writes). On update, moves the entry to most-recently-used. On insert past
+    the cap, evicts the least-recently-used TERMINAL entry and NEVER evicts a
+    run whose status is still live (running/queued) — so a still-running run can
+    never be evicted out from under /status, /stop, or child-lookup (Bug 1).
+    """
     with _run_store_lock:
-        if run_id not in _run_store and len(_run_store) >= _MAX_STORE_SIZE:
-            oldest_key = next(iter(_run_store))
-            del _run_store[oldest_key]
+        _store_run_locked(run_id, payload)
+
+
+def _store_run_locked(run_id: str, payload: dict) -> None:
+    """``_store_run`` body; caller must hold ``_run_store_lock``."""
+    if run_id in _run_store:
         _run_store[run_id] = payload
+        _run_store.move_to_end(run_id)
+        return
+    if len(_run_store) >= _MAX_STORE_SIZE:
+        _evict_one_run_locked()
+    _run_store[run_id] = payload
+
+
+def _evict_one_run_locked() -> None:
+    """Evict the least-recently-used TERMINAL run.
+
+    Caller must hold ``_run_store_lock``. Scans from oldest→newest and removes
+    the first entry whose status is not live. If every entry is live, no
+    eviction happens (we tolerate transient overflow rather than drop a live
+    run)."""
+    for candidate, stored in list(_run_store.items()):
+        if (stored or {}).get("status") not in _LIVE_STATUSES:
+            del _run_store[candidate]
+            return
+    # All live — do not evict; the cap is best-effort under all-live pressure.
+
+
+def _touch_run(run_id: str) -> Optional[dict]:
+    """Read a run entry and mark it most-recently-used (LRU read path).
+
+    Returns the live store dict (NOT a copy) or ``None``. Callers that hold the
+    lock and only need a snapshot should use ``_snapshot_run`` instead.
+    """
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+        if stored is not None:
+            _run_store.move_to_end(run_id)
+        return stored
+
+
+def _snapshot_run(run_id: str) -> Optional[dict]:
+    """Return a deep copy of a run entry (or None), marking it MRU.
+
+    Safe to return to clients / iterate without risking concurrent worker
+    mutation (Bug 4)."""
+    with _run_store_lock:
+        stored = _run_store.get(run_id)
+        if stored is None:
+            return None
+        _run_store.move_to_end(run_id)
+        return copy.deepcopy(stored)
 
 
 def _publish_partial_to_store(run_id: str, partial: dict) -> None:
@@ -249,41 +394,42 @@ def _run_png_shader_background(
         with _run_store_lock:
             stored = _run_store.get(run_id, {})
             stored["current_phase"] = "queued"
-            _run_store[run_id] = stored
+            _store_run_locked(run_id, stored)
             stop_early = bool(stored.get("stop_requested"))
 
         if stop_early:
             _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
             with _run_store_lock:
                 stored = _run_store.get(run_id, {})
-                _run_store[run_id] = {
+                _store_run_locked(run_id, {
                     "run_id": run_id,
                     "status": "cancelled",
                     "completed_at": time(),
                     **_variant_preserved(stored),
-                }
+                })
             if upload_dir is not None:
                 shutil.rmtree(upload_dir, ignore_errors=True)
             return
 
         variant_semaphore.acquire()
         with _run_store_lock:
-            stored = _run_store.get(run_id, {})
-            stop_after_acquire = bool(stored.get("stop_requested"))
-            if stored is not None and run_id in _run_store:
-                _run_store[run_id]["status"] = "running"
-                _run_store[run_id]["current_phase"] = "acquired"
+            stored = _run_store.get(run_id)
+            stop_after_acquire = bool((stored or {}).get("stop_requested"))
+            if stored is not None:
+                stored["status"] = "running"
+                stored["current_phase"] = "acquired"
+                _store_run_locked(run_id, stored)
 
         if stop_after_acquire:
             _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
             with _run_store_lock:
                 stored = _run_store.get(run_id, {})
-                _run_store[run_id] = {
+                _store_run_locked(run_id, {
                     "run_id": run_id,
                     "status": "cancelled",
                     "completed_at": time(),
                     **_variant_preserved(stored),
-                }
+                })
             variant_semaphore.release()
             if upload_dir is not None:
                 shutil.rmtree(upload_dir, ignore_errors=True)
@@ -374,7 +520,10 @@ def _run_png_shader_background(
                         **({"lineage": stored["lineage"]}
                            if "lineage" in stored else {}),
                     }
-                    _run_store[run_id] = {**result_with_status, **preserved}
+                    _store_run_locked(run_id, {**result_with_status, **preserved})
+                # Best-effort: close out a fusion plan record so its /fusions
+                # poll terminates instead of reporting 'running' forever (Bug 5).
+                _finalize_fusion_for_run(run_id, "completed")
                 if run_tree is not None:
                     run_tree.end(
                         outputs={
@@ -421,13 +570,15 @@ def _run_png_shader_background(
                     **({"lineage": stored["lineage"]}
                        if "lineage" in stored else {}),
                 }
-                _run_store[run_id] = {
+                _store_run_locked(run_id, {
                     "run_id": run_id,
                     "status": "failed",
                     "error": f"Pipeline error: {exc}",
                     "completed_at": time(),
                     **preserved,
-                }
+                })
+            # Best-effort fusion-plan finalization on failure (Bug 5).
+            _finalize_fusion_for_run(run_id, "failed")
         finally:
             if upload_dir is not None:
                 shutil.rmtree(upload_dir, ignore_errors=True)
@@ -614,9 +765,13 @@ async def run_png_shader(
 
 @router.get("/status/{run_id}")
 async def get_status(run_id: str) -> dict:
-    """Retrieve a cached pipeline result by run_id."""
-    with _run_store_lock:
-        result = _run_store.get(run_id)
+    """Retrieve a cached pipeline result by run_id.
+
+    Returns a deep copy taken under the store lock so a concurrent worker
+    mutation can never trigger "dictionary changed size during iteration" while
+    FastAPI serialises the response, and the caller never holds a live ref to
+    the mutable store entry (Bug 4)."""
+    result = _snapshot_run(run_id)
     if result is None:
         raise HTTPException(
             status_code=404,
@@ -632,8 +787,7 @@ async def get_checkpoints(run_id: str) -> dict:
     Works for both running and completed runs; GLSL payloads are omitted and
     re-resolved on demand by ``/branch-refine``.
     """
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    stored = _snapshot_run(run_id)
     if stored is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
     return {
@@ -654,8 +808,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    with _run_store_lock:
-        parent = _run_store.get(run_id)
+    parent = _touch_run(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -731,7 +884,11 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     quality = dict(quality_overrides)
     quality["refinement_mode"] = "on"
     quality["max_refinement_iterations"] = max(
-        int(quality.get("max_refinement_iterations", 0) or 0), 1
+        _coerce_int(
+            quality.get("max_refinement_iterations"),
+            "max_refinement_iterations", 0, 0, 20,
+        ),
+        1,
     )
 
     # Directed acceptance (V1.2): goal-driven modes may accept a small score drop
@@ -910,7 +1067,11 @@ def _create_variant_group(
         quality = dict(quality_overrides)
         quality["refinement_mode"] = "on"
         quality["max_refinement_iterations"] = max(
-            int(quality.get("max_refinement_iterations", 0) or 0), 1
+            _coerce_int(
+                quality.get("max_refinement_iterations"),
+                "max_refinement_iterations", 0, 0, 20,
+            ),
+            1,
         )
         quality["vlm_judge_enabled"] = 1
 
@@ -1065,12 +1226,13 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    with _run_store_lock:
-        parent = _run_store.get(run_id)
+    parent = _touch_run(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
-    variant_count = int(payload.get("variant_count") or 4)
+    variant_count = _coerce_int(
+        payload.get("variant_count"), "variant_count", 4, 2, _MAX_VARIANT_COUNT
+    )
     diversity = str(payload.get("diversity") or "medium")
     mode = str(payload.get("mode") or "explore")
     feedback = str(payload.get("feedback") or "")
@@ -1208,7 +1370,13 @@ def _prevalidate_draw_quality(reference_path: Path, quality: dict) -> None:
     probe = {
         **quality,
         "refinement_mode": "on",
-        "max_refinement_iterations": max(int(quality.get("max_refinement_iterations", 0) or 0), 1),
+        "max_refinement_iterations": max(
+            _coerce_int(
+                quality.get("max_refinement_iterations"),
+                "max_refinement_iterations", 0, 0, 20,
+            ),
+            1,
+        ),
         "vlm_judge_enabled": 1,
     }
     probe_spec = build_input_spec(str(reference_path), quality=probe)
@@ -1285,8 +1453,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    with _run_store_lock:
-        parent = _run_store.get(run_id)
+    parent = _touch_run(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -1294,11 +1461,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     if not feedback.strip():
         raise HTTPException(status_code=422, detail="feedback is required for draw-session")
 
-    card_count = int(payload.get("card_count") or 8)
-    if card_count < 2 or card_count > 12:
-        raise HTTPException(
-            status_code=422, detail=f"card_count must be between 2 and 12, got {card_count}"
-        )
+    card_count = _coerce_int(payload.get("card_count"), "card_count", 8, 2, 12)
 
     quality = payload.get("quality") or {}
     if not isinstance(quality, dict):
@@ -1533,8 +1696,7 @@ def _load_draw_session_or_404(draw_id: str) -> DrawSessionRecord:
 
 
 def _draw_parent_or_409(record: DrawSessionRecord) -> dict:
-    with _run_store_lock:
-        parent = _run_store.get(record.parent_run_id)
+    parent = _touch_run(record.parent_run_id)
     if parent is None:
         raise HTTPException(status_code=409, detail="parent run no longer available")
     return parent
@@ -1553,11 +1715,7 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
     record = _load_draw_session_or_404(draw_id)
     parent = _draw_parent_or_409(record)
 
-    card_count = int(payload.get("card_count") or 4)
-    if card_count < 2 or card_count > 12:
-        raise HTTPException(
-            status_code=422, detail=f"card_count must be between 2 and 12, got {card_count}"
-        )
+    card_count = _coerce_int(payload.get("card_count"), "card_count", 4, 2, 12)
 
     quality = payload.get("quality")
     if quality is None:
@@ -2020,7 +2178,7 @@ async def patch_strategy(run_id: str, payload: dict) -> dict:
 
         stored["strategy"] = merged
         stored["strategy_revision"] = int(stored.get("strategy_revision", 1)) + 1
-        _run_store[run_id] = stored
+        _store_run_locked(run_id, stored)
         return {
             "strategy": merged,
             "strategy_revision": stored["strategy_revision"],
@@ -2036,8 +2194,7 @@ async def get_timeline(run_id: str) -> dict:
     index + timeline.json on disk (if present). Never resolves a path
     when run_dir is None.
     """
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    stored = _snapshot_run(run_id)
     if stored is not None:
         return {
             "run_id": run_id,
@@ -2226,7 +2383,7 @@ async def stop_run(run_id: str) -> dict:
         if stored.get("status") not in ("running", "queued"):
             raise HTTPException(status_code=409, detail="run is not currently running")
         stored["stop_requested"] = True
-        _run_store[run_id] = stored
+        _store_run_locked(run_id, stored)
         return {"stopping": True}
 
 
@@ -2710,8 +2867,7 @@ async def create_fusion(payload: dict) -> dict:
     if not base_run_id:
         raise HTTPException(status_code=422, detail="base_run_id is required")
 
-    with _run_store_lock:
-        base = _run_store.get(base_run_id)
+    base = _touch_run(base_run_id)
     if base is None:
         raise HTTPException(status_code=404, detail=f"run_id '{base_run_id}' not found")
 
@@ -2840,8 +2996,7 @@ async def create_composite_target(fusion_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 
     # Re-resolve the base render.
-    with _run_store_lock:
-        base = _run_store.get(record.base_run_id)
+    base = _touch_run(record.base_run_id)
     if base is None:
         raise HTTPException(status_code=422, detail=f"base run '{record.base_run_id}' not found")
     base_render = _resolve_run_render(base, base.get("run_dir"))
@@ -2911,8 +3066,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 
     base_run_id = record.base_run_id
-    with _run_store_lock:
-        base = _run_store.get(base_run_id)
+    base = _touch_run(base_run_id)
     if base is None:
         raise HTTPException(status_code=422, detail=f"base run '{base_run_id}' not found")
 
@@ -2936,7 +3090,11 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
     quality = dict(quality_overrides)
     quality["refinement_mode"] = "on"
     quality["max_refinement_iterations"] = max(
-        int(quality.get("max_refinement_iterations", 0) or 0), 1
+        _coerce_int(
+            quality.get("max_refinement_iterations"),
+            "max_refinement_iterations", 0, 0, 20,
+        ),
+        1,
     )
     quality["vlm_judge_enabled"] = 1
 

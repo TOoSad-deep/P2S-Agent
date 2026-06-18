@@ -3716,3 +3716,157 @@ def test_fusion_artifacts_traversal_422(tmp_path, monkeypatch):
     fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
     resp = client.get(f"/png-shader/fusions/{fusion_id}/artifacts/region_mask:../etc")
     assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: non-integer count fields → 422 (not uncaught ValueError → 500)
+# ---------------------------------------------------------------------------
+
+def test_explore_variants_non_numeric_count_returns_422(tmp_path, monkeypatch):
+    """A non-numeric variant_count must yield 422 (validated), never a 500 from
+    an uncaught ValueError inside int(...)."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/explore-variants",
+        json={"feedback": "more color", "variant_count": "abc"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_draw_session_non_numeric_card_count_returns_422(tmp_path, monkeypatch):
+    """A non-numeric card_count must yield 422, not 500."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/draw-session",
+        json={"feedback": "warmer", "card_count": "not-a-number"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_branch_refine_non_numeric_max_iter_returns_422(tmp_path, monkeypatch):
+    """A non-numeric quality.max_refinement_iterations must yield 422, not 500."""
+    _run_store.clear()
+    _seed_parent(tmp_path)
+    client = _client()
+
+    resp = client.post(
+        "/png-shader/runs/run_parent/branch-refine",
+        json={
+            "feedback": "make it warmer and brighter overall",
+            "mode": "refine",
+            "quality": {"max_refinement_iterations": "lots"},
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: /status returns a deep copy taken under the lock (no shared mutable ref)
+# ---------------------------------------------------------------------------
+
+def test_status_returns_deep_copy_not_live_store_ref(tmp_path):
+    """GET /status must not hand back the live store dict; mutating the returned
+    payload (or the store) afterward must not affect the other."""
+    _run_store.clear()
+    _run_store["run_copy"] = {
+        "run_id": "run_copy",
+        "status": "running",
+        "nested": {"phase": "p0", "items": [1, 2, 3]},
+    }
+    client = _client()
+
+    resp = client.get("/png-shader/status/run_copy")
+    assert resp.status_code == 200
+
+    # Mutate the live store entry's nested structure AFTER the read.
+    _run_store["run_copy"]["nested"]["phase"] = "MUTATED"
+    _run_store["run_copy"]["nested"]["items"].append(999)
+
+    # The JSON the client already received reflects the pre-mutation snapshot.
+    body = resp.json()
+    assert body["nested"]["phase"] == "p0"
+    assert body["nested"]["items"] == [1, 2, 3]
+
+
+def test_status_concurrent_mutation_does_not_500(tmp_path):
+    """Hammer /status while a background thread mutates the live store entry;
+    the deep-copy-under-lock snapshot must never raise 'dictionary changed size
+    during iteration'."""
+    import threading as _threading
+
+    _run_store.clear()
+    _run_store["run_race"] = {"run_id": "run_race", "status": "running", "d": {}}
+    client = _client()
+
+    stop = _threading.Event()
+
+    def _mutator():
+        i = 0
+        while not stop.is_set():
+            # Mutate under the same lock the reader uses, churning dict size.
+            from app.routers.png_shader import _run_store_lock
+            with _run_store_lock:
+                d = _run_store["run_race"]["d"]
+                d[str(i)] = i
+                if len(d) > 50:
+                    d.clear()
+            i += 1
+
+    t = _threading.Thread(target=_mutator, daemon=True)
+    t.start()
+    try:
+        for _ in range(100):
+            resp = client.get("/png-shader/status/run_race")
+            assert resp.status_code == 200, resp.text
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Bug 5: a completed fusion run drives its FusionPlanRecord to a terminal status
+# ---------------------------------------------------------------------------
+
+def test_fusion_run_completion_marks_plan_completed(tmp_path, monkeypatch):
+    """After the fusion output run completes, the fusion plan record status must
+    leave 'running' and become 'completed' (so the frontend poll terminates)."""
+    from app.pipeline.fusion_plans import load_plan
+
+    _run_store.clear()
+    _seed_fusion_run(tmp_path, "run_base")
+    _seed_fusion_run(tmp_path, "run_src")
+    fusions_root = str(tmp_path / "fusions_root")
+    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", str(tmp_path / "ri.jsonl"))
+    monkeypatch.setattr(
+        "app.routers.png_shader.run_png_shader_pipeline",
+        _fake_variant_pipeline([]),
+    )
+
+    client = _client()
+    fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
+    client.post(f"/png-shader/fusions/{fusion_id}/composite-target")
+
+    resp = client.post(f"/png-shader/fusions/{fusion_id}/run", json={})
+    assert resp.status_code == 200, resp.text
+    output_run_id = resp.json()["output_run_id"]
+
+    _wait_for_completion(client, output_run_id)
+
+    # Give the worker's best-effort fusion finalize a moment to land.
+    deadline = time.time() + 3.0
+    record = None
+    while time.time() < deadline:
+        record = load_plan(fusion_id, root=fusions_root)
+        if record is not None and record.status in ("completed", "failed"):
+            break
+        time.sleep(0.02)
+
+    assert record is not None
+    assert record.status == "completed", f"fusion status stuck at {record.status!r}"

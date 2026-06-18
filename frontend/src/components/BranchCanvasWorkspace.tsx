@@ -34,6 +34,7 @@ import {
   type BranchCanvasEdge,
 } from "../lib/branchCanvasModel";
 import { layoutBranchCanvas, COLUMN_WIDTH } from "../lib/branchCanvasLayout";
+import { shouldPollFusion } from "../lib/fusionPolling";
 import BranchCanvas from "./BranchCanvas";
 import CanvasToolRail from "./CanvasToolRail";
 import { branchCanvasNodeTypes } from "./BranchCanvasNode";
@@ -199,17 +200,17 @@ export default function BranchCanvasWorkspace({
   const layoutStorageKey = `branchCanvasLayout:${branchInfo?.root_run_id ?? runId ?? "none"}`;
 
   // ── Load overrides from localStorage when the key changes ─────────────────
+  // Persistence is NOT done via a save-effect keyed on layoutStorageKey: that
+  // effect would run in the same commit as this load (which only SCHEDULES the
+  // setLayoutOverrides), so on a tree switch it would still see the PRIOR tree's
+  // layoutOverrides and write them under the NEW tree's key. Since every tree
+  // shares the "input" node id (and re-visited trees share run:/cp: ids), those
+  // leaked positions later get applied to the WRONG tree on reload. Instead we
+  // persist only from the user-action paths (handleDragStop / handleResetLayout),
+  // which always carry the key that was current when the user acted.
   useEffect(() => {
     setLayoutOverrides(loadLayoutOverrides(layoutStorageKey));
   }, [layoutStorageKey]);
-
-  // ── Persist layoutOverrides to localStorage when they change (M3) ─────────
-  // Skipped when overrides are empty to avoid clobbering on initial mount.
-  useEffect(() => {
-    if (Object.keys(layoutOverrides).length > 0) {
-      saveLayoutOverrides(layoutStorageKey, layoutOverrides);
-    }
-  }, [layoutOverrides, layoutStorageKey]);
 
   // ── Fetch branchInfo (alive-guarded) ──────────────────────────────────────
   useEffect(() => {
@@ -454,9 +455,16 @@ export default function BranchCanvasWorkspace({
 
   const handleDragStop = useCallback(
     (id: string, pos: { x: number; y: number }) => {
-      setLayoutOverrides((prev) => ({ ...prev, [id]: pos }));
+      // Persist on the user-action path (not via a key-driven effect — see the
+      // load effect above) so the write always targets the key that is current
+      // for the tree the user is actually dragging on.
+      setLayoutOverrides((prev) => {
+        const next = { ...prev, [id]: pos };
+        saveLayoutOverrides(layoutStorageKey, next);
+        return next;
+      });
     },
-    [],
+    [layoutStorageKey],
   );
 
   const handleResetLayout = useCallback(() => {
@@ -789,12 +797,20 @@ export default function BranchCanvasWorkspace({
     };
   }, [activeDrawId, fetchDrawSession, fetchBranches]);
 
-  // ── Fusion polling (2s, stops on terminal status) ─────────────────────────
+  // ── Fusion polling (2s, runs only while ACTIVELY advancing) ───────────────
+  // A fusion only advances on its own while status is "running". draft /
+  // target_ready are idle (wait for the user to composite/run) and completed /
+  // failed are terminal, so polling any of those just hits the backend every 2s
+  // forever. shouldPollFusion() gates re-scheduling on status === "running".
+  // The effect is re-keyed on fusionStatus?.status so that when an action
+  // handler (handleComposite / handleRunFusion) refreshes an idle fusion into
+  // "running", the effect re-runs and RESUMES polling; idle states are kept
+  // fresh by those handlers' own fetchFusion calls.
+  const activeFusionStatusValue = fusionStatus?.status ?? null;
   useEffect(() => {
     if (!activeFusionId) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const TERMINAL = new Set(["completed", "failed"]);
     const poll = async () => {
       if (!alive) return;
       try {
@@ -804,7 +820,7 @@ export default function BranchCanvasWorkspace({
         if (s.output_run_id && runIdRef.current) {
           fetchBranches(runIdRef.current).then((b) => { if (alive) setBranchInfo(b); }).catch(() => {});
         }
-        if (TERMINAL.has(s.status)) return; // stop polling
+        if (!shouldPollFusion(s.status)) return; // stop: idle (draft/target_ready) or terminal
       } catch {
         // best-effort
       }
@@ -815,7 +831,10 @@ export default function BranchCanvasWorkspace({
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [activeFusionId, fetchFusion, fetchBranches]);
+    // activeFusionStatusValue is a key, not read inside: re-running the effect
+    // when the status transitions (e.g. idle → running) is exactly how polling
+    // resumes after a user action.
+  }, [activeFusionId, activeFusionStatusValue, fetchFusion, fetchBranches]);
 
   // ── Placeholder when no run ────────────────────────────────────────────────
   if (!runId || !branchInfo) {

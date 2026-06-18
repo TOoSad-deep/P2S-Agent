@@ -266,6 +266,20 @@ function formatComponent(v: number): string {
   return parseFloat(v.toFixed(6)).toString();
 }
 
+/** Escape a string for literal use inside a RegExp. Without this, a param name
+ *  containing regex metacharacters (e.g. ".", "+") would be interpreted as a
+ *  pattern and could match — and corrupt — unrelated #define lines. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Build the anchored #define-rewrite regex for a given param name. The name is
+ *  escaped and bounded by whitespace so only the exact `#define <name> ...`
+ *  line is matched (never a name-prefixed sibling like `<name>_factor`). */
+function defineLineRegex(name: string): RegExp {
+  return new RegExp(`^(\\s*#define\\s+${escapeRegExp(name)}\\s+).+$`, 'm');
+}
+
 // Update shader code with a new parameter value.
 export function updateShaderParam(
   code: string,
@@ -277,13 +291,11 @@ export function updateShaderParam(
   if (param.type === 'vec2' || param.type === 'vec3' || param.type === 'vec4') {
     const arr = Array.isArray(newValue) ? newValue : [newValue];
     const literal = `${param.type}(${arr.map(formatComponent).join(', ')})`;
-    const defineRegex = new RegExp(`^(\\s*#define\\s+${param.name}\\s+).+$`, 'm');
-    return code.replace(defineRegex, `$1${literal}`);
+    return code.replace(defineLineRegex(param.name), `$1${literal}`);
   }
 
-  const defineRegex = new RegExp(`^(\\s*#define\\s+${param.name}\\s+).+$`, 'm');
   const valueStr = Array.isArray(newValue) ? newValue.join(', ') : String(newValue);
-  return code.replace(defineRegex, `$1${valueStr}`);
+  return code.replace(defineLineRegex(param.name), `$1${valueStr}`);
 }
 
 // Generate uniform declarations for custom parameters
