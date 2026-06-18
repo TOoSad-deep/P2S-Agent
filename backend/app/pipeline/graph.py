@@ -348,6 +348,38 @@ def node_selection(state: P2SPipelineState) -> dict:
 # Post-pipeline processing (not a LangGraph node)
 # ---------------------------------------------------------------------------
 
+def _build_region_veto_fn(selected, protect_regions, run_dir, canvas_width, canvas_height, *, floor, ceil):
+    """Build an injected veto callable for the refinement loops, or None.
+
+    Baseline = the selected candidate's pre-refinement render (what 'protect' guards).
+    Returns None when there are no protect regions / no selected / no usable baseline,
+    so the loops behave exactly as before.
+    """
+    protect = [r for r in (protect_regions or []) if getattr(r, "mode", None) == "protect"]
+    if not protect or selected is None:
+        return None
+    baseline = Path(selected.render_path) if getattr(selected, "render_path", None) else None
+    if baseline is None or not baseline.exists():
+        # DSL candidate may not carry a render_path: render it once as the baseline.
+        try:
+            if getattr(selected, "dsl", None):
+                from app.dsl.renderer import render_dsl_to_image
+                baseline = Path(run_dir) / "protect_baseline.png"
+                render_dsl_to_image(selected.dsl, baseline, width=canvas_width, height=canvas_height)
+            else:
+                baseline = None
+        except Exception:
+            logger.warning("protect-veto baseline render failed", exc_info=True)
+            baseline = None
+    if baseline is None or not baseline.exists():
+        return None
+    from app.pipeline.region_metrics import evaluate_protect_veto
+    return (
+        lambda cand, _r=protect, _b=baseline, _f=floor, _c=ceil:
+        evaluate_protect_veto(_b, cand, _r, floor=_f, ceil=_c)
+    )
+
+
 def _run_post_pipeline(
     state: P2SPipelineState,
     *,
@@ -386,6 +418,17 @@ def _run_post_pipeline(
     max_shader_chars = state.get("max_shader_chars", 12000)
     optimizer_iterations = state.get("optimizer_iterations", 0)
     protected_aspects = state.get("protected_aspects", ["layer_count", "primitive_types", "background"])
+
+    from app.config import settings as _veto_settings
+    _region_veto_fn = _build_region_veto_fn(
+        selected,
+        state.get("protect_regions"),
+        run_dir,
+        canvas_width,
+        canvas_height,
+        floor=float(_veto_settings.protect_veto_ssim_floor),
+        ceil=float(_veto_settings.protect_veto_ssim_ceil),
+    )
 
     optimization_summary = None
     revision_summary = None
@@ -743,6 +786,7 @@ def _run_post_pipeline(
                 if state.get("vlm_judge_enabled") else None
             ),
             on_iteration=_publish_iteration,
+            region_veto_fn=_region_veto_fn,
         )
         refinement_history = ref_result.get("history", [])
         refinement_summary.update({
@@ -752,6 +796,14 @@ def _run_post_pipeline(
             "improved": ref_result.get("best_score", 0) > initial_refinement_score,
             "stop_reason": ref_result.get("stop_reason"),
         })
+        _veto_iters = [h for h in refinement_history if h.get("rejected_reason") == "protect_region_veto"]
+        _protect = [r for r in (state.get("protect_regions") or []) if getattr(r, "mode", None) == "protect"]
+        if _protect:
+            refinement_summary["protect_regions"] = {
+                "count": len(_protect),
+                "veto_count": len(_veto_iters),
+                "last_constraint_score": (_veto_iters[-1].get("constraint_score") if _veto_iters else None),
+            }
 
         if ref_result.get("best_score", 0) > selected.final_score:
             refined_dsl = ref_result["best_dsl"]
@@ -829,6 +881,7 @@ def _run_post_pipeline(
                     if state.get("vlm_judge_enabled") else None
                 ),
                 on_iteration=_publish_iteration,
+                region_veto_fn=_region_veto_fn,
             )
             refinement_history = ref_result.get("history", [])
             refinement_summary.update({
@@ -839,6 +892,14 @@ def _run_post_pipeline(
                 "improved": ref_result.get("best_score", 0) > initial_refinement_score,
                 "stop_reason": ref_result.get("stop_reason"),
             })
+            _veto_iters = [h for h in refinement_history if h.get("rejected_reason") == "protect_region_veto"]
+            _protect = [r for r in (state.get("protect_regions") or []) if getattr(r, "mode", None) == "protect"]
+            if _protect:
+                refinement_summary["protect_regions"] = {
+                    "count": len(_protect),
+                    "veto_count": len(_veto_iters),
+                    "last_constraint_score": (_veto_iters[-1].get("constraint_score") if _veto_iters else None),
+                }
 
             if ref_result.get("best_score", 0) > selected.final_score:
                 selected.compile_glsl = ref_result["best_glsl"]
@@ -1039,6 +1100,7 @@ def run_png_shader_pipeline(
     force_first_refinement_iteration: bool = False,
     lineage: dict | None = None,
     extra_artifacts: dict | None = None,
+    protect_regions: list | None = None,
 ) -> dict:
     """Run the full PNG-to-Shader pipeline and return structured results.
 
@@ -1221,6 +1283,7 @@ def run_png_shader_pipeline(
         "directed_acceptance": directed_acceptance,
         "force_first_refinement_iteration": bool(force_first_refinement_iteration),
         "lineage": lineage,
+        "protect_regions": list(protect_regions or []),
     }
 
     # Run the LangGraph pipeline
