@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     screenshot_height: int = 512
     render_timeout_ms: int = 2000
 
+    # Protect-region veto thresholds (SSIM strength -> region protection).
+    # Consumed by graph.py and passed into region_metrics.protect_region_threshold().
+    protect_veto_ssim_floor: float = 0.85
+    protect_veto_ssim_ceil: float = 0.95
+
     # LangSmith tracing (disabled by default)
     langsmith_tracing: bool = False
     langsmith_api_key: str = ""
