@@ -1,5 +1,5 @@
 // BranchCompareStrip.tsx — side-by-side render thumbnails for the active run and its parent (V2).
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { BranchTreeNode } from "../hooks/usePngShader";
 import { findNode, findParent } from "../lib/branchTree";
 
@@ -13,11 +13,20 @@ interface Props {
 interface TileProps {
   runId: string;
   label: string;
+  status?: string;
 }
 
-function Tile({ runId, label }: TileProps) {
+function Tile({ runId, label, status }: TileProps) {
   const [errored, setErrored] = useState(false);
   const src = `${API_BASE}/png-shader/runs/${runId}/artifacts/selected_render`;
+
+  // Retry when the run's render becomes available. selected_render 409s while a
+  // run is still in progress, latching `errored`; the key resets it on run
+  // change but not when THIS run finishes. Resetting on status change gives the
+  // now-ready render a fresh load attempt instead of staying on "No preview".
+  useEffect(() => {
+    setErrored(false);
+  }, [src, status]);
 
   return (
     <div className="flex flex-col items-center gap-1">
@@ -61,10 +70,11 @@ export default function BranchCompareStrip({ activeRunId, tree }: Props) {
         <span className="ml-2 text-[var(--text-muted)] font-normal">Compare</span>
       </p>
       <div className="flex items-start gap-4">
-        {/* I-1: key resets errored state when the run changes */}
-        <Tile key={activeRunId} runId={activeRunId} label="当前 / Current" />
+        {/* I-1: key resets errored state when the run changes; status resets it
+            when this same run finishes (render becomes available). */}
+        <Tile key={activeRunId} runId={activeRunId} label="当前 / Current" status={activeNode.status} />
         {parentNode && (
-          <Tile key={parentNode.run_id} runId={parentNode.run_id} label="父级 / Parent" />
+          <Tile key={parentNode.run_id} runId={parentNode.run_id} label="父级 / Parent" status={parentNode.status} />
         )}
       </div>
     </div>

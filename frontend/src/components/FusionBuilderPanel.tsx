@@ -1,8 +1,33 @@
 // FusionBuilderPanel.tsx — V4.5 Local Fusion builder panel.
 // Presentational only; all state owned by parent (BranchCanvasWorkspace).
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2, Layers, Play, Image } from "lucide-react";
 import type { FusionRegion, FusionStatus } from "../hooks/usePngShader";
+
+// ─── FallbackImg ────────────────────────────────────────────────────────────────
+// <img> that swaps to a fallback on load error and — crucially — retries when
+// `src` changes. The previous inline `onError → style.display="none"` latched the
+// element hidden: React doesn't reset an imperatively-set inline style when only
+// the src changes, so picking a different (valid) image after a failed one left
+// it blank. Resetting the error state on src change fixes that recovery.
+function FallbackImg({
+  src,
+  alt,
+  className,
+  fallback = null,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+  fallback?: React.ReactNode;
+}) {
+  const [errored, setErrored] = useState(false);
+  useEffect(() => {
+    setErrored(false);
+  }, [src]);
+  if (errored) return <>{fallback}</>;
+  return <img src={src} alt={alt} className={className} onError={() => setErrored(true)} />;
+}
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -232,11 +257,10 @@ export default function FusionBuilderPanel({
           底图 Base image
         </p>
         {baseImageUrl && (
-          <img
+          <FallbackImg
             src={baseImageUrl}
             alt="Base"
             className="w-full h-20 object-cover rounded border border-[var(--border-color)]"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
           />
         )}
         <div className="flex flex-wrap gap-1.5">
@@ -255,11 +279,11 @@ export default function FusionBuilderPanel({
                 }`}
               >
                 {c.thumbnail_url ? (
-                  <img
+                  <FallbackImg
                     src={c.thumbnail_url}
                     alt={c.label}
                     className="w-10 h-7 object-cover rounded"
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    fallback={<Image className="w-4 h-4" />}
                   />
                 ) : (
                   <Image className="w-4 h-4" />
@@ -370,11 +394,10 @@ export default function FusionBuilderPanel({
           </button>
 
           {fusion.composite_target_url && (
-            <img
+            <FallbackImg
               src={fusion.composite_target_url}
               alt="Composite target"
               className="w-full rounded border border-[var(--border-color)]"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
             />
           )}
 

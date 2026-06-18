@@ -4,9 +4,12 @@ import {
   buildDrawSessionModel,
   buildRegionConstraintModel,
   buildFusionModel,
+  selectionFetchTargets,
   MAX_EXPANDED_RUNS,
   MAX_VISIBLE_CHECKPOINTS_PER_RUN,
   type BuildBranchCanvasInput,
+  type BranchCanvasNode,
+  type BranchCanvasNodeData,
 } from "./branchCanvasModel";
 import type { BranchTreeNode, CheckpointTimelineEntry, DrawSessionStatus, DrawCardStatus, RegionConstraint, FusionStatus, FusionRegion } from "../hooks/usePngShader";
 
@@ -1561,5 +1564,58 @@ describe("buildFusionModel", () => {
     const a = buildFusionModel(fusion, opts);
     const b = buildFusionModel(fusion, opts);
     expect(a).toEqual(b);
+  });
+});
+
+// ─── selectionFetchTargets ─────────────────────────────────────────────────────
+// Selecting a canvas node must tell the workspace which detail data to fetch so
+// the inspector can render it — not only the node that a live action just created.
+// (Regression: inspector stuck on "加载变体中" because clicking a variant node
+// never triggered a variant-group fetch.)
+
+describe("selectionFetchTargets", () => {
+  function makeNode(data: BranchCanvasNodeData): BranchCanvasNode {
+    return { id: "n1", position: { x: 0, y: 0 }, data } as BranchCanvasNode;
+  }
+
+  it("returns the group id for a selected variant_group node", () => {
+    const node = makeNode({ type: "variant_group", label: "G", group_id: "grp_123" });
+    expect(selectionFetchTargets(node)).toEqual({ variantGroupId: "grp_123", drawId: null });
+  });
+
+  it("returns the group id for a selected variant_run node (from variant_group_id)", () => {
+    const node = makeNode({
+      type: "variant_run",
+      label: "V",
+      run_id: "run_abc",
+      variant_group_id: "grp_123",
+    });
+    expect(selectionFetchTargets(node)).toEqual({ variantGroupId: "grp_123", drawId: null });
+  });
+
+  it("returns the draw id for a selected draw_session node", () => {
+    const node = makeNode({ type: "draw_session", label: "D", draw_id: "draw_99" });
+    expect(selectionFetchTargets(node)).toEqual({ variantGroupId: null, drawId: "draw_99" });
+  });
+
+  it("returns the draw id for a selected draw_card node", () => {
+    const node = makeNode({
+      type: "draw_card",
+      label: "C",
+      run_id: "run_xyz",
+      draw_id: "draw_99",
+    });
+    expect(selectionFetchTargets(node)).toEqual({ variantGroupId: null, drawId: "draw_99" });
+  });
+
+  it("returns no targets for a plain run node (preserves background polling)", () => {
+    const node = makeNode({ type: "run", label: "R", run_id: "run_abc" });
+    expect(selectionFetchTargets(node)).toEqual({ variantGroupId: null, drawId: null });
+  });
+
+  it("returns no targets for null / id-less variant nodes", () => {
+    expect(selectionFetchTargets(null)).toEqual({ variantGroupId: null, drawId: null });
+    const idless = makeNode({ type: "variant_group", label: "G" });
+    expect(selectionFetchTargets(idless)).toEqual({ variantGroupId: null, drawId: null });
   });
 });
