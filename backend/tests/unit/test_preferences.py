@@ -583,7 +583,7 @@ class TestDefaultProfile:
 
 class TestIsolation:
     def test_operations_stay_in_tmp_path(self, tmp_path):
-        from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
+        from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT
         real_prefs = DEFAULT_RESULTS_ROOT / "preferences"
         append_preference_event(_make_event(), root=tmp_path)
         load_preference_events(root=tmp_path)

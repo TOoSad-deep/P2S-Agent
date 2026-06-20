@@ -6,7 +6,7 @@ import io
 import json
 import logging
 
-from app.services.logging_config import (
+from p2s_agent.core.logging_config import (
     _ContextFilter,
     _JsonLogFormatter,
     log_event,

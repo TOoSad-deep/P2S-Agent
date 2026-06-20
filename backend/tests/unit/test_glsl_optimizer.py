@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.glsl_optimizer import (
+from p2s_agent.core.pipeline.glsl_optimizer import (
     GlslOptimizeResult,
     build_glsl_optimization_artifacts,
     optimize_glsl_candidate,
@@ -138,7 +138,7 @@ def _make_score_driver(monkeypatch, score_for_glsl):
         calls.append(glsl)
         return score_for_glsl(glsl)
 
-    monkeypatch.setattr("app.pipeline.glsl_optimizer.score_glsl", fake_score)
+    monkeypatch.setattr("p2s_agent.core.pipeline.glsl_optimizer.score_glsl", fake_score)
     return calls
 
 
@@ -172,7 +172,7 @@ def test_optimize_returns_unchanged_when_no_defines(monkeypatch, tmp_path):
         return tmp_path / "render.png"
 
     monkeypatch.setattr(
-        "app.pipeline.glsl_optimizer.score_glsl",
+        "p2s_agent.core.pipeline.glsl_optimizer.score_glsl",
         lambda *a, **k: 0.5,
     )
 

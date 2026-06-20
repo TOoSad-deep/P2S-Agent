@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from app.candidates.llm_scene import generate_llm_glsl_refinement
+from p2s_agent.core.candidates.llm_scene import generate_llm_glsl_refinement
 
 VALID_GLSL = (
     "#define R 0.5\n"

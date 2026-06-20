@@ -1,7 +1,7 @@
 from pathlib import Path
 from PIL import Image
-from app.pipeline.refinement import run_dsl_refinement_loop
-from app.pipeline.region_metrics import RegionVetoResult
+from p2s_agent.core.pipeline.refinement import run_dsl_refinement_loop
+from p2s_agent.core.pipeline.region_metrics import RegionVetoResult
 
 _DSL_A = {"schema_version": 1, "canvas": {"width": 64, "height": 64, "background": "#000000"},
           "layers": [{"id": "c0", "type": "circle", "fill": {"type": "solid", "color": "#ff0000"},
@@ -28,9 +28,9 @@ def _mk_eval(score_for_b):
 
 
 def test_dsl_veto_rejects_globally_better_candidate(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.candidates.llm_scene.generate_llm_refinement",
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.generate_llm_refinement",
                         lambda **k: dict(_DSL_B))
-    monkeypatch.setattr("app.pipeline.refinement._evaluate_dsl", _mk_eval(0.6))  # B scores HIGHER
+    monkeypatch.setattr("p2s_agent.core.pipeline.refinement._evaluate_dsl", _mk_eval(0.6))  # B scores HIGHER
     result = run_dsl_refinement_loop(
         preprocess={}, initial_dsl=dict(_DSL_A), initial_score=0.30,
         initial_metrics={}, initial_quality={"final_score": 0.30},
@@ -48,9 +48,9 @@ def test_dsl_veto_rejects_globally_better_candidate(tmp_path, monkeypatch):
 
 def test_dsl_veto_overrides_directed_acceptance(tmp_path, monkeypatch):
     # B scores LOWER (0.28 < 0.30): only directed acceptance could accept it; veto overrides.
-    monkeypatch.setattr("app.candidates.llm_scene.generate_llm_refinement",
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.generate_llm_refinement",
                         lambda **k: dict(_DSL_B))
-    monkeypatch.setattr("app.pipeline.refinement._evaluate_dsl", _mk_eval(0.28))
+    monkeypatch.setattr("p2s_agent.core.pipeline.refinement._evaluate_dsl", _mk_eval(0.28))
     result = run_dsl_refinement_loop(
         preprocess={}, initial_dsl=dict(_DSL_A), initial_score=0.30,
         initial_metrics={}, initial_quality={"final_score": 0.30},

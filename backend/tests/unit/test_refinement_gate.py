@@ -12,11 +12,11 @@ gating must remain the true objective score (``quality_router['final_score']``).
 
 from __future__ import annotations
 
-from app.pipeline.graph import (
+from p2s_agent.core.pipeline.graph import (
     CandidateRecord,
     _should_run_refinement,
 )
-from app.pipeline.scoring import _gate_quality_score
+from p2s_agent.core.pipeline.scoring import _gate_quality_score
 
 
 def _bumped_candidate(*, true_score: float, bumped_score: float) -> CandidateRecord:

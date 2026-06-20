@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app.dsl.renderer import render_dsl_to_image
-from app.dsl.schema import (
+from p2s_agent.core.dsl.renderer import render_dsl_to_image
+from p2s_agent.core.dsl.schema import (
     FIXTURE_BOX_GRADIENT,
     FIXTURE_CIRCLE_SOLID,
     FIXTURE_GLOW_RING,

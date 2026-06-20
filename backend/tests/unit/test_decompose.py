@@ -5,13 +5,13 @@ cv2 = pytest.importorskip("cv2")
 
 from PIL import Image, ImageDraw
 
-from app.dsl.compiler import compile_dsl
+from p2s_agent.core.dsl.compiler import compile_dsl
 _decompose = pytest.importorskip(
-    "app.pipeline.decompose", reason="accuracy plan Phase 2 Task 5 not implemented yet"
+    "p2s_agent.core.pipeline.decompose", reason="accuracy plan Phase 2 Task 5 not implemented yet"
 )
 decompose_to_dsl = _decompose.decompose_to_dsl
 fit_primitive_layer = _decompose.fit_primitive_layer
-from app.dsl.validator import validate_dsl
+from p2s_agent.core.dsl.validator import validate_dsl
 import numpy as np
 
 
@@ -65,7 +65,7 @@ def test_fit_primitive_prefers_box_for_rectangle():
 
 
 def test_decompose_candidate_skips_photo_like(tmp_path):
-    from app.candidates.decompose import generate_decompose_candidate
+    from p2s_agent.core.candidates.decompose import generate_decompose_candidate
     img = Image.new("RGB", (64, 64), (255, 255, 255))
     ImageDraw.Draw(img).ellipse((16, 16, 48, 48), fill=(255, 0, 0))
     path = _save(tmp_path, "p.png", img)

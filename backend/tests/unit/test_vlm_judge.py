@@ -3,9 +3,9 @@ import json
 
 from PIL import Image
 
-import app.llm.vlm_judge as vj
+import p2s_agent.core.llm.vlm_judge as vj
 from p2s_agent.config import ModelConfig, use_active_model
-from app.llm.vlm_judge import judge_pairwise, judge_rubric
+from p2s_agent.core.llm.vlm_judge import judge_pairwise, judge_rubric
 
 
 def _img(tmp_path, name, color):

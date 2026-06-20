@@ -10,9 +10,9 @@ import json
 
 import pytest
 
-from app.candidates.baseline import generate_baseline_candidate
-from app.candidates.fallback import generate_fallback_candidate
-from app.candidates.llm_scene import (
+from p2s_agent.core.candidates.baseline import generate_baseline_candidate
+from p2s_agent.core.candidates.fallback import generate_fallback_candidate
+from p2s_agent.core.candidates.llm_scene import (
     _call_llm,
     _extract_glsl,
     _normalize_gradient_fills,
@@ -22,8 +22,8 @@ from app.candidates.llm_scene import (
     generate_llm_refinement,
     generate_llm_scene_candidate,
 )
-from app.dsl.compiler import compile_dsl
-from app.dsl.validator import validate_dsl
+from p2s_agent.core.dsl.compiler import compile_dsl
+from p2s_agent.core.dsl.validator import validate_dsl
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ def test_llm_candidate_returns_none_when_disabled():
 
 def test_llm_candidate_returns_none_when_enabled(monkeypatch):
     """Without an injected response/client or configured key, this remains no-op."""
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "")
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_api_key", "")
     preprocess = _make_preprocess()
     result = generate_llm_scene_candidate(preprocess, llm_enabled=True)
     assert result is None
@@ -318,9 +318,9 @@ def test_png_shader_llm_does_not_send_image_to_generate_model_by_default(monkeyp
             calls.append(kwargs)
             return "ok"
 
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", False)
-    monkeypatch.setattr("app.llm.client.BaseAgent", FakeAgent)
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_api_key", "test-key")
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_supports_image", False)
+    monkeypatch.setattr("p2s_agent.core.llm.client.BaseAgent", FakeAgent)
 
     result = _call_llm(
         "system",
@@ -344,9 +344,9 @@ def test_png_shader_llm_can_send_image_when_generate_model_supports_it(monkeypat
             calls.append(kwargs)
             return "ok"
 
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", True)
-    monkeypatch.setattr("app.llm.client.BaseAgent", FakeAgent)
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_api_key", "test-key")
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_supports_image", True)
+    monkeypatch.setattr("p2s_agent.core.llm.client.BaseAgent", FakeAgent)
 
     result = _call_llm(
         "system",
@@ -372,9 +372,9 @@ def test_call_llm_retries_empty_json_mode_response_without_response_format(monke
                 return ""
             return '{"schema_version":1,"layers":[]}'
 
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_api_key", "test-key")
-    monkeypatch.setattr("app.candidates.llm_scene.settings.llm_supports_image", False)
-    monkeypatch.setattr("app.llm.client.BaseAgent", FakeAgent)
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_api_key", "test-key")
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene.settings.llm_supports_image", False)
+    monkeypatch.setattr("p2s_agent.core.llm.client.BaseAgent", FakeAgent)
 
     result = _call_llm(
         "system",
@@ -540,7 +540,7 @@ def test_llm_refinement_retries_without_response_format(monkeypatch):
             return ""
         return {"revised_dsl": revised}
 
-    monkeypatch.setattr("app.candidates.llm_scene._call_llm", fake_call_llm)
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene._call_llm", fake_call_llm)
 
     result = generate_llm_refinement(
         _make_preprocess(),
@@ -568,7 +568,7 @@ def test_llm_refinement_returns_parse_diagnostic_with_attempts(monkeypatch):
             return "I cannot produce JSON for this request."
         return {"glsl": "void mainImage(out vec4 fragColor, in vec2 fragCoord){}"}
 
-    monkeypatch.setattr("app.candidates.llm_scene._call_llm", fake_call_llm)
+    monkeypatch.setattr("p2s_agent.core.candidates.llm_scene._call_llm", fake_call_llm)
 
     result = generate_llm_refinement(
         _make_preprocess(),

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from app.candidates.cv import generate_cv_candidate, get_cv_fit_report
-from app.dsl.compiler import compile_dsl
-from app.dsl.validator import validate_dsl
+from p2s_agent.core.candidates.cv import generate_cv_candidate, get_cv_fit_report
+from p2s_agent.core.dsl.compiler import compile_dsl
+from p2s_agent.core.dsl.validator import validate_dsl
 
 
 # ---------------------------------------------------------------------------

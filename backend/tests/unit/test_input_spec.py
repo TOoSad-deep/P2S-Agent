@@ -1,4 +1,4 @@
-"""Unit tests for app.pipeline.input_spec (Phase 2)."""
+"""Unit tests for p2s_agent.core.pipeline.input_spec (Phase 2)."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.input_spec import (
+from p2s_agent.core.pipeline.input_spec import (
     DEFAULT_INPUT_SPEC,
     build_input_spec,
     validate_input_spec,
 )
-from app.strategy_config_loader import get_strategy_config
+from p2s_agent.strategy import get_strategy_config
 
 
 # ---------------------------------------------------------------------------

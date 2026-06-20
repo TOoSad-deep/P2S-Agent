@@ -6,8 +6,8 @@ cv2 = pytest.importorskip("cv2")
 import numpy as np
 from PIL import Image, ImageDraw
 
-from app.dsl.renderer import render_dsl_to_image
-from app.pipeline.residual_layers import add_residual_layers
+from p2s_agent.core.dsl.renderer import render_dsl_to_image
+from p2s_agent.core.pipeline.residual_layers import add_residual_layers
 
 
 def _ref_two_circles(tmp_path):

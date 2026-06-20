@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.dsl.schema import (
+from p2s_agent.core.dsl.schema import (
     DSL_SCHEMA_VERSION,
     EFFECT_TYPES,
     FILL_TYPES,

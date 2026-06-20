@@ -1,39 +1,13 @@
-"""Pure-core region dataclasses shared by compute and orchestration modules.
-
-This is a dependency-free leaf: only stdlib/typing/dataclasses are imported.
-It exists so ``core`` compute modules (region_metrics, image_composite) can
-reference these types without importing orchestration modules
-(human_constraints, fusion_plans) that pull in ``app.pipeline.artifacts``.
-
-Both orchestration modules re-export these classes for back-compat.
-"""
-
+"""Back-compat shim — moved to p2s_agent.core.pipeline.region_types (L1 agent/web split, T6). Retire in T10."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from p2s_agent.core.pipeline.region_types import *  # noqa: F401,F403
 
+# Re-export every remaining module-level name (incl. private/underscore symbols
+# that ``import *`` skips) so old ``from app.pipeline.region_types import _x`` paths still resolve.
+import p2s_agent.core.pipeline.region_types as _src  # noqa: E402
 
-@dataclass
-class RegionConstraint:
-    """A spatial region that the user wants to modify or protect."""
-
-    id: str
-    label: str
-    mode: str           # "modify" | "protect"
-    instruction: str
-    geometry_type: str  # "rect" (V4.2 adds "polygon"|"mask")
-    geometry: dict      # rect: {"x","y","w","h"} normalised 0..1
-    strength: float = 0.5
-
-
-@dataclass
-class FusionRegion:
-    id: str
-    label: str
-    source_run_id: str
-    instruction: str
-    geometry_type: str          # "rect" first
-    geometry: dict              # rect {"x","y","w","h"} normalized 0..1
-    strength: float = 0.5
-    blend_mode: str = "soft"    # "soft" | "replace_target" | "protect_base"
-    feather: float = 0.08
+for _name in dir(_src):
+    if not _name.startswith("__"):
+        globals().setdefault(_name, getattr(_src, _name))
+del _src, _name

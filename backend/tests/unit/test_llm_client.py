@@ -5,9 +5,9 @@ sockets/FDs across many VLM/generation calls. We cache one BaseAgent (and its
 httpx.Client) per ModelConfig identity so repeated calls reuse one keep-alive
 client; different configs get different clients; the cache is bounded.
 """
-import app.llm.client as client_mod
+import p2s_agent.core.llm.client as client_mod
 from p2s_agent.config import ModelConfig
-from app.llm.client import BaseAgent, get_agent
+from p2s_agent.core.llm.client import BaseAgent, get_agent
 
 
 def _cfg(model="gpt-4o", base_url="https://api.openai.com/v1", api_key="k", proxy=None):
@@ -63,7 +63,7 @@ def test_close_path_releases_client():
 # temp-file lifecycle (the actual leak) is extracted into pure helpers TDD'd here.
 import os as _os
 
-from app.services.browser_render import (
+from p2s_agent.core.render.browser_render import (
     _cleanup_paths,
     _new_screenshot_path,
     _unlink_quietly,

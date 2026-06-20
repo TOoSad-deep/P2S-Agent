@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.metrics import quality_router
-from app.metrics.quality_router import (
+from p2s_agent.core.metrics import quality_router
+from p2s_agent.core.metrics.quality_router import (
     FAILURE_TYPE_VALUES,
     NEXT_ACTION_VALUES,
     QUALITY_BAND_VALUES,

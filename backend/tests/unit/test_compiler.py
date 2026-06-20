@@ -6,8 +6,8 @@ import copy
 
 import pytest
 
-from app.dsl.compiler import CompileResult, compile_dsl
-from app.dsl.schema import (
+from p2s_agent.core.dsl.compiler import CompileResult, compile_dsl
+from p2s_agent.core.dsl.schema import (
     DSL_SCHEMA_VERSION,
     FIXTURE_BOX_GRADIENT,
     FIXTURE_CIRCLE_SOLID,
@@ -147,8 +147,8 @@ def test_compile_radial_gradient_layer():
 def test_two_stop_gradient_uses_smoothstep_like_renderer():
     """Parity: the Pillow scoring renderer interpolates EVERY gradient segment
     with smoothstep; a 2-stop gradient must not silently ship a linear mix."""
-    from app.dsl.compiler import compile_dsl
-    from app.dsl.schema import FIXTURE_BOX_GRADIENT
+    from p2s_agent.core.dsl.compiler import compile_dsl
+    from p2s_agent.core.dsl.schema import FIXTURE_BOX_GRADIENT
 
     result = compile_dsl(FIXTURE_BOX_GRADIENT)
 
@@ -184,7 +184,7 @@ def test_compile_bad_center_does_not_raise():
 # ---------------------------------------------------------------------------
 
 def test_float_inf_is_finite_literal():
-    from app.dsl.compiler import _float
+    from p2s_agent.core.dsl.compiler import _float
 
     out = _float(float("inf"))
     assert "inf" not in out
@@ -192,7 +192,7 @@ def test_float_inf_is_finite_literal():
 
 
 def test_float_nan_is_finite_literal():
-    from app.dsl.compiler import _float
+    from p2s_agent.core.dsl.compiler import _float
 
     out = _float(float("nan"))
     assert "nan" not in out
@@ -205,7 +205,7 @@ def test_float_nan_is_finite_literal():
 # ---------------------------------------------------------------------------
 
 def test_hex_to_rgb_parses_8_digit_rgba():
-    from app.dsl.compiler import _hex_to_rgb
+    from p2s_agent.core.dsl.compiler import _hex_to_rgb
 
     r, g, b = _hex_to_rgb("#112233ff")
     assert abs(r - 0x11 / 255.0) < 1e-6

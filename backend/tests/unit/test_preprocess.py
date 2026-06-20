@@ -1,4 +1,4 @@
-"""Unit tests for app.pipeline.preprocess (Phase 2).
+"""Unit tests for p2s_agent.core.pipeline.preprocess (Phase 2).
 
 All tests create synthetic PNG images in tmp_path using Pillow — no real
 images, no network, no LLM.
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app.pipeline.preprocess import (
+from p2s_agent.core.pipeline.preprocess import (
     MAX_WORKING_DIM,
     _bounded_working_image,
     feature_num,

@@ -311,7 +311,7 @@ class TestSessionPersistence:
 
     def test_no_real_test_results_pollution(self, tmp_path):
         """Ensure tests never touch the real DEFAULT_RESULTS_ROOT."""
-        from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
+        from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT
 
         rec = DrawSessionRecord(
             draw_id="draw-isolation",
@@ -399,7 +399,7 @@ class TestSessionEvents:
 
     def test_no_real_test_results_pollution(self, tmp_path):
         """Ensure tests never touch the real DEFAULT_RESULTS_ROOT."""
-        from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
+        from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT
 
         append_session_event("draw-isolation-ev", {"ts": 0}, root=tmp_path)
         real_dir = DEFAULT_RESULTS_ROOT / "draw_sessions"

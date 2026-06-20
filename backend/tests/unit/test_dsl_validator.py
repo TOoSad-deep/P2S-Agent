@@ -6,13 +6,13 @@ import copy
 
 import pytest
 
-from app.dsl.schema import (
+from p2s_agent.core.dsl.schema import (
     FIXTURE_BOX_GRADIENT,
     FIXTURE_CIRCLE_SOLID,
     FIXTURE_GLOW_RING,
     FIXTURE_ROUNDEDBOX_VIGNETTE,
 )
-from app.dsl.validator import ValidationResult, validate_dsl
+from p2s_agent.core.dsl.validator import ValidationResult, validate_dsl
 
 
 # ---------------------------------------------------------------------------

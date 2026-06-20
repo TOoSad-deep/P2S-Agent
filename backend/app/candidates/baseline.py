@@ -1,32 +1,13 @@
-"""Baseline candidate: the rule-based candidate labeled as 'baseline'.
-
-The baseline is the reference point all other candidates are compared against.
-It is always enabled and always runs first.
-"""
-
+"""Back-compat shim — moved to p2s_agent.core.candidates.baseline (L1 agent/web split, T6). Retire in T10."""
 from __future__ import annotations
 
-from app.candidates.rule import generate_rule_candidate
+from p2s_agent.core.candidates.baseline import *  # noqa: F401,F403
 
+# Re-export every remaining module-level name (incl. private/underscore symbols
+# that ``import *`` skips) so old ``from app.candidates.baseline import _x`` paths still resolve.
+import p2s_agent.core.candidates.baseline as _src  # noqa: E402
 
-def generate_baseline_candidate(
-    preprocess: dict,
-    canvas_width: int = 512,
-    canvas_height: int = 512,
-) -> dict:
-    """Generate the baseline DSL candidate by delegating to the rule candidate.
-
-    The baseline is always run first and serves as the reference point that
-    all other candidates are compared against.
-
-    Args:
-        preprocess: Dict of preprocessed image features.
-        canvas_width: Output canvas width in pixels.
-        canvas_height: Output canvas height in pixels.
-
-    Returns:
-        A valid DSL dict with ``_meta`` indicating source="baseline".
-    """
-    dsl = generate_rule_candidate(preprocess, canvas_width, canvas_height)
-    dsl["_meta"] = {"source": "baseline", "priority": 0}
-    return dsl
+for _name in dir(_src):
+    if not _name.startswith("__"):
+        globals().setdefault(_name, getattr(_src, _name))
+del _src, _name

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from app.pipeline.seed_glsl import (
+from p2s_agent.core.pipeline.seed_glsl import (
     SeedAdaptResult,
     adapt_seed_glsl,
     build_seed_candidate,

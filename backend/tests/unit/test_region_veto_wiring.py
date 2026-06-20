@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 from pathlib import Path
 from PIL import Image
-from app.pipeline.graph import _build_region_veto_fn
+from p2s_agent.core.pipeline.graph import _build_region_veto_fn
 from app.pipeline.human_constraints import RegionConstraint
-from app.pipeline.region_metrics import RegionVetoResult
+from p2s_agent.core.pipeline.region_metrics import RegionVetoResult
 
 
 def _protect(rid="r1", x=0.0, w=0.5, strength=0.5):

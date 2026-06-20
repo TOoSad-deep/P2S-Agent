@@ -9,7 +9,7 @@ import copy
 
 import pytest
 
-from app.pipeline.revision import (
+from p2s_agent.core.pipeline.revision import (
     ALLOWED_OPS,
     REVISION_TYPES,
     PatchOp,

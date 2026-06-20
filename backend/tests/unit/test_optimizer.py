@@ -1,4 +1,4 @@
-"""Unit tests for app.pipeline.optimizer (Phase 6).
+"""Unit tests for p2s_agent.core.pipeline.optimizer (Phase 6).
 
 No LLM, no browser. Uses a mock render_fn that writes a synthetic PNG.
 """
@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app.dsl.schema import FIXTURE_CIRCLE_SOLID, FIXTURE_BOX_GRADIENT
-from app.dsl.validator import validate_dsl
-from app.pipeline.optimizer import (
+from p2s_agent.core.dsl.schema import FIXTURE_CIRCLE_SOLID, FIXTURE_BOX_GRADIENT
+from p2s_agent.core.dsl.validator import validate_dsl
+from p2s_agent.core.pipeline.optimizer import (
     OptimizeResult,
     OptimizeStep,
     _collect_optimizable_params,

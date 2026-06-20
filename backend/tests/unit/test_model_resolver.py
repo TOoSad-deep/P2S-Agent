@@ -11,7 +11,7 @@ import socket
 
 import pytest
 
-from app.llm.model_resolver import ModelResolutionError, resolve_model_config
+from p2s_agent.core.llm.model_resolver import ModelResolutionError, resolve_model_config
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def _public_dns(monkeypatch):
         return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", port or 0))]
 
     monkeypatch.setattr(
-        "app.llm.model_resolver.socket.getaddrinfo", _fake_getaddrinfo
+        "p2s_agent.core.llm.model_resolver.socket.getaddrinfo", _fake_getaddrinfo
     )
 
 

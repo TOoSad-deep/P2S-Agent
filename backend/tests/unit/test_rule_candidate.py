@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from app.candidates.rule import generate_rule_candidate
-from app.dsl.compiler import compile_dsl
-from app.dsl.validator import validate_dsl
+from p2s_agent.core.candidates.rule import generate_rule_candidate
+from p2s_agent.core.dsl.compiler import compile_dsl
+from p2s_agent.core.dsl.validator import validate_dsl
 
 
 # ---------------------------------------------------------------------------

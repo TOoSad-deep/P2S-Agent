@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.glsl_refinement import _diff_glsl_summary, run_glsl_refinement_loop
-from app.pipeline.refinement import build_recent_history_notes, build_semantic_notes
+from p2s_agent.core.pipeline.glsl_refinement import _diff_glsl_summary, run_glsl_refinement_loop
+from p2s_agent.core.pipeline.refinement import build_recent_history_notes, build_semantic_notes
 
 VALID_GLSL_A = (
     "#define R 0.30\n"
@@ -35,7 +35,7 @@ def test_loop_accepts_improvement_and_stops_at_threshold(tmp_path, monkeypatch):
         return {"glsl": VALID_GLSL_B, "_io": {"mode": "glsl_refinement"}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     result = run_glsl_refinement_loop(
@@ -69,7 +69,7 @@ def test_loop_rolls_back_and_feeds_back(tmp_path, monkeypatch):
         return {"glsl": worse, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     result = run_glsl_refinement_loop(
@@ -102,7 +102,7 @@ def test_loop_fresh_restart_after_patience(tmp_path, monkeypatch):
         return {"glsl": worse, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     result = run_glsl_refinement_loop(
@@ -135,7 +135,7 @@ def test_loop_feeds_render_failure_back(tmp_path, monkeypatch):
         return {"glsl": VALID_GLSL_B, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     result = run_glsl_refinement_loop(
@@ -169,7 +169,7 @@ def test_loop_does_not_accept_phantom_score_when_render_failed(tmp_path, monkeyp
     original best rather than accepting a non-rendered candidate.
     """
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
     )
 
@@ -206,7 +206,7 @@ def test_loop_injects_semantic_feedback_from_rubric(tmp_path, monkeypatch):
         return {"glsl": VALID_GLSL_B, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     run_glsl_refinement_loop(
@@ -241,7 +241,7 @@ def test_loop_includes_recent_history_notes(tmp_path, monkeypatch):
         return {"glsl": worse, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     run_glsl_refinement_loop(
@@ -271,7 +271,7 @@ def test_loop_skips_invalid_glsl_with_compile_feedback(tmp_path, monkeypatch):
         return {"glsl": "void broken() {", "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     result = run_glsl_refinement_loop(
@@ -298,7 +298,7 @@ def test_loop_skips_invalid_glsl_with_compile_feedback(tmp_path, monkeypatch):
 
 def test_loop_stops_when_llm_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **kwargs: None,
     )
 
@@ -324,7 +324,7 @@ def test_loop_high_score_stops_without_llm_call(tmp_path, monkeypatch):
         raise AssertionError("LLM must not be called above high_score_stop")
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fail_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fail_refine
     )
 
     result = run_glsl_refinement_loop(
@@ -352,7 +352,7 @@ def test_loop_injects_initial_extra_feedback_on_first_call(tmp_path, monkeypatch
         return {"glsl": VALID_GLSL_B, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     run_glsl_refinement_loop(
@@ -387,7 +387,7 @@ def test_initial_extra_feedback_persists_across_iterations(tmp_path, monkeypatch
         return {"glsl": next(seq), "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     run_glsl_refinement_loop(
@@ -426,7 +426,7 @@ def _evaluate_by_r_with_render(glsl: str, render_path: Path):
 def test_directed_acceptance_accepts_small_drop_when_judge_picks_b(tmp_path, monkeypatch):
     lower = VALID_GLSL_A.replace("0.30", "0.28")  # delta -0.02, within tolerance
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": lower, "_io": {}},
     )
     current = tmp_path / "current.png"
@@ -457,7 +457,7 @@ def test_directed_acceptance_accepts_small_drop_when_judge_picks_b(tmp_path, mon
 def test_directed_acceptance_rejects_drop_beyond_tolerance(tmp_path, monkeypatch):
     lower = VALID_GLSL_A.replace("0.30", "0.24")  # delta -0.06, beyond tolerance
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": lower, "_io": {}},
     )
     current = tmp_path / "current.png"
@@ -487,7 +487,7 @@ def test_directed_acceptance_rejects_drop_beyond_tolerance(tmp_path, monkeypatch
 def test_directed_acceptance_metric_only_without_judge(tmp_path, monkeypatch):
     lower = VALID_GLSL_A.replace("0.30", "0.28")
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": lower, "_io": {}},
     )
     current = tmp_path / "current.png"
@@ -520,7 +520,7 @@ def test_force_first_overrides_high_score_stop(tmp_path, monkeypatch):
         return {"glsl": VALID_GLSL_B, "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     # initial score (0.95) is already above high_score_stop (0.92); force_first
@@ -583,7 +583,7 @@ def test_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
         return {"glsl": next(seq), "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     snaps: list[dict] = []
@@ -610,7 +610,7 @@ def test_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
     assert "0.55" in snaps[-1]["glsl"]
 
 
-from app.pipeline.region_metrics import RegionVetoResult
+from p2s_agent.core.pipeline.region_metrics import RegionVetoResult
 
 
 def _veto_all(_render_path):
@@ -623,7 +623,7 @@ def _veto_all(_render_path):
 
 def test_glsl_veto_rejects_globally_better_candidate(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
     )
     result = run_glsl_refinement_loop(
@@ -647,7 +647,7 @@ def test_glsl_veto_overrides_directed_acceptance(tmp_path, monkeypatch):
     # (judge="B" within score_drop_tolerance) could — the veto must override that.
     low_glsl = VALID_GLSL_B.replace("#define R 0.50", "#define R 0.28")
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": low_glsl, "_io": {}},
     )
     result = run_glsl_refinement_loop(
@@ -673,7 +673,7 @@ def test_glsl_veto_overrides_force_first_iteration(tmp_path, monkeypatch):
     # force_first_iteration only relaxes loop-entry/early-exit checks; it must NOT
     # let a protect-violating candidate be accepted. (spec D1, plan test #8)
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **k: {"glsl": VALID_GLSL_B, "_io": {}},
     )
     result = run_glsl_refinement_loop(

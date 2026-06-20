@@ -13,7 +13,7 @@ import pytest
 from PIL import Image
 
 from app.pipeline.fusion_plans import FusionRegion
-from app.pipeline.image_composite import _build_rect_mask, build_composite_target
+from p2s_agent.core.pipeline.image_composite import _build_rect_mask, build_composite_target
 
 
 # ---------------------------------------------------------------------------

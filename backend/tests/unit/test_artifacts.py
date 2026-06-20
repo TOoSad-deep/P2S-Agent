@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline import artifacts
+from p2s_agent.core.pipeline import artifacts
 
 
 # === create_run_dir ===

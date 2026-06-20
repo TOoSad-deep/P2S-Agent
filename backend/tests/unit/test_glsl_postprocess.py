@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.utils.glsl_postprocess import (
+from p2s_agent.core.utils.glsl_postprocess import (
     build_visual_strategy,
     normalize_shadertoy_glsl,
     parse_glsl_response_payload,

@@ -776,7 +776,7 @@ class TestPlanPersistence:
 
     def test_no_real_test_results_pollution(self, tmp_path):
         """Ensure tests never touch the real DEFAULT_RESULTS_ROOT."""
-        from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
+        from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT
 
         record = _make_record(fusion_id="fus-isolation")
         save_plan(record, root=tmp_path)
@@ -862,7 +862,7 @@ class TestPlanEvents:
 
     def test_no_real_test_results_pollution(self, tmp_path):
         """Ensure tests never touch the real DEFAULT_RESULTS_ROOT."""
-        from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT
+        from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT
 
         append_plan_event("fus-isolation-ev", {"ts": 0}, root=tmp_path)
         real_dir = DEFAULT_RESULTS_ROOT / "fusions"

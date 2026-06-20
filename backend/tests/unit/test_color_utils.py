@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.utils.color import normalize_color
+from p2s_agent.core.utils.color import normalize_color
 
 
 def test_normalize_color_css_hex_6digit():

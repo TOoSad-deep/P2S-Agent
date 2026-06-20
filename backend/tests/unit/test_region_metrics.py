@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app.pipeline.region_metrics import compute_region_metrics
+from p2s_agent.core.pipeline.region_metrics import compute_region_metrics
 from app.pipeline.human_constraints import RegionConstraint
 
 
@@ -326,7 +326,7 @@ def test_identical_images_all_metrics_sane(tmp_path):
 # ---------------------------------------------------------------------------
 
 from app.pipeline.human_constraints import RegionConstraint
-from app.pipeline.region_metrics import (
+from p2s_agent.core.pipeline.region_metrics import (
     RegionVetoResult,
     protect_region_threshold,
     evaluate_protect_veto,

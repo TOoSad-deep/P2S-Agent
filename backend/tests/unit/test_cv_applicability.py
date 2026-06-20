@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.utils.cv_features import (
+from p2s_agent.core.utils.cv_features import (
     CV_APPLICABILITY_THRESHOLD_HIGH,
     CV_APPLICABILITY_THRESHOLD_LOW,
     compute_cv_applicability_score,

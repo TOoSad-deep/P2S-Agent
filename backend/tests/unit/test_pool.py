@@ -8,7 +8,7 @@ can surface it.
 
 from __future__ import annotations
 
-from app.pipeline.pool import build_scoreboard, run_candidate_pool
+from p2s_agent.core.pipeline.pool import build_scoreboard, run_candidate_pool
 
 
 def _make_preprocess(palette=None):
@@ -34,7 +34,7 @@ def test_failing_source_surfaces_structured_error_and_keeps_others(monkeypatch):
     def boom(*args, **kwargs):
         raise ValueError("rule blew up: bad geometry")
 
-    monkeypatch.setattr("app.pipeline.pool.generate_rule_candidate", boom)
+    monkeypatch.setattr("p2s_agent.core.pipeline.pool.generate_rule_candidate", boom)
 
     candidates = run_candidate_pool(
         _make_preprocess(),
@@ -77,7 +77,7 @@ def test_failing_decompose_source_adds_visible_placeholder(monkeypatch):
     def boom(*args, **kwargs):
         raise IndexError("decompose index out of range")
 
-    monkeypatch.setattr("app.pipeline.pool.generate_decompose_candidate", boom)
+    monkeypatch.setattr("p2s_agent.core.pipeline.pool.generate_decompose_candidate", boom)
 
     candidates = run_candidate_pool(
         _make_preprocess(),

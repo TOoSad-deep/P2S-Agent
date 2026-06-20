@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from PIL import Image
 
-from app.dsl.renderer import render_dsl_to_image
-from app.dsl.schema import FIXTURE_CIRCLE_SOLID, FIXTURE_BOX_GRADIENT
-from app.metrics.compute import check_nonblank_render
+from p2s_agent.core.dsl.renderer import render_dsl_to_image
+from p2s_agent.core.dsl.schema import FIXTURE_CIRCLE_SOLID, FIXTURE_BOX_GRADIENT
+from p2s_agent.core.metrics.compute import check_nonblank_render
 
 
 def test_render_dsl_to_image_writes_nonblank_png(tmp_path):
@@ -34,6 +34,6 @@ def test_render_dsl_to_image_handles_gradient_fill(tmp_path):
 def test_renderer_hex_to_rgb_parses_8_digit_rgba():
     """Bug 4 mirror: the renderer's _hex_to_rgb must parse the RGB part of an
     8-digit #RRGGBBAA color (matching the compiler), not collapse to white."""
-    from app.dsl.renderer import _hex_to_rgb
+    from p2s_agent.core.dsl.renderer import _hex_to_rgb
 
     assert _hex_to_rgb("#112233ff") == (0x11, 0x22, 0x33)

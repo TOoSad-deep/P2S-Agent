@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.graph import (
+from p2s_agent.core.pipeline.graph import (
     CandidateRecord,
     _run_post_pipeline,
     _should_run_refinement,
@@ -21,8 +21,8 @@ from app.pipeline.graph import (
     run_png_shader_pipeline,
     select_best_candidate,
 )
-from app.pipeline.input_spec import build_input_spec
-from app.pipeline.preprocess import preprocess_image
+from p2s_agent.core.pipeline.input_spec import build_input_spec
+from p2s_agent.core.pipeline.preprocess import preprocess_image
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +400,7 @@ def test_run_candidate_pool_passes_model_reference_to_llm(tmp_path, monkeypatch)
         captured["image_path"] = kwargs.get("image_path")
         return None
 
-    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("p2s_agent.core.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
 
     records = run_candidate_pool(
         preprocess,
@@ -504,7 +504,7 @@ def test_run_candidate_pool_accepts_glsl_llm_candidate(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(
-        "app.pipeline.pool.generate_llm_scene_candidate",
+        "p2s_agent.core.pipeline.pool.generate_llm_scene_candidate",
         fake_llm_candidate,
     )
 
@@ -553,10 +553,10 @@ def test_run_pipeline_auto_scores_glsl_llm_candidate_from_input_spec(tmp_path, m
         return [str(render_path)]
 
     monkeypatch.setattr(
-        "app.pipeline.pool.generate_llm_scene_candidate",
+        "p2s_agent.core.pipeline.pool.generate_llm_scene_candidate",
         fake_llm_candidate,
     )
-    monkeypatch.setattr("app.pipeline.scoring.render_multiple_frames", fake_render_multiple_frames)
+    monkeypatch.setattr("p2s_agent.core.pipeline.scoring.render_multiple_frames", fake_render_multiple_frames)
 
     result = run_png_shader_pipeline(png_path, input_spec=input_spec)
 
@@ -608,8 +608,8 @@ def test_run_pipeline_can_webgl_score_glsl_llm_candidate(tmp_path, monkeypatch):
         Image.new("RGBA", (64, 64), (255, 255, 255, 255)).save(render_path)
         return [str(render_path)]
 
-    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
-    monkeypatch.setattr("app.pipeline.scoring.render_multiple_frames", fake_render_multiple_frames)
+    monkeypatch.setattr("p2s_agent.core.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("p2s_agent.core.pipeline.scoring.render_multiple_frames", fake_render_multiple_frames)
 
     result = run_png_shader_pipeline(png_path, input_spec=input_spec)
 
@@ -643,7 +643,7 @@ def test_refinement_loop_records_llm_call_exception(tmp_path, monkeypatch):
         raise TimeoutError("upstream gateway timed out after 50s")
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_refinement",
         fake_refinement,
     )
 
@@ -703,7 +703,7 @@ def test_refinement_loop_records_llm_parse_diagnostic(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_refinement",
         fake_refinement,
     )
 
@@ -767,7 +767,7 @@ def test_run_post_pipeline_runs_glsl_refinement(tmp_path, monkeypatch):
             "stop_reason": "threshold_reached",
         }
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
 
     result = _run_post_pipeline({
         "selected_candidate_id": "llm_0",
@@ -817,7 +817,7 @@ def test_run_post_pipeline_skips_glsl_refinement_when_render_disabled(tmp_path, 
     def fail_loop(*args, **kwargs):
         raise AssertionError("refinement loop must not run without the renderer")
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fail_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fail_loop)
 
     result = _run_post_pipeline({
         "selected_candidate_id": "llm_0",
@@ -848,9 +848,9 @@ def test_run_post_pipeline_accepts_dsl_revision(tmp_path, monkeypatch):
     referencing the wrong attribute raised AttributeError and failed the whole
     run. This drives the revise -> apply -> accept path end to end.
     """
-    import app.pipeline.graph as graph_mod
-    import app.pipeline.scoring as scoring_mod
-    from app.pipeline.revision import RevisionPatch, RevisionResult
+    import p2s_agent.core.pipeline.graph as graph_mod
+    import p2s_agent.core.pipeline.scoring as scoring_mod
+    from p2s_agent.core.pipeline.revision import RevisionPatch, RevisionResult
 
     dsl = {
         "schema_version": 1,
@@ -958,23 +958,23 @@ def test_dsl_refinement_feeds_history_and_semantic_notes(tmp_path, monkeypatch):
         return {"layers": [], "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_refinement",
         fake_refinement,
     )
     monkeypatch.setattr(
-        "app.pipeline.refinement.render_dsl_to_image",
+        "p2s_agent.core.pipeline.refinement.render_dsl_to_image",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(
-        "app.dsl.validator.validate_dsl",
+        "p2s_agent.core.dsl.validator.validate_dsl",
         lambda d: SimpleNamespace(valid=True, errors=[]),
     )
     monkeypatch.setattr(
-        "app.dsl.compiler.compile_dsl",
+        "p2s_agent.core.dsl.compiler.compile_dsl",
         lambda d: SimpleNamespace(success=True, glsl="void mainImage(){}", errors=[]),
     )
     monkeypatch.setattr(
-        "app.pipeline.refinement._evaluate_dsl",
+        "p2s_agent.core.pipeline.refinement._evaluate_dsl",
         lambda *a, **k: ({}, {"final_score": 0.2}, 0.2, None),
     )
 
@@ -1074,9 +1074,9 @@ def test_run_pipeline_syncs_refined_llm_candidate_glsl_into_scoreboard(tmp_path,
             "stop_reason": "max_iterations",
         }
 
-    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
-    monkeypatch.setattr("app.pipeline.graph._score_candidates", fake_score_candidates)
-    monkeypatch.setattr("app.pipeline.graph.run_dsl_refinement_loop", fake_refinement_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph._score_candidates", fake_score_candidates)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_dsl_refinement_loop", fake_refinement_loop)
 
     result = run_png_shader_pipeline(png_path, input_spec=input_spec)
 
@@ -1109,7 +1109,7 @@ def test_run_pipeline_different_image_colors(tmp_path):
 
 def test_pipeline_threads_protected_aspects_to_quality_router(tmp_path):
     from PIL import Image
-    from app.pipeline.input_spec import build_input_spec
+    from p2s_agent.core.pipeline.input_spec import build_input_spec
 
     img_path = tmp_path / "in.png"
     Image.new("RGBA", (32, 32), (200, 50, 20, 255)).save(img_path)
@@ -1127,10 +1127,10 @@ def test_pipeline_threads_protected_aspects_to_quality_router(tmp_path):
 def test_pipeline_force_failure_type_overrides_router(tmp_path, monkeypatch):
     from dataclasses import replace as _dataclass_replace
     from PIL import Image
-    from app.pipeline import graph as graph_module
-    from app.pipeline import scoring as scoring_module
-    from app.metrics import quality_router as qr_module
-    from app.pipeline.input_spec import build_input_spec
+    from p2s_agent.core.pipeline import graph as graph_module
+    from p2s_agent.core.pipeline import scoring as scoring_module
+    from p2s_agent.core.metrics import quality_router as qr_module
+    from p2s_agent.core.pipeline.input_spec import build_input_spec
 
     img_path = tmp_path / "in.png"
     Image.new("RGBA", (32, 32), (200, 50, 20, 255)).save(img_path)
@@ -1166,7 +1166,7 @@ def test_pipeline_force_failure_type_overrides_router(tmp_path, monkeypatch):
 def test_pipeline_accepts_strategy_reader_kwarg(tmp_path):
     """Smoke test: pipeline should accept strategy_reader kwarg without crashing."""
     from PIL import Image
-    from app.pipeline.input_spec import build_input_spec
+    from p2s_agent.core.pipeline.input_spec import build_input_spec
 
     img_path = tmp_path / "in.png"
     Image.new("RGBA", (32, 32), (200, 50, 20, 255)).save(img_path)
@@ -1184,7 +1184,7 @@ def test_pipeline_accepts_strategy_reader_kwarg(tmp_path):
 
 def test_pipeline_threads_strategy_reader_to_refinement_loop(tmp_path, monkeypatch):
     from PIL import Image
-    from app.pipeline.input_spec import build_input_spec
+    from p2s_agent.core.pipeline.input_spec import build_input_spec
 
     img_path = tmp_path / "in.png"
     Image.new("RGBA", (32, 32), (200, 50, 20, 255)).save(img_path)
@@ -1245,9 +1245,9 @@ def test_pipeline_threads_strategy_reader_to_refinement_loop(tmp_path, monkeypat
     def reader():
         return {"strategy": {}, "stop_requested": True}
 
-    monkeypatch.setattr("app.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
-    monkeypatch.setattr("app.pipeline.graph._score_candidates", fake_score_candidates)
-    monkeypatch.setattr("app.pipeline.graph.run_dsl_refinement_loop", fake_refinement_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.pool.generate_llm_scene_candidate", fake_llm_candidate)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph._score_candidates", fake_score_candidates)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_dsl_refinement_loop", fake_refinement_loop)
 
     run_png_shader_pipeline(img_path, spec, run_id="strategy_reader_refinement", strategy_reader=reader)
 
@@ -1257,7 +1257,7 @@ def test_pipeline_threads_strategy_reader_to_refinement_loop(tmp_path, monkeypat
 def test_pipeline_manifest_includes_strategy_fields(tmp_path):
     import json as _json
     from PIL import Image
-    from app.pipeline.input_spec import build_input_spec
+    from p2s_agent.core.pipeline.input_spec import build_input_spec
 
     img_path = tmp_path / "in.png"
     Image.new("RGBA", (32, 32), (200, 50, 20, 255)).save(img_path)
@@ -1283,7 +1283,7 @@ def test_pipeline_manifest_includes_strategy_fields(tmp_path):
 def test_seed_glsl_pipeline_skips_pool_and_refines(tmp_path, monkeypatch):
     """A seed_glsl run must build one 'seed' candidate (no pool generation)
     and drive it through run_glsl_refinement_loop."""
-    import app.pipeline.graph as graph_mod
+    import p2s_agent.core.pipeline.graph as graph_mod
 
     png = make_solid_png(tmp_path, color=(120, 60, 30, 255))
 
@@ -1305,7 +1305,7 @@ def test_seed_glsl_pipeline_skips_pool_and_refines(tmp_path, monkeypatch):
 
     monkeypatch.setattr(graph_mod, "_evaluate_glsl_with_webgl", fake_eval)
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     spec = build_input_spec(
@@ -1328,7 +1328,7 @@ def test_seed_glsl_invalid_raises(tmp_path, monkeypatch):
     background worker marks the run failed."""
     png = make_solid_png(tmp_path)
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement",
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement",
         lambda **kwargs: None,
     )
     spec = build_input_spec(png, candidates={"glsl_render_enabled": True})
@@ -1346,22 +1346,22 @@ def test_dsl_loop_invokes_on_iteration_each_iteration(tmp_path, monkeypatch):
         return {"layers": [], "_io": {}}
 
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_refinement", fake_refinement
+        "p2s_agent.core.candidates.llm_scene.generate_llm_refinement", fake_refinement
     )
     monkeypatch.setattr(
-        "app.pipeline.refinement.render_dsl_to_image", lambda *a, **k: None
+        "p2s_agent.core.pipeline.refinement.render_dsl_to_image", lambda *a, **k: None
     )
     monkeypatch.setattr(
-        "app.dsl.validator.validate_dsl",
+        "p2s_agent.core.dsl.validator.validate_dsl",
         lambda d: SimpleNamespace(valid=True, errors=[]),
     )
     monkeypatch.setattr(
-        "app.dsl.compiler.compile_dsl",
+        "p2s_agent.core.dsl.compiler.compile_dsl",
         lambda d: SimpleNamespace(success=True, glsl="void mainImage(){}", errors=[]),
     )
     scores = iter([0.6, 0.7])
     monkeypatch.setattr(
-        "app.pipeline.refinement._evaluate_dsl",
+        "p2s_agent.core.pipeline.refinement._evaluate_dsl",
         lambda *a, **k: ({}, {"final_score": 0.6}, next(scores), None),
     )
 
@@ -1429,7 +1429,7 @@ def test_run_post_pipeline_publishes_baseline_and_iterations(tmp_path, monkeypat
             "stop_reason": "threshold_reached",
         }
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
 
     published: list[dict] = []
     result = _run_post_pipeline(
@@ -1474,7 +1474,7 @@ def test_pipeline_threads_publish_partial_baseline(tmp_path):
 
 
 def test_seed_pipeline_publishes_iterations(tmp_path, monkeypatch):
-    import app.pipeline.graph as graph_mod
+    import p2s_agent.core.pipeline.graph as graph_mod
 
     png = make_solid_png(tmp_path, color=(120, 60, 30, 255))
     seed = (
@@ -1495,7 +1495,7 @@ def test_seed_pipeline_publishes_iterations(tmp_path, monkeypatch):
 
     monkeypatch.setattr(graph_mod, "_evaluate_glsl_with_webgl", fake_eval)
     monkeypatch.setattr(
-        "app.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
+        "p2s_agent.core.candidates.llm_scene.generate_llm_glsl_refinement", fake_refine
     )
 
     spec = build_input_spec(
@@ -1581,7 +1581,7 @@ def test_glsl_refinement_receives_human_feedback_notes(tmp_path, monkeypatch):
         captured.update(kwargs)
         return _noop_glsl_loop(glsl)()
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
     _run_post_pipeline(state)
 
     assert captured["initial_extra_feedback"] == [
@@ -1604,7 +1604,7 @@ def test_force_first_refinement_iteration_propagates_to_glsl_loop(tmp_path, monk
         captured.update(kwargs)
         return _noop_glsl_loop(glsl)()
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
     _run_post_pipeline(state)
 
     assert captured["force_first_iteration"] is True
@@ -1614,7 +1614,7 @@ def test_baseline_partial_includes_run_dir_and_lineage(tmp_path, monkeypatch):
     lineage = {"parent_run_id": "run_p", "source_checkpoint_id": "final:selected"}
     state, glsl = _glsl_branch_state(tmp_path, lineage=lineage)
     monkeypatch.setattr(
-        "app.pipeline.graph.run_glsl_refinement_loop", _noop_glsl_loop(glsl)
+        "p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", _noop_glsl_loop(glsl)
     )
 
     partials: list[dict] = []
@@ -1682,7 +1682,7 @@ def test_directed_acceptance_judge_passed_to_glsl_loop(tmp_path, monkeypatch):
         captured.update(kwargs)
         return _noop_glsl_loop(glsl)()
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
     _run_post_pipeline(state)
 
     assert captured["directed_acceptance"] == {
@@ -1699,7 +1699,7 @@ def test_directed_judge_none_when_disabled(tmp_path, monkeypatch):
         captured.update(kwargs)
         return _noop_glsl_loop(glsl)()
 
-    monkeypatch.setattr("app.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
     _run_post_pipeline(state)
 
     assert captured["directed_pairwise_judge"] is None
