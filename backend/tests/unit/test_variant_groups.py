@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.variant_groups import (
+from p2s_agent.orchestration.variant_groups import (
     VariantGroupRecord,
     aggregate_group_status,
     append_group_event,

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from app.pipeline.fusion_plans import FusionRegion
+from p2s_agent.orchestration.fusion_plans import FusionRegion
 from p2s_agent.core.pipeline.image_composite import _build_rect_mask, build_composite_target
 
 

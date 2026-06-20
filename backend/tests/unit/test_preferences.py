@@ -1,4 +1,4 @@
-"""Unit tests for app.pipeline.preferences (V4.3)."""
+"""Unit tests for p2s_agent.orchestration.preferences (V4.3)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.preferences import (
+from p2s_agent.orchestration.preferences import (
     PreferenceEvent,
     append_preference_event,
     build_preference_notes,

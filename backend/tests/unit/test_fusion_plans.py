@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.fusion_plans import (
+from p2s_agent.orchestration.fusion_plans import (
     FusionPlanRecord,
     FusionRegion,
     append_plan_event,

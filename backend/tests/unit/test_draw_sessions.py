@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.draw_sessions import (
+from p2s_agent.orchestration.draw_sessions import (
     DrawSessionRecord,
     aggregate_draw_status,
     append_session_event,

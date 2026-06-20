@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from app.pipeline.checkpoints import (
+from p2s_agent.orchestration.checkpoints import (
     CheckpointError,
     PipelineCheckpoint,
     build_timeline,

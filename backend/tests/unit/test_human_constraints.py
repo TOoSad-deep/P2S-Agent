@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.human_constraints import (
+from p2s_agent.orchestration.human_constraints import (
     HumanConstraintSpec,
     RegionConstraint,
     build_constraint_notes,

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from app.pipeline.run_index import (
+from p2s_agent.orchestration.run_index import (
     SCHEMA_VERSION,
     RunIndexError,
     RunLineageRecord,
@@ -658,7 +658,7 @@ def test_load_run_index_caches_when_file_unchanged(tmp_path, monkeypatch):
     load parses the lines; the second load with an unchanged file must reuse the
     cached fold and therefore parse nothing.
     """
-    import app.pipeline.run_index as ri
+    import p2s_agent.orchestration.run_index as ri
 
     idx = tmp_path / "idx.jsonl"
     append_run_created(_record("c1", status="running"), path=idx)
@@ -740,7 +740,7 @@ def test_malformed_line_emits_warning(tmp_path, caplog):
     with idx.open("a", encoding="utf-8") as fh:
         fh.write("{this is not valid json\n")
 
-    with caplog.at_level(logging.WARNING, logger="app.pipeline.run_index"):
+    with caplog.at_level(logging.WARNING, logger="p2s_agent.orchestration.run_index"):
         index = load_run_index(path=idx)
 
     assert "good-1" in index
@@ -876,7 +876,7 @@ def test_fold_warns_on_future_version_but_still_folds(tmp_path, caplog):
     with p.open("w", encoding="utf-8") as fh:
         fh.write(json.dumps(future) + "\n")
 
-    with caplog.at_level(logging.WARNING, logger="app.pipeline.run_index"):
+    with caplog.at_level(logging.WARNING, logger="p2s_agent.orchestration.run_index"):
         index = load_run_index(path=p)
 
     assert "future-1" in index

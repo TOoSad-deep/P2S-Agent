@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.pipeline.checkpoints import PipelineCheckpoint
-from app.pipeline.human_feedback import (
+from p2s_agent.orchestration.checkpoints import PipelineCheckpoint
+from p2s_agent.orchestration.human_feedback import (
     FeedbackValidationError,
     build_human_feedback_notes,
     validate_feedback,

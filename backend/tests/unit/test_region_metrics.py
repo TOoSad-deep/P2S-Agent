@@ -14,7 +14,7 @@ import pytest
 from PIL import Image
 
 from p2s_agent.core.pipeline.region_metrics import compute_region_metrics
-from app.pipeline.human_constraints import RegionConstraint
+from p2s_agent.orchestration.human_constraints import RegionConstraint
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ def test_identical_images_all_metrics_sane(tmp_path):
 # Protect-region hard-veto core (Task 1)
 # ---------------------------------------------------------------------------
 
-from app.pipeline.human_constraints import RegionConstraint
+from p2s_agent.orchestration.human_constraints import RegionConstraint
 from p2s_agent.core.pipeline.region_metrics import (
     RegionVetoResult,
     protect_region_threshold,
