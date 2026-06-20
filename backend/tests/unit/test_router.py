@@ -12,7 +12,8 @@ from PIL import Image
 fastapi = pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
-from app.routers.png_shader import _run_store, router
+from app.routers.png_shader import router
+from p2s_agent.store import _run_store
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ def _isolate_run_index(tmp_path, monkeypatch):
     Also redirect variant_groups, draw_sessions and preferences writes to
     isolated temp directories."""
     monkeypatch.setattr(
-        "app.routers.png_shader._RUN_INDEX_PATH",
+        "p2s_agent.store._RUN_INDEX_PATH",
         str(tmp_path / "run_index.jsonl"),
     )
     monkeypatch.setattr(
@@ -310,7 +311,7 @@ def test_run_rejects_non_object_input_spec_with_seed_glsl(tmp_path):
 
 
 def test_publish_partial_merges_into_running_store():
-    from app.routers.png_shader import _publish_partial_to_store
+    from p2s_agent.store import _publish_partial_to_store
 
     _run_store.clear()
     _run_store["run_x"] = {
@@ -336,7 +337,7 @@ def test_publish_partial_merges_into_running_store():
 
 
 def test_publish_partial_noop_when_terminal():
-    from app.routers.png_shader import _publish_partial_to_store
+    from p2s_agent.store import _publish_partial_to_store
 
     _run_store.clear()
     _run_store["run_done"] = {"run_id": "run_done", "status": "completed"}
@@ -350,7 +351,7 @@ def test_publish_partial_noop_when_terminal():
 
 
 def test_publish_partial_noop_when_missing():
-    from app.routers.png_shader import _publish_partial_to_store
+    from p2s_agent.store import _publish_partial_to_store
 
     _run_store.clear()
     _publish_partial_to_store("ghost", {"scoreboard": {}})
@@ -640,7 +641,7 @@ def test_run_index_root_run_completed(tmp_path, monkeypatch):
 
     # Use a deterministic index path so we can read it back.
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     fake_run_dir = str(tmp_path / "rd")
 
@@ -683,7 +684,7 @@ def test_run_index_branch_run_completed(tmp_path, monkeypatch):
     _run_store.clear()
 
     idx = str(tmp_path / "ri_branch.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     _seed_parent(tmp_path)
     captured: dict = {}
@@ -735,7 +736,7 @@ def test_run_index_failed_run(tmp_path, monkeypatch):
     _run_store.clear()
 
     idx = str(tmp_path / "ri_fail.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     def failing_pipeline(image_path, input_spec=None, run_id=None, **kwargs):
         raise RuntimeError("simulated pipeline crash")
@@ -804,7 +805,7 @@ def test_timeline_404_unknown_run(tmp_path, monkeypatch):
     """GET /timeline for an unknown run_id returns 404."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     client = _client()
     resp = client.get("/png-shader/runs/run_missing/timeline")
     assert resp.status_code == 404
@@ -814,7 +815,7 @@ def test_timeline_from_timeline_json_on_disk(tmp_path, monkeypatch):
     """GET /timeline for an evicted run reads timeline.json from disk."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     run_dir = tmp_path / "run_ev"
     run_dir.mkdir()
@@ -837,7 +838,7 @@ def test_timeline_store_missing_run_dir_none(tmp_path, monkeypatch):
     """GET /timeline for an index entry with run_dir=None returns empty timeline (no path access)."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     _seed_index(idx, run_id="run_pending", run_dir=None, status="pending")
 
     client = _client()
@@ -854,7 +855,7 @@ def test_branches_child_tree(tmp_path, monkeypatch):
     """GET /branches for a child run returns tree rooted at root_a."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     _seed_index(idx, run_id="root_a", run_dir=str(tmp_path / "root_a"), created_at=1.0)
     _seed_index(idx, run_id="child_b", root_run_id="root_a", parent_run_id="root_a",
@@ -876,7 +877,7 @@ def test_branches_404_unknown(tmp_path, monkeypatch):
     """GET /branches for unknown run_id returns 404."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     client = _client()
     resp = client.get("/png-shader/runs/ghost/branches")
     assert resp.status_code == 404
@@ -887,7 +888,7 @@ def test_branches_404_when_root_missing(tmp_path, monkeypatch):
     must return 404 (not 500) — build_branch_tree raises RunIndexError in this case."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     _seed_index(idx, run_id="orphan", root_run_id="ghost_root", parent_run_id="ghost_root")
     client = _client()
     assert client.get("/png-shader/runs/orphan/branches").status_code == 404
@@ -898,7 +899,7 @@ def test_branches_store_only_single_node(tmp_path, monkeypatch):
     single-node tree with no children."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     _run_store["run_solo"] = {"run_id": "run_solo", "status": "completed", "run_dir": None}
     client = _client()
     body = client.get("/png-shader/runs/run_solo/branches").json()
@@ -914,7 +915,7 @@ def test_metadata_update(tmp_path, monkeypatch):
     """PATCH /metadata with allowed fields persists them to the index."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     _seed_index(idx, run_id="run_m")
 
     client = _client()
@@ -935,7 +936,7 @@ def test_metadata_422_disallowed_key(tmp_path, monkeypatch):
     """PATCH /metadata with a disallowed key returns 422."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     _seed_index(idx, run_id="run_m2")
 
     client = _client()
@@ -947,7 +948,7 @@ def test_metadata_404_unknown(tmp_path, monkeypatch):
     """PATCH /metadata for unknown run_id returns 404."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     client = _client()
     resp = client.patch("/png-shader/runs/ghost_run/metadata", json={"title": "x"})
     assert resp.status_code == 404
@@ -959,7 +960,7 @@ def test_artifacts_selected_shader(tmp_path, monkeypatch):
     """GET /artifacts/selected_shader returns the file content."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     parent_dir = _seed_parent(tmp_path)
     shader_text = _BRANCH_GLSL
@@ -975,7 +976,7 @@ def test_artifacts_409_when_run_dir_none(tmp_path, monkeypatch):
     """GET /artifacts for a run with no run_dir returns 409."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     # A store entry with no run_dir
     _run_store["run_nodir"] = {
@@ -997,7 +998,7 @@ def test_artifacts_404_file_missing(tmp_path, monkeypatch):
     """GET /artifacts for a valid artifact_id but missing file returns 404."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     parent_dir = _seed_parent(tmp_path)
     # Do NOT write selected_shader.glsl — it should 404.
@@ -1010,7 +1011,7 @@ def test_artifacts_422_unknown_artifact_id(tmp_path, monkeypatch):
     """GET /artifacts with a completely unknown artifact_id returns 422."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     parent_dir = _seed_parent(tmp_path)
     client = _client()
@@ -1027,7 +1028,7 @@ def test_artifacts_422_bad_candidate_id_in_scoreboard(tmp_path, monkeypatch):
     """
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     parent_dir = _seed_parent(tmp_path)
     # candidate:ghost_99 is not in the scoreboard — resolver should reject it.
@@ -1047,7 +1048,7 @@ def test_artifacts_422_malformed_checkpoint_prefix(tmp_path, monkeypatch):
     """GET /artifacts/checkpoint:<id_with_no_trailing_kind> returns 422."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     parent_dir = _seed_parent(tmp_path)
     client = _client()
@@ -1067,7 +1068,7 @@ def test_save_timeline_written_on_success(tmp_path, monkeypatch):
     """Worker writes timeline.json to run_dir on successful completion."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     fake_run_dir = tmp_path / "rd_timeline"
     fake_run_dir.mkdir()
@@ -1109,7 +1110,7 @@ def test_run_index_completed_run_dir_from_result(tmp_path, monkeypatch):
     must still be persisted in the index via the final_run_dir fallback path."""
     _run_store.clear()
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     rd = str(tmp_path / "rd_from_result")
 
     def fake_pipeline(image_path, input_spec=None, run_id=None, *, seed_glsl=None, **kwargs):
@@ -1182,7 +1183,7 @@ def test_explore_variants_creates_4_children(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH",
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH",
                         str(tmp_path / "ri.jsonl"))
 
     _seed_parent(tmp_path)
@@ -1238,7 +1239,7 @@ def test_explore_variants_run_index_has_variant_fields(tmp_path, monkeypatch):
     _run_store.clear()
     idx = str(tmp_path / "ri_v.jsonl")
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
 
     _seed_parent(tmp_path)
@@ -1364,7 +1365,7 @@ def test_explore_variants_concurrency_all_complete(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH",
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH",
                         str(tmp_path / "ri_conc.jsonl"))
 
     _seed_parent(tmp_path)
@@ -1399,7 +1400,7 @@ def test_stop_queued_variant_returns_200(tmp_path):
     """POST /stop on a variant child with status='queued' must return 200 (not 409)
     and set stop_requested=True."""
     import threading as _threading
-    from app.routers.png_shader import _run_store as _rs
+    from p2s_agent.store import _run_store as _rs
 
     _rs.clear()
     run_id = "run_qstop"
@@ -1427,7 +1428,8 @@ def test_stop_before_acquire_cancels_without_acquiring(tmp_path, monkeypatch):
     must cancel immediately without calling acquire(), leaving status='cancelled' and
     group identity intact."""
     import threading as _threading
-    from app.routers.png_shader import _run_store as _rs, _run_png_shader_background, _variant_preserved
+    from app.routers.png_shader import _run_png_shader_background, _variant_preserved
+    from p2s_agent.store import _run_store as _rs
 
     _rs.clear()
     run_id = "run_preacq"
@@ -1493,7 +1495,7 @@ def test_variant_concurrency_peak_le_2(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH",
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH",
                         str(tmp_path / "ri_peak.jsonl"))
 
     _seed_parent(tmp_path)
@@ -1720,7 +1722,7 @@ def test_winner_marks_group_and_favorite(tmp_path, monkeypatch):
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     children = [
         {"run_id": "w_a", "status": "completed", "variant_index": 0, "variant_label": "A",
@@ -1904,7 +1906,7 @@ def test_winner_persists_run_index_favorite_and_appends_event(tmp_path, monkeypa
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     # Seed children and group.
     children = [
@@ -1964,7 +1966,7 @@ def test_winner_save_group_failure_returns_500(tmp_path, monkeypatch):
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     children = [
         {"run_id": "wf_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
@@ -1993,7 +1995,7 @@ def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     # Seed a group with one child, but do NOT put that child in _run_store.
     from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
@@ -3282,7 +3284,7 @@ def test_variant_winner_mirrors_preference_event(tmp_path, monkeypatch):
     idx = str(tmp_path / "ri.jsonl")
     monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     children = [
         {"run_id": "pw_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
@@ -3837,7 +3839,7 @@ def test_fusion_run_creates_child(tmp_path, monkeypatch):
     fusions_root = str(tmp_path / "fusions_root")
     idx = str(tmp_path / "ri.jsonl")
     monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", idx)
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     captures: list[dict] = []
     monkeypatch.setattr(
         "app.routers.png_shader.run_png_shader_pipeline",
@@ -3996,7 +3998,7 @@ def test_status_concurrent_mutation_does_not_500(tmp_path):
         i = 0
         while not stop.is_set():
             # Mutate under the same lock the reader uses, churning dict size.
-            from app.routers.png_shader import _run_store_lock
+            from p2s_agent.store import _run_store_lock
             with _run_store_lock:
                 d = _run_store["run_race"]["d"]
                 d[str(i)] = i
@@ -4029,7 +4031,7 @@ def test_fusion_run_completion_marks_plan_completed(tmp_path, monkeypatch):
     _seed_fusion_run(tmp_path, "run_src")
     fusions_root = str(tmp_path / "fusions_root")
     monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
-    monkeypatch.setattr("app.routers.png_shader._RUN_INDEX_PATH", str(tmp_path / "ri.jsonl"))
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", str(tmp_path / "ri.jsonl"))
     monkeypatch.setattr(
         "app.routers.png_shader.run_png_shader_pipeline",
         _fake_variant_pipeline([]),

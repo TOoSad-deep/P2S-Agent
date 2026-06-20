@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-import app.routers.png_shader as ps
-from app.routers.png_shader import (
+import p2s_agent.store as store
+from p2s_agent.store import (
     _MAX_STORE_SIZE,
     _get_run_model,
     _store_run,
@@ -17,14 +17,18 @@ from app.routers.png_shader import (
 
 @pytest.fixture(autouse=True)
 def _clean_stores():
-    """Reset both in-memory stores around each test."""
-    ps._run_store.clear()
-    with ps._run_models_lock:
-        ps._run_models.clear()
+    """Reset both in-memory stores around each test.
+
+    Must clear in place (never rebind) so the shared OrderedDict the live code
+    holds stays the one the test mutates.
+    """
+    store._run_store.clear()
+    with store._run_models_lock:
+        store._run_models.clear()
     yield
-    ps._run_store.clear()
-    with ps._run_models_lock:
-        ps._run_models.clear()
+    store._run_store.clear()
+    with store._run_models_lock:
+        store._run_models.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -41,8 +45,8 @@ def test_running_run_is_never_evicted_when_capacity_exceeded():
         rid = f"term_{i}"
         _store_run(rid, {"run_id": rid, "status": "completed"})
 
-    assert "live" in ps._run_store, "running run must never be evicted"
-    assert len(ps._run_store) <= _MAX_STORE_SIZE
+    assert "live" in store._run_store, "running run must never be evicted"
+    assert len(store._run_store) <= _MAX_STORE_SIZE
 
 
 def test_lru_recently_accessed_terminal_survives_over_older_untouched():
@@ -59,11 +63,11 @@ def test_lru_recently_accessed_terminal_survives_over_older_untouched():
     # Insert one more terminal entry -> something must be evicted.
     _store_run("newcomer", {"run_id": "newcomer", "status": "completed"})
 
-    assert len(ps._run_store) <= _MAX_STORE_SIZE
+    assert len(store._run_store) <= _MAX_STORE_SIZE
     # t_0 was touched, so it must survive; the next-oldest (t_1) is evicted.
-    assert "t_0" in ps._run_store, "recently-accessed terminal must survive (LRU)"
-    assert "t_1" not in ps._run_store, "oldest untouched terminal must be evicted"
-    assert "newcomer" in ps._run_store
+    assert "t_0" in store._run_store, "recently-accessed terminal must survive (LRU)"
+    assert "t_1" not in store._run_store, "oldest untouched terminal must be evicted"
+    assert "newcomer" in store._run_store
 
 
 def test_direct_terminal_write_respects_cap():
@@ -73,7 +77,7 @@ def test_direct_terminal_write_respects_cap():
         rid = f"w_{i}"
         _store_run(rid, {"run_id": rid, "status": "completed"})
 
-    assert len(ps._run_store) <= _MAX_STORE_SIZE
+    assert len(store._run_store) <= _MAX_STORE_SIZE
 
 
 def test_update_in_place_moves_to_end_so_terminal_run_survives():
@@ -88,8 +92,8 @@ def test_update_in_place_moves_to_end_so_terminal_run_survives():
 
     _store_run("after", {"run_id": "after", "status": "completed"})
 
-    assert "u_0" in ps._run_store, "updated terminal must move-to-end and survive"
-    assert "u_1" not in ps._run_store
+    assert "u_0" in store._run_store, "updated terminal must move-to-end and survive"
+    assert "u_1" not in store._run_store
 
 
 # ---------------------------------------------------------------------------

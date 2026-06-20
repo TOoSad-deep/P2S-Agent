@@ -20,7 +20,8 @@ fastapi = pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
 import app.routers.png_shader as ps
-from app.routers.png_shader import _run_store, router
+from app.routers.png_shader import router
+from p2s_agent.store import _run_store
 
 FastAPI = fastapi.FastAPI
 TestClient = testclient.TestClient
@@ -29,7 +30,7 @@ TestClient = testclient.TestClient
 @pytest.fixture(autouse=True)
 def _isolate_run_index(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "app.routers.png_shader._RUN_INDEX_PATH",
+        "p2s_agent.store._RUN_INDEX_PATH",
         str(tmp_path / "run_index.jsonl"),
     )
 

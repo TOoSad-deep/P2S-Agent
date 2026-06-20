@@ -8,7 +8,6 @@ Endpoints:
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import io
 import json
@@ -18,7 +17,6 @@ import re
 import shutil
 import tempfile
 import threading
-from collections import OrderedDict
 from pathlib import Path
 from time import time
 from typing import Optional
@@ -103,11 +101,8 @@ from app.pipeline.input_spec import build_input_spec, validate_input_spec
 from app.pipeline.run_index import (
     RunIndexError,
     RunLineageRecord,
-    append_run_created,
-    append_run_updated,
     build_branch_tree,
     load_run_index,
-    maybe_compact_run_index,
     update_run_metadata,
 )
 from app.services.langsmith_tracing import trace_context
@@ -122,28 +117,17 @@ from app.api.guards import (  # re-export: moved to web-layer guards module
 
 logger = logging.getLogger(__name__)
 
-# Insertion-ordered so that LRU eviction can prefer the least-recently-USED
-# entry. Every read/update calls ``move_to_end`` to keep ordering = recency.
-_run_store: "OrderedDict[str, dict]" = OrderedDict()
-_run_store_lock = threading.Lock()
-_MAX_STORE_SIZE = 100
-
-# Run states that are still "live" — these must never be evicted from either
-# the run store or the per-run model store, even under capacity pressure.
-_LIVE_STATUSES: frozenset[str] = frozenset({"running", "queued"})
-
-# Tests override this to isolate from the real backend/test_results/run_index.jsonl.
-_RUN_INDEX_PATH: Optional[str] = None
-
-# Resolved per-run model configs (may hold api_keys). Kept SEPARATE from
-# _run_store so the selected model — and any secret key — is never returned by
-# the client-facing /status endpoint. Insertion-ordered for LRU eviction whose
-# lifecycle is aligned with ``_run_store`` liveness (Bug 2).
-_run_models: "OrderedDict[str, ModelConfig]" = OrderedDict()
-_run_models_lock = threading.Lock()
-
-# Metadata fields that are allowed to be patched and mirrored into the in-memory store.
-_METADATA_MIRROR_KEYS: frozenset[str] = frozenset({"title", "favorite", "tags"})
+# In-memory run/model stores live in p2s_agent.store. The router references them
+# by ATTRIBUTE (store._run_store, store._store_run(...), with store._run_store_lock:)
+# so a test that patches store._RUN_INDEX_PATH or clears store._run_store is seen
+# by the live route/worker code (no stale per-name binding).
+from p2s_agent import store
+# Re-exports for import-binding tests that still pull these off the router by name.
+from p2s_agent.store import (  # noqa: E402,F401  re-export for tests
+    _run_store,
+    _run_store_lock,
+    _publish_partial_to_store,
+)
 
 # Variant exploration concurrency constants.
 _MAX_VARIANT_COUNT = 6
@@ -223,38 +207,6 @@ def _enforce_text_cap(value: Optional[str], cap: int, *, field: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Best-effort run-index helpers — I/O errors only log; they never 500 a request
-# or kill a worker thread.
-# ---------------------------------------------------------------------------
-
-def _index_created(record: RunLineageRecord) -> None:
-    try:
-        append_run_created(record, path=_RUN_INDEX_PATH)
-    except Exception:
-        logger.warning("run index append_created failed", exc_info=True)
-
-
-_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
-
-
-def _index_updated(run_id: str, fields: dict) -> None:
-    try:
-        append_run_updated(run_id, fields, path=_RUN_INDEX_PATH)
-    except Exception:
-        logger.warning("run index append_updated failed", exc_info=True)
-        return
-    # Opportunistic, threshold-gated compaction at a run's terminal transition —
-    # the natural low-frequency checkpoint to keep run_index.jsonl from growing
-    # unbounded. Best-effort: maybe_compact never raises, but guard anyway so a
-    # compaction hiccup can never affect the worker.
-    if fields.get("status") in _TERMINAL_RUN_STATUSES:
-        try:
-            maybe_compact_run_index(path=_RUN_INDEX_PATH)
-        except Exception:
-            logger.warning("run index opportunistic compaction failed", exc_info=True)
-
-
 def _finalize_fusion_for_run(run_id: str, status: str) -> None:
     """Best-effort: close out the fusion plan a finished run belongs to (Bug 5).
 
@@ -264,8 +216,8 @@ def _finalize_fusion_for_run(run_id: str, status: str) -> None:
     the frontend poll terminates. Fully wrapped so a failure here can never
     break the worker thread."""
     try:
-        with _run_store_lock:
-            stored = _run_store.get(run_id) or {}
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id) or {}
             lineage = stored.get("lineage") or {}
             fusion_id = stored.get("fusion_id") or lineage.get("fusion_id")
         if not fusion_id:
@@ -275,17 +227,6 @@ def _finalize_fusion_for_run(run_id: str, status: str) -> None:
         )
     except Exception:
         logger.warning("fusion plan finalize failed for run_id=%s", run_id, exc_info=True)
-
-
-def _run_is_live(run_id: str) -> bool:
-    """True when ``run_id`` exists in the run store with a live status.
-
-    Used to anchor the model store's eviction policy to run liveness so a
-    still-running child never falls back to the .env default model (Bug 2).
-    """
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
-        return bool(stored) and stored.get("status") in _LIVE_STATUSES
 
 
 def _coerce_int(value, field_name: str, default: int, lo: int, hi: int) -> int:
@@ -313,132 +254,7 @@ def _coerce_int(value, field_name: str, default: int, lo: int, hi: int) -> int:
     return coerced
 
 
-def _store_run_model(run_id: str, model_config: ModelConfig) -> None:
-    """Store a per-run model with LRU eviction that never drops a live run's model."""
-    with _run_models_lock:
-        if run_id in _run_models:
-            _run_models[run_id] = model_config
-            _run_models.move_to_end(run_id)
-            return
-        if len(_run_models) >= _MAX_STORE_SIZE:
-            _evict_one_model_locked()
-        _run_models[run_id] = model_config
-
-
-def _evict_one_model_locked() -> None:
-    """Evict the least-recently-used model whose run is no longer live.
-
-    Caller must hold ``_run_models_lock``. Falls back to the LRU entry only if
-    every model belongs to a live run (avoids unbounded growth in the
-    pathological all-live case)."""
-    for candidate in list(_run_models.keys()):
-        if not _run_is_live(candidate):
-            del _run_models[candidate]
-            return
-    # Every model belongs to a live run — drop the LRU one to respect the cap.
-    _run_models.popitem(last=False)
-
-
-def _get_run_model(run_id: str) -> Optional[ModelConfig]:
-    with _run_models_lock:
-        model = _run_models.get(run_id)
-        if model is not None:
-            _run_models.move_to_end(run_id)
-        return model
-
 router = APIRouter(prefix="/png-shader", tags=["png-shader"])
-
-
-def _store_run(run_id: str, payload: dict) -> None:
-    """Store a PNG shader run state with bounded, LRU-aware retention.
-
-    Single capped setter for ALL write paths (including direct terminal/queued
-    writes). On update, moves the entry to most-recently-used. On insert past
-    the cap, evicts the least-recently-used TERMINAL entry and NEVER evicts a
-    run whose status is still live (running/queued) — so a still-running run can
-    never be evicted out from under /status, /stop, or child-lookup (Bug 1).
-    """
-    with _run_store_lock:
-        _store_run_locked(run_id, payload)
-
-
-def _store_run_locked(run_id: str, payload: dict) -> None:
-    """``_store_run`` body; caller must hold ``_run_store_lock``."""
-    if run_id in _run_store:
-        _run_store[run_id] = payload
-        _run_store.move_to_end(run_id)
-        return
-    if len(_run_store) >= _MAX_STORE_SIZE:
-        _evict_one_run_locked()
-    _run_store[run_id] = payload
-
-
-def _drop_run(run_id: str) -> None:
-    """Remove a run entry (and its model config) from the in-memory stores.
-
-    Used to roll back a run that was registered but never admitted — e.g. when
-    the global worker pool is saturated and the submission is rejected with 429.
-    Best-effort: missing keys are ignored.
-    """
-    with _run_store_lock:
-        _run_store.pop(run_id, None)
-    with _run_models_lock:
-        _run_models.pop(run_id, None)
-
-
-def _evict_one_run_locked() -> None:
-    """Evict the least-recently-used TERMINAL run.
-
-    Caller must hold ``_run_store_lock``. Scans from oldest→newest and removes
-    the first entry whose status is not live. If every entry is live, no
-    eviction happens (we tolerate transient overflow rather than drop a live
-    run)."""
-    for candidate, stored in list(_run_store.items()):
-        if (stored or {}).get("status") not in _LIVE_STATUSES:
-            del _run_store[candidate]
-            return
-    # All live — do not evict; the cap is best-effort under all-live pressure.
-
-
-def _touch_run(run_id: str) -> Optional[dict]:
-    """Read a run entry and mark it most-recently-used (LRU read path).
-
-    Returns the live store dict (NOT a copy) or ``None``. Callers that hold the
-    lock and only need a snapshot should use ``_snapshot_run`` instead.
-    """
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
-        if stored is not None:
-            _run_store.move_to_end(run_id)
-        return stored
-
-
-def _snapshot_run(run_id: str) -> Optional[dict]:
-    """Return a deep copy of a run entry (or None), marking it MRU.
-
-    Safe to return to clients / iterate without risking concurrent worker
-    mutation (Bug 4)."""
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
-        if stored is None:
-            return None
-        _run_store.move_to_end(run_id)
-        return copy.deepcopy(stored)
-
-
-def _publish_partial_to_store(run_id: str, partial: dict) -> None:
-    """Merge a partial pipeline result into a still-running run's store entry.
-
-    Best-effort: silently no-ops when the run was evicted or already reached a
-    terminal state, so a late partial can't resurrect a finished run. Only data
-    fields are merged; control fields (strategy / stop_requested /
-    strategy_revision / status / ...) are preserved.
-    """
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
-        if stored is None or stored.get("status") != "running":
-            return
-        stored.update(partial)
 
 
 def _variant_preserved(stored: dict) -> dict:
@@ -490,17 +306,17 @@ def _run_png_shader_background(
     # --- Variant queued lifecycle ---
     if variant_semaphore is not None:
         # Mark as queued and check for pre-acquire cancellation.
-        with _run_store_lock:
-            stored = _run_store.get(run_id, {})
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id, {})
             stored["current_phase"] = "queued"
-            _store_run_locked(run_id, stored)
+            store._store_run_locked(run_id, stored)
             stop_early = bool(stored.get("stop_requested"))
 
         if stop_early:
-            _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
-            with _run_store_lock:
-                stored = _run_store.get(run_id, {})
-                _store_run_locked(run_id, {
+            store._index_updated(run_id, {"status": "cancelled", "completed_at": time()})
+            with store._run_store_lock:
+                stored = store._run_store.get(run_id, {})
+                store._store_run_locked(run_id, {
                     "run_id": run_id,
                     "status": "cancelled",
                     "completed_at": time(),
@@ -511,19 +327,19 @@ def _run_png_shader_background(
             return
 
         variant_semaphore.acquire()
-        with _run_store_lock:
-            stored = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id)
             stop_after_acquire = bool((stored or {}).get("stop_requested"))
             if stored is not None:
                 stored["status"] = "running"
                 stored["current_phase"] = "acquired"
-                _store_run_locked(run_id, stored)
+                store._store_run_locked(run_id, stored)
 
         if stop_after_acquire:
-            _index_updated(run_id, {"status": "cancelled", "completed_at": time()})
-            with _run_store_lock:
-                stored = _run_store.get(run_id, {})
-                _store_run_locked(run_id, {
+            store._index_updated(run_id, {"status": "cancelled", "completed_at": time()})
+            with store._run_store_lock:
+                stored = store._run_store.get(run_id, {})
+                store._store_run_locked(run_id, {
                     "run_id": run_id,
                     "status": "cancelled",
                     "completed_at": time(),
@@ -535,14 +351,14 @@ def _run_png_shader_background(
             return
 
     def _progress(phase: str) -> None:
-        with _run_store_lock:
-            stored = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id)
             if stored is not None:
                 stored["current_phase"] = phase
 
     def _strategy_reader() -> dict:
-        with _run_store_lock:
-            stored = _run_store.get(run_id) or {}
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id) or {}
             return {
                 "strategy": dict(stored.get("strategy") or {}),
                 "stop_requested": bool(stored.get("stop_requested")),
@@ -556,8 +372,8 @@ def _run_png_shader_background(
         rd = partial.get("run_dir")
         if rd and seen["run_dir"] is None:
             seen["run_dir"] = str(rd)
-            _index_updated(run_id, {"run_dir": str(rd), "status": "running"})
-        _publish_partial_to_store(run_id, partial)
+            store._index_updated(run_id, {"run_dir": str(rd), "status": "running"})
+        store._publish_partial_to_store(run_id, partial)
 
     run_log_path = Path("artifacts") / run_id / "run.log"
     with attach_run_log(run_id=run_id, log_file=run_log_path):
@@ -596,14 +412,14 @@ def _run_png_shader_background(
                         save_timeline(final_run_dir, pipeline_result, run_id=run_id)
                     except Exception:
                         logger.warning("save_timeline failed", exc_info=True)
-                _index_updated(run_id, {
+                store._index_updated(run_id, {
                     "status": "completed",
                     "final_score": pipeline_result.get("quality_router", {}).get("final_score"),
                     "completed_at": time(),
                     **({"run_dir": final_run_dir} if final_run_dir else {}),
                 })
-                with _run_store_lock:
-                    stored = _run_store.get(run_id, {})
+                with store._run_store_lock:
+                    stored = store._run_store.get(run_id, {})
                     preserved = {
                         "strategy": stored.get("strategy"),
                         "stop_requested": stored.get("stop_requested", False),
@@ -619,7 +435,7 @@ def _run_png_shader_background(
                         **({"lineage": stored["lineage"]}
                            if "lineage" in stored else {}),
                     }
-                    _store_run_locked(run_id, {**result_with_status, **preserved})
+                    store._store_run_locked(run_id, {**result_with_status, **preserved})
                 # Best-effort: close out a fusion plan record so its /fusions
                 # poll terminates instead of reporting 'running' forever (Bug 5).
                 _finalize_fusion_for_run(run_id, "completed")
@@ -648,13 +464,13 @@ def _run_png_shader_background(
                 run_id=run_id,
                 error=f"{exc.__class__.__name__}: {exc}",
             )
-            _index_updated(run_id, {
+            store._index_updated(run_id, {
                 "status": "failed",
                 "completed_at": time(),
                 **({"run_dir": seen["run_dir"]} if seen["run_dir"] else {}),
             })
-            with _run_store_lock:
-                stored = _run_store.get(run_id, {})
+            with store._run_store_lock:
+                stored = store._run_store.get(run_id, {})
                 preserved = {
                     "strategy": stored.get("strategy"),
                     "stop_requested": stored.get("stop_requested", False),
@@ -669,7 +485,7 @@ def _run_png_shader_background(
                     **({"lineage": stored["lineage"]}
                        if "lineage" in stored else {}),
                 }
-                _store_run_locked(run_id, {
+                store._store_run_locked(run_id, {
                     "run_id": run_id,
                     "status": "failed",
                     "error": f"Pipeline error: {exc}",
@@ -728,7 +544,7 @@ def _start_pipeline_worker(
         global_slot = sem
 
     try:
-        _store_run_model(run_id, model_config)
+        store._store_run_model(run_id, model_config)
         threading.Thread(
             target=_run_png_shader_background,
             kwargs={
@@ -887,8 +703,8 @@ async def run_png_shader(
             "stop_requested": False,
             "strategy_revision": 1,
         }
-        _store_run(run_id, initial_result)
-        _index_created(RunLineageRecord(
+        store._store_run(run_id, initial_result)
+        store._index_created(RunLineageRecord(
             run_id=run_id, root_run_id=run_id, parent_run_id=None,
             source_checkpoint_id=None, source_checkpoint_label=None,
             mode=None, feedback=None, title=None,
@@ -911,7 +727,7 @@ async def run_png_shader(
         # No worker slot was available → roll back the registered run and tell
         # the client to retry later (backpressure, not a server error).
         shutil.rmtree(upload_dir, ignore_errors=True)
-        _drop_run(run_id)
+        store._drop_run(run_id)
         raise HTTPException(
             status_code=429,
             detail=f"{exc}. Retry-After: a few seconds.",
@@ -932,7 +748,7 @@ async def get_status(run_id: str) -> dict:
     mutation can never trigger "dictionary changed size during iteration" while
     FastAPI serialises the response, and the caller never holds a live ref to
     the mutable store entry (Bug 4)."""
-    result = _snapshot_run(run_id)
+    result = store._snapshot_run(run_id)
     if result is None:
         raise HTTPException(
             status_code=404,
@@ -948,7 +764,7 @@ async def get_checkpoints(run_id: str) -> dict:
     Works for both running and completed runs; GLSL payloads are omitted and
     re-resolved on demand by ``/branch-refine``.
     """
-    stored = _snapshot_run(run_id)
+    stored = store._snapshot_run(run_id)
     if stored is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
     return {
@@ -969,7 +785,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    parent = _touch_run(run_id)
+    parent = store._touch_run(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -1126,8 +942,8 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         "stop_requested": False,
         "strategy_revision": 1,
     }
-    _store_run(child_run_id, initial_result)
-    _index_created(RunLineageRecord(
+    store._store_run(child_run_id, initial_result)
+    store._index_created(RunLineageRecord(
         run_id=child_run_id, root_run_id=root_run_id, parent_run_id=run_id,
         source_checkpoint_id=checkpoint_id,
         source_checkpoint_label=checkpoint.label,
@@ -1142,7 +958,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
             upload_dir=None,  # reuse parent reference; never delete the parent run_dir
             pipeline_input_spec=child_input_spec,
             seed_glsl=checkpoint.glsl,
-            model_config=_get_run_model(run_id),
+            model_config=store._get_run_model(run_id),
             trace_input={
                 "run_id": child_run_id,
                 "parent_run_id": run_id,
@@ -1170,15 +986,15 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
         )
     except WorkerCapacityError as exc:
         # Saturated worker pool → roll back the child run, signal backpressure.
-        _drop_run(child_run_id)
+        store._drop_run(child_run_id)
         raise HTTPException(
             status_code=429,
             detail=f"{exc}. Retry-After: a few seconds.",
         ) from exc
 
     if stop_parent:
-        with _run_store_lock:
-            stored_parent = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored_parent = store._run_store.get(run_id)
             if stored_parent is not None and stored_parent.get("status") == "running":
                 stored_parent["stop_requested"] = True
 
@@ -1311,8 +1127,8 @@ def _create_variant_group(
             "stop_requested": False,
             "strategy_revision": 1,
         }
-        _store_run(child_run_id, initial_result)
-        _index_created(RunLineageRecord(
+        store._store_run(child_run_id, initial_result)
+        store._index_created(RunLineageRecord(
             run_id=child_run_id,
             root_run_id=root_run_id,
             parent_run_id=parent_run_id,
@@ -1335,7 +1151,7 @@ def _create_variant_group(
             upload_dir=None,
             pipeline_input_spec=child_input_spec,
             seed_glsl=checkpoint.glsl,
-            model_config=_get_run_model(parent_run_id),
+            model_config=store._get_run_model(parent_run_id),
             trace_input={
                 "run_id": child_run_id,
                 "parent_run_id": parent_run_id,
@@ -1409,7 +1225,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    parent = _touch_run(run_id)
+    parent = store._touch_run(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -1489,8 +1305,8 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     )
 
     if stop_parent:
-        with _run_store_lock:
-            stored_parent = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored_parent = store._run_store.get(run_id)
             if stored_parent is not None and stored_parent.get("status") == "running":
                 stored_parent["stop_requested"] = True
 
@@ -1637,7 +1453,7 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
-    parent = _touch_run(run_id)
+    parent = store._touch_run(run_id)
     if parent is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -1721,8 +1537,8 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
         logger.warning("draw session persist failed for draw_id=%s", draw_id, exc_info=True)
 
     if stop_parent := bool(payload.get("stop_parent")):
-        with _run_store_lock:
-            stored_parent = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored_parent = store._run_store.get(run_id)
             if stored_parent is not None and stored_parent.get("status") == "running":
                 stored_parent["stop_requested"] = True
 
@@ -1783,14 +1599,14 @@ async def get_draw_session(draw_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"draw_id '{draw_id}' not found")
 
     overlay = _fold_draw_overlay(draw_id)
-    index_records = load_run_index(path=_RUN_INDEX_PATH)
+    index_records = load_run_index(path=store._RUN_INDEX_PATH)
 
     cards: list[dict] = []
-    with _run_store_lock:
+    with store._run_store_lock:
         for position, run_id in enumerate(record.card_run_ids):
             ov = overlay.get(run_id, {})
             idx_rec = index_records.get(run_id)
-            stored = _run_store.get(run_id)
+            stored = store._run_store.get(run_id)
             if stored is not None:
                 lineage = stored.get("lineage") or {}
                 gid = stored.get("variant_group_id") or lineage.get("variant_group_id")
@@ -1881,7 +1697,7 @@ def _load_draw_session_or_404(draw_id: str) -> DrawSessionRecord:
 
 
 def _draw_parent_or_409(record: DrawSessionRecord) -> dict:
-    parent = _touch_run(record.parent_run_id)
+    parent = store._touch_run(record.parent_run_id)
     if parent is None:
         raise HTTPException(status_code=409, detail="parent run no longer available")
     return parent
@@ -2035,9 +1851,9 @@ async def redraw_card(draw_id: str, payload: dict) -> dict:
     new_run_id = cids[0]
 
     # Link replacement -> original (best-effort).
-    _index_updated(new_run_id, {"replacement_of_run_id": target_run_id})
-    with _run_store_lock:
-        stored_new = _run_store.get(new_run_id)
+    store._index_updated(new_run_id, {"replacement_of_run_id": target_run_id})
+    with store._run_store_lock:
+        stored_new = store._run_store.get(new_run_id)
         if stored_new is not None:
             stored_new["replacement_of_run_id"] = target_run_id
 
@@ -2108,15 +1924,15 @@ async def draw_card_event(draw_id: str, run_id: str, payload: dict) -> dict:
     if event_type == "favorite":
         favorite = bool(payload.get("value", True))
         try:
-            update_run_metadata(run_id, {"favorite": favorite}, path=_RUN_INDEX_PATH)
+            update_run_metadata(run_id, {"favorite": favorite}, path=store._RUN_INDEX_PATH)
         except RunIndexError:
             pass
         except Exception:
             logger.warning("draw favorite mirror failed for run_id=%s", run_id, exc_info=True)
         # Mirror to run-store for the /status/{run_id} consumer; draw-session GET
         # treats the events overlay as authoritative.
-        with _run_store_lock:
-            stored = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id)
             if stored is not None:
                 stored["favorite"] = favorite
 
@@ -2154,8 +1970,8 @@ async def refine_png_shader(
         feedback_len=len(feedback or ""),
         has_modified_dsl=bool(modified_dsl_json),
     )
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(run_id)
     if stored is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
     if stored.get("status") != "completed":
@@ -2180,7 +1996,7 @@ async def refine_png_shader(
     try:
         from app.candidates.llm_scene import generate_llm_refinement
 
-        with use_active_model(_get_run_model(run_id)):
+        with use_active_model(store._get_run_model(run_id)):
             revised = generate_llm_refinement(
                 preprocess=preprocess,
                 current_dsl=current_dsl,
@@ -2232,7 +2048,7 @@ async def refine_png_shader(
         "compile_success": cr.success,
         "compile_errors": cr.errors,
     }
-    _store_run(run_id, result)
+    store._store_run(run_id, result)
     log_event(
         logger,
         "human_refine_done",
@@ -2276,7 +2092,7 @@ async def parameterize_png_shader(
     try:
         from app.candidates.llm_scene import parameterize_glsl
 
-        with use_active_model(_get_run_model(run_id)):
+        with use_active_model(store._get_run_model(run_id)):
             result = parameterize_glsl(glsl)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Parameterization failed: {exc}") from exc
@@ -2350,8 +2166,8 @@ async def patch_strategy(run_id: str, payload: dict) -> dict:
             detail="payload must contain a non-empty 'quality' object",
         )
 
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(run_id)
         if stored is None:
             raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
         if stored.get("status") != "running":
@@ -2367,7 +2183,7 @@ async def patch_strategy(run_id: str, payload: dict) -> dict:
 
         stored["strategy"] = merged
         stored["strategy_revision"] = int(stored.get("strategy_revision", 1)) + 1
-        _store_run_locked(run_id, stored)
+        store._store_run_locked(run_id, stored)
         return {
             "strategy": merged,
             "strategy_revision": stored["strategy_revision"],
@@ -2383,7 +2199,7 @@ async def get_timeline(run_id: str) -> dict:
     index + timeline.json on disk (if present). Never resolves a path
     when run_dir is None.
     """
-    stored = _snapshot_run(run_id)
+    stored = store._snapshot_run(run_id)
     if stored is not None:
         return {
             "run_id": run_id,
@@ -2392,7 +2208,7 @@ async def get_timeline(run_id: str) -> dict:
         }
 
     # Not in store — look in the run index.
-    records = load_run_index(path=_RUN_INDEX_PATH)
+    records = load_run_index(path=store._RUN_INDEX_PATH)
     rec = records.get(run_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
@@ -2423,7 +2239,7 @@ async def get_branches(run_id: str) -> dict:
     Tries the run index first; falls back to a synthesised single-node
     tree for runs that exist only in the in-memory store.
     """
-    records = load_run_index(path=_RUN_INDEX_PATH)
+    records = load_run_index(path=store._RUN_INDEX_PATH)
     if run_id in records:
         try:
             tree = build_branch_tree(records, run_id)
@@ -2432,8 +2248,8 @@ async def get_branches(run_id: str) -> dict:
         root_run_id = records[run_id].root_run_id
         return {"root_run_id": root_run_id, "active_run_id": run_id, "tree": tree}
 
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(run_id)
     if stored is not None:
         # Synthesise a single-node tree for store-only runs.
         tree = {
@@ -2465,7 +2281,7 @@ async def patch_metadata(run_id: str, payload: dict) -> dict:
     so /status and /checkpoints remain consistent with the index.
     """
     try:
-        updated = update_run_metadata(run_id, payload, path=_RUN_INDEX_PATH)
+        updated = update_run_metadata(run_id, payload, path=store._RUN_INDEX_PATH)
     except RunIndexError as exc:
         # RunIndexError is a subclass of ValueError; catch it first for 404.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2473,10 +2289,10 @@ async def patch_metadata(run_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Mirror allowed fields into the in-memory store (best-effort).
-    mirror = {k: v for k, v in payload.items() if k in _METADATA_MIRROR_KEYS}
+    mirror = {k: v for k, v in payload.items() if k in store._METADATA_MIRROR_KEYS}
     if mirror:
-        with _run_store_lock:
-            stored = _run_store.get(run_id)
+        with store._run_store_lock:
+            stored = store._run_store.get(run_id)
             if stored is not None:
                 stored.update(mirror)
 
@@ -2495,14 +2311,14 @@ async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
         (matches what the ``region-mask`` endpoint advertises + persists)
     """
     # 1. Resolve run result + run_dir.
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(run_id)
 
     if stored is not None:
         result = stored
         run_dir = stored.get("run_dir")
     else:
-        records = load_run_index(path=_RUN_INDEX_PATH)
+        records = load_run_index(path=store._RUN_INDEX_PATH)
         rec = records.get(run_id)
         if rec is None:
             raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
@@ -2593,14 +2409,14 @@ async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
 async def stop_run(run_id: str) -> dict:
     """Signal the running pipeline to stop after the current iteration."""
     logger.info("stop request: run_id=%s", run_id)
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(run_id)
         if stored is None:
             raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
         if stored.get("status") not in ("running", "queued"):
             raise HTTPException(status_code=409, detail="run is not currently running")
         stored["stop_requested"] = True
-        _store_run_locked(run_id, stored)
+        store._store_run_locked(run_id, stored)
         return {"stopping": True}
 
 
@@ -2624,11 +2440,11 @@ async def get_variant_group(group_id: str) -> dict:
     record = _get_group_or_404(group_id)
 
     # Build per-child variant dicts.
-    index_records = load_run_index(path=_RUN_INDEX_PATH)
+    index_records = load_run_index(path=store._RUN_INDEX_PATH)
     variants = []
-    with _run_store_lock:
+    with store._run_store_lock:
         for position, run_id in enumerate(record.child_run_ids):
-            stored = _run_store.get(run_id)
+            stored = store._run_store.get(run_id)
             if stored is not None:
                 # Prefer store entry.
                 vi = stored.get("variant_index")
@@ -2735,9 +2551,9 @@ async def stop_variant_group(group_id: str) -> dict:
     """Signal all queued/running children of a variant group to stop."""
     record = _get_group_or_404(group_id)
 
-    with _run_store_lock:
+    with store._run_store_lock:
         for run_id in record.child_run_ids:
-            stored = _run_store.get(run_id)
+            stored = store._run_store.get(run_id)
             if stored is not None and stored.get("status") in ("queued", "running"):
                 stored["stop_requested"] = True
 
@@ -2777,7 +2593,7 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
 
     # Mark the winner favorite in the run index (best-effort).
     try:
-        update_run_metadata(winner_run_id, {"favorite": True}, path=_RUN_INDEX_PATH)
+        update_run_metadata(winner_run_id, {"favorite": True}, path=store._RUN_INDEX_PATH)
     except RunIndexError:
         pass  # Run not in the index yet — silently ignore.
     except Exception:
@@ -2786,8 +2602,8 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
         )
 
     # Mirror into the in-memory store (best-effort).
-    with _run_store_lock:
-        stored = _run_store.get(winner_run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(winner_run_id)
         if stored is not None:
             stored["favorite"] = True
 
@@ -2909,8 +2725,8 @@ async def region_mask(run_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
     # 2. Look up run.
-    with _run_store_lock:
-        stored = _run_store.get(run_id)
+    with store._run_store_lock:
+        stored = store._run_store.get(run_id)
     if stored is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -3084,7 +2900,7 @@ async def create_fusion(payload: dict) -> dict:
     if not base_run_id:
         raise HTTPException(status_code=422, detail="base_run_id is required")
 
-    base = _touch_run(base_run_id)
+    base = store._touch_run(base_run_id)
     if base is None:
         raise HTTPException(status_code=404, detail=f"run_id '{base_run_id}' not found")
 
@@ -3124,8 +2940,8 @@ async def create_fusion(payload: dict) -> dict:
 
     # Every source run must resolve a render (sources are visual only — no GLSL needed).
     for sid in source_ids:
-        with _run_store_lock:
-            src = _run_store.get(sid)
+        with store._run_store_lock:
+            src = store._run_store.get(sid)
         if src is None:
             raise HTTPException(
                 status_code=422,
@@ -3215,7 +3031,7 @@ async def create_composite_target(fusion_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 
     # Re-resolve the base render.
-    base = _touch_run(record.base_run_id)
+    base = store._touch_run(record.base_run_id)
     if base is None:
         raise HTTPException(status_code=422, detail=f"base run '{record.base_run_id}' not found")
     base_render = _resolve_run_render(base, base.get("run_dir"))
@@ -3225,8 +3041,8 @@ async def create_composite_target(fusion_id: str) -> dict:
     # Re-resolve every source render.
     source_render_paths: dict[str, Path] = {}
     for sid in record.source_run_ids:
-        with _run_store_lock:
-            src = _run_store.get(sid)
+        with store._run_store_lock:
+            src = store._run_store.get(sid)
         render = _resolve_run_render(src, src.get("run_dir")) if src is not None else None
         if render is None:
             raise HTTPException(
@@ -3286,7 +3102,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 
     base_run_id = record.base_run_id
-    base = _touch_run(base_run_id)
+    base = store._touch_run(base_run_id)
     if base is None:
         raise HTTPException(status_code=422, detail=f"base run '{base_run_id}' not found")
 
@@ -3367,8 +3183,8 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
         "stop_requested": False,
         "strategy_revision": 1,
     }
-    _store_run(child_run_id, initial_result)
-    _index_created(RunLineageRecord(
+    store._store_run(child_run_id, initial_result)
+    store._index_created(RunLineageRecord(
         run_id=child_run_id,
         root_run_id=record.root_run_id,
         parent_run_id=base_run_id,
@@ -3392,7 +3208,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
             upload_dir=None,  # reuse base reference; never delete the base run_dir
             pipeline_input_spec=child_input_spec,
             seed_glsl=base_selected_glsl,
-            model_config=_get_run_model(base_run_id),
+            model_config=store._get_run_model(base_run_id),
             trace_input={
                 "run_id": child_run_id,
                 "base_run_id": base_run_id,
@@ -3416,7 +3232,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
         # Saturated worker pool → roll back the child run, signal backpressure.
         # The fusion plan record is left untouched (status unchanged) so the
         # caller can retry the run.
-        _drop_run(child_run_id)
+        store._drop_run(child_run_id)
         raise HTTPException(
             status_code=429,
             detail=f"{exc}. Retry-After: a few seconds.",
