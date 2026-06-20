@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from app.pipeline.artifacts import save_json
+
 CheckpointKind = Literal["candidate", "refinement_iter", "final"]
 ShaderKind = Literal["glsl"]
 
@@ -413,8 +415,6 @@ def save_timeline(run_dir, result: dict, *, run_id: str | None = None) -> Path:
         result: Pipeline result dict.
         run_id: Optional run_id override; falls back to ``result.get("run_id")``.
     """
-    from app.pipeline.artifacts import save_json  # local import avoids circular dep
-
     # Accept RunDir (has .path), Path, or str
     if hasattr(run_dir, "path"):
         dest = Path(run_dir.path)

@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 from app.metrics.compute import _load_rgba_array, _match_size_array
-from app.pipeline.fusion_plans import FusionRegion
+from app.pipeline.region_types import FusionRegion
 
 PathLike = Union[str, Path]
 

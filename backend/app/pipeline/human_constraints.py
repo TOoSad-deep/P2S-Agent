@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.pipeline.artifacts import save_json
+from app.pipeline.region_types import RegionConstraint  # re-exported for back-compat
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -35,19 +36,6 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-@dataclass
-class RegionConstraint:
-    """A spatial region that the user wants to modify or protect."""
-
-    id: str
-    label: str
-    mode: str           # "modify" | "protect"
-    instruction: str
-    geometry_type: str  # "rect" (V4.2 adds "polygon"|"mask")
-    geometry: dict      # rect: {"x","y","w","h"} normalised 0..1
-    strength: float = 0.5
 
 
 @dataclass

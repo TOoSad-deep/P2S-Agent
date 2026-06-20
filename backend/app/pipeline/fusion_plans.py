@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from app.pipeline.artifacts import DEFAULT_RESULTS_ROOT, save_json
+from app.pipeline.region_types import FusionRegion  # re-exported for back-compat
 
 # ---------------------------------------------------------------------------
 # Module-level lock for concurrent JSONL append safety (mirrors draw_sessions.py)
@@ -45,24 +46,6 @@ def _resolve_fusions_dir(root: "Path | str | None") -> Path:
     if root is not None:
         return Path(root) / "fusions"
     return _DEFAULT_FUSIONS_DIR
-
-
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class FusionRegion:
-    id: str
-    label: str
-    source_run_id: str
-    instruction: str
-    geometry_type: str          # "rect" first
-    geometry: dict              # rect {"x","y","w","h"} normalized 0..1
-    strength: float = 0.5
-    blend_mode: str = "soft"    # "soft" | "replace_target" | "protect_base"
-    feather: float = 0.08
 
 
 @dataclass

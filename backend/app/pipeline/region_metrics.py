@@ -24,7 +24,7 @@ from app.metrics.compute import (
     _ssim_arrays,
     _edge_map,
 )
-from app.pipeline.human_constraints import RegionConstraint
+from app.pipeline.region_types import RegionConstraint
 
 
 def compute_region_metrics(
