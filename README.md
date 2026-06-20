@@ -153,30 +153,37 @@ cp backend/.env.example backend/.env   # 填入 LLM/VLM 的 API key
 ```
 P2S-Agent/
 ├── backend/
-│   ├── app/
-│   │   ├── main.py                 # FastAPI 入口(挂载 3 个 router)
-│   │   ├── config.py · state.py    # 配置 / LangGraph 状态
-│   │   ├── strategy_config.json    # 策略预设
-│   │   ├── routers/                # png_shader / strategy_config / models
-│   │   ├── pipeline/               # graph.py(LangGraph)+ 优化/精修/分支/变体/抽卡/融合
-│   │   ├── candidates/             # 6 策略候选生成
-│   │   ├── dsl/                    # DSL schema + 确定性 DSL→GLSL 编译
-│   │   ├── metrics/                # 客观指标 + quality_router
-│   │   ├── llm/                    # LLM 调用 / VLM 评审 / 模型解析
-│   │   └── services/ · utils/
-│   ├── tests/                      # pytest 单测
+│   ├── p2s_agent/              # ★ Agent 本体（不依赖 FastAPI，可 import / CLI 独立运行）
+│   │   ├── config.py           # agent 配置（ModelConfig / 模型 / 阈值 / 渲染 / langsmith）
+│   │   ├── state.py · strategy.py
+│   │   ├── core/               # Layer 1+2 计算内核
+│   │   │   ├── pipeline/       # LangGraph 图 + 候选/打分/优化/精修/编译产物
+│   │   │   ├── candidates/ · dsl/ · metrics/ · llm/ · render/ · utils/
+│   │   │   └── errors.py · validation.py · logging_config.py · tracing.py
+│   │   ├── orchestration/      # Layer 3 编排（血缘/checkpoint/变体/抽卡/融合/偏好 + sessions）
+│   │   ├── store/              # 运行态 run/model store（LRU + 索引）
+│   │   ├── workers/            # 后台 worker + 背压信号量
+│   │   └── cli.py              # ★ 无 server 跑一次 PNG→shader
+│   ├── app/                    # Web 层薄壳（仅 FastAPI 绑定，不含业务逻辑）
+│   │   ├── main.py             # FastAPI 入口 + 域错误→HTTP 翻译
+│   │   ├── config.py           # web 配置（host/port）
+│   │   ├── api/
+│   │   │   ├── routers/        # core / branch / variant / draw / fusion / preferences
+│   │   │   └── guards.py       # 上传/请求体守卫
+│   │   └── routers/png_shader.py  # 薄聚合器（保持旧 import 路径）
+│   ├── tests/                  # pytest 单测
 │   └── requirements.txt
-├── frontend/
+├── frontend/                   # React 19 + Vite + Three.js + React Flow
 │   ├── src/
-│   │   ├── App.tsx                 # 单 usePngShader() + PngShaderProvider + 双页 shell
-│   │   ├── pages/                  # StudioPage / CanvasPage
-│   │   ├── context/                # PngShaderContext
-│   │   ├── components/             # 面板 / 画布节点 / 检查器 / 表单
-│   │   ├── hooks/                  # usePngShader / useModels / useStrategyConfig
-│   │   └── lib/                    # 候选/布局模型、策略预设、refine 选项(+ vitest)
+│   │   ├── App.tsx             # 单 usePngShader() + PngShaderProvider + 双页 shell
+│   │   ├── pages/              # StudioPage / CanvasPage
+│   │   ├── context/            # PngShaderContext
+│   │   ├── components/         # 面板 / 画布节点 / 检查器 / 表单
+│   │   ├── hooks/              # usePngShader / useModels / useStrategyConfig
+│   │   └── lib/                # 候选/布局模型、策略预设、refine 选项(+ vitest)
 │   ├── package.json · vite.config.ts
-├── doc/                            # 架构总览 + 各版本设计文档
-└── start.sh                        # 启停脚本
+├── doc/                        # 架构总览 + 各版本设计文档
+└── start.sh                    # 启停脚本
 ```
 
 ---
