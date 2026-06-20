@@ -19,7 +19,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
-import app.routers.png_shader as ps
+import p2s_agent.workers as workers
 from app.routers.png_shader import router
 from p2s_agent.store import _run_store
 
@@ -62,13 +62,13 @@ def _no_real_worker(monkeypatch):
     def _fake_worker(**kwargs):  # pragma: no cover - never actually invoked
         return None
 
-    monkeypatch.setattr(ps, "_run_png_shader_background", _fake_worker)
+    monkeypatch.setattr(workers, "_run_png_shader_background", _fake_worker)
 
 
 def _small_cap_semaphore(monkeypatch, capacity: int):
     """Install a fresh bounded global semaphore with *capacity* slots."""
     sem = threading.BoundedSemaphore(capacity)
-    monkeypatch.setattr(ps, "_global_worker_semaphore", sem)
+    monkeypatch.setattr(workers, "_global_worker_semaphore", sem)
     return sem
 
 

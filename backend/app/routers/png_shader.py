@@ -16,7 +16,6 @@ import os
 import re
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 from time import time
 from typing import Optional
@@ -25,7 +24,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from p2s_agent.config import ModelConfig, use_active_model
+from p2s_agent.config import use_active_model
 from app.llm.model_resolver import ModelResolutionError, resolve_model_config
 
 from app.pipeline.checkpoints import (
@@ -36,7 +35,6 @@ from app.pipeline.checkpoints import (
     list_checkpoints,
     resolve_checkpoint,
     resolve_checkpoint_artifact,
-    save_timeline,
 )
 from app.pipeline.variant_groups import (
     VariantGroupRecord,
@@ -68,7 +66,6 @@ from app.pipeline.preferences import (
     rebuild_profile,
     save_profile,
 )
-from app.pipeline.graph import run_png_shader_pipeline
 from app.pipeline.human_feedback import (
     MODES,
     FeedbackValidationError,
@@ -92,7 +89,6 @@ from app.pipeline.fusion_plans import (
     parse_fusion_plan,
     plan_to_dict,
     save_plan,
-    update_plan_status,
     validate_fusion_plan,
 )
 from app.pipeline.image_composite import build_composite_target
@@ -105,8 +101,7 @@ from app.pipeline.run_index import (
     load_run_index,
     update_run_metadata,
 )
-from app.services.langsmith_tracing import trace_context
-from app.services.logging_config import attach_run_log, log_event, logging_context
+from app.services.logging_config import log_event, logging_context
 from app.api.guards import (  # re-export: moved to web-layer guards module
     _check_content_length,
     _env_int,
@@ -122,28 +117,32 @@ logger = logging.getLogger(__name__)
 # so a test that patches store._RUN_INDEX_PATH or clears store._run_store is seen
 # by the live route/worker code (no stale per-name binding).
 from p2s_agent import store
-# Re-exports for import-binding tests that still pull these off the router by name.
-from p2s_agent.store import (  # noqa: E402,F401  re-export for tests
-    _run_store,
-    _run_store_lock,
-    _publish_partial_to_store,
+
+# Background pipeline worker layer lives in p2s_agent.workers. Route handlers
+# catch ``WorkerCapacityError`` → 429; the explore/draw/branch/fusion endpoints
+# call ``_start_pipeline_worker`` and pass ``_variant_worker_semaphore`` to bound
+# variant-child concurrency. ``_run_png_shader_background`` is re-exported as the
+# worker entrypoint name; the live worker logic now runs in p2s_agent.workers.
+from p2s_agent.workers import (  # noqa: F401  re-export for routes + tests
+    WorkerCapacityError,
+    _run_png_shader_background,
+    _start_pipeline_worker,
+    _variant_worker_semaphore,
 )
+# Session-level orchestration helpers live in p2s_agent.orchestration.sessions.
+# Referenced by ATTRIBUTE (``sessions._FUSIONS_ROOT``) so the single source of
+# truth for the fusions root is shared between the fusion endpoints here and the
+# worker's terminal finalize (``_finalize_fusion_for_run``).
+from p2s_agent.orchestration import sessions
 
-# Variant exploration concurrency constants.
+# Per-request variant-COUNT cap is a route input-validation limit (max variants a
+# caller may request); the variant-CONCURRENCY cap that sizes the worker pool
+# lives with the worker layer in p2s_agent.workers.
 _MAX_VARIANT_COUNT = 6
-_MAX_VARIANT_CONCURRENCY = 2
-_variant_worker_semaphore = threading.Semaphore(_MAX_VARIANT_CONCURRENCY)
 
-
-class WorkerCapacityError(Exception):
-    """Raised when the global top-level worker pool is saturated at submission.
-
-    Endpoints translate this into ``HTTPException(429, ...)``.
-    """
 _VARIANT_GROUPS_ROOT: Optional[str] = None  # tests override to isolate
 _DRAW_SESSIONS_ROOT: Optional[str] = None  # tests override to isolate
 _PREFERENCES_ROOT: Optional[str] = None  # tests override to isolate
-_FUSIONS_ROOT: Optional[str] = None  # tests override to isolate (V4.5 fusion)
 
 # Draw-session (V3.5 batch draw) card-event vocabulary.
 _DRAW_CARD_EVENT_TYPES: frozenset[str] = frozenset({
@@ -167,16 +166,11 @@ _MAX_INPUT_SPEC_CHARS = _env_int("MAX_INPUT_SPEC_CHARS", 256 * 1024)
 _MAX_FEEDBACK_CHARS = _env_int("MAX_FEEDBACK_CHARS", 8 * 1024)
 _MAX_MODIFIED_DSL_CHARS = _env_int("MAX_MODIFIED_DSL_CHARS", 256 * 1024)
 
-# Global top-level worker backpressure. Every top-level pipeline worker
-# (/run, /branch-refine, fusion) must acquire one of these slots at submission
-# time; if none is free the endpoint returns 429 instead of spawning an
-# unbounded daemon thread. Variant CHILD runs are bounded separately by
-# ``_variant_worker_semaphore`` and do NOT consume a global slot (their parent
-# already held one), so the two pools never double-count or deadlock.
-# Configurable via env MAX_ACTIVE_RUNS (default 6). Bounded so an over-release
-# bug surfaces loudly instead of silently inflating capacity.
-_MAX_ACTIVE_RUNS = _env_int("MAX_ACTIVE_RUNS", 6)
-_global_worker_semaphore = threading.BoundedSemaphore(_MAX_ACTIVE_RUNS)
+# Global top-level worker backpressure (``_global_worker_semaphore``, sized by
+# MAX_ACTIVE_RUNS) lives in p2s_agent.workers, imported above. Every top-level
+# pipeline worker (/run, /branch-refine, fusion) acquires one of those slots in
+# ``_start_pipeline_worker``; a saturated pool raises ``WorkerCapacityError``
+# which the route handlers translate into HTTP 429.
 
 # Item 2 — allowlist regex for client-supplied ids used in filesystem paths.
 # Allows only [A-Za-z0-9_-]; rejects empty, "..", "/", and any other char.
@@ -207,28 +201,6 @@ def _enforce_text_cap(value: Optional[str], cap: int, *, field: str) -> None:
         )
 
 
-def _finalize_fusion_for_run(run_id: str, status: str) -> None:
-    """Best-effort: close out the fusion plan a finished run belongs to (Bug 5).
-
-    When a worker reaches a terminal state, if the run's lineage carries a
-    ``fusion_id`` we mark the corresponding FusionPlanRecord ``completed`` /
-    ``failed`` so ``GET /fusions/{id}`` stops reporting ``running`` forever and
-    the frontend poll terminates. Fully wrapped so a failure here can never
-    break the worker thread."""
-    try:
-        with store._run_store_lock:
-            stored = store._run_store.get(run_id) or {}
-            lineage = stored.get("lineage") or {}
-            fusion_id = stored.get("fusion_id") or lineage.get("fusion_id")
-        if not fusion_id:
-            return
-        update_plan_status(
-            str(fusion_id), status, updated_at=time(), root=_FUSIONS_ROOT
-        )
-    except Exception:
-        logger.warning("fusion plan finalize failed for run_id=%s", run_id, exc_info=True)
-
-
 def _coerce_int(value, field_name: str, default: int, lo: int, hi: int) -> int:
     """Coerce a JSON value to an int in ``[lo, hi]`` or raise HTTPException(422).
 
@@ -255,319 +227,6 @@ def _coerce_int(value, field_name: str, default: int, lo: int, hi: int) -> int:
 
 
 router = APIRouter(prefix="/png-shader", tags=["png-shader"])
-
-
-def _variant_preserved(stored: dict) -> dict:
-    """Extract the fields that must survive a terminal store overwrite for a variant run.
-
-    Used in both the cancelled-before-acquire and cancelled-after-acquire paths so
-    that a stopped variant child retains its group identity in /status.
-    """
-    out = {
-        "strategy": stored.get("strategy"),
-        "stop_requested": stored.get("stop_requested", False),
-        "strategy_revision": stored.get("strategy_revision", 1),
-    }
-    for k in ("variant_group_id", "variant_index", "variant_label", "lineage"):
-        if k in stored:
-            out[k] = stored[k]
-    return out
-
-
-def _run_png_shader_background(
-    *,
-    run_id: str,
-    image_path: Path,
-    upload_dir: Optional[Path],
-    pipeline_input_spec: Optional[dict],
-    seed_glsl: Optional[str],
-    model_config: Optional[ModelConfig],
-    trace_input: dict,
-    trace_metadata: dict,
-    pipeline_extra: Optional[dict] = None,
-    variant_semaphore: Optional[threading.Semaphore] = None,
-    global_slot: Optional[threading.BoundedSemaphore] = None,
-) -> None:
-    """Run the PNG shader pipeline after the submit request has returned.
-
-    ``upload_dir`` is the temp dir of an uploaded image and is removed on
-    completion. Branch runs reuse the parent's reference image and pass
-    ``upload_dir=None`` so the parent's ``run_dir`` is never deleted.
-    ``pipeline_extra`` carries human-in-loop kwargs (human_feedback_notes,
-    directed_acceptance, force_first_refinement_iteration, lineage,
-    extra_artifacts) forwarded to ``run_png_shader_pipeline``.
-    ``variant_semaphore`` when provided puts the run through a queued→acquired
-    lifecycle: the run waits in "queued" until the semaphore is free, then
-    flips to "running"/"acquired".
-    ``global_slot`` (set only for top-level /run, /branch-refine and fusion
-    runs) is the global worker-pool slot acquired at submission; it is released
-    in the ``finally`` so the next top-level submission can be admitted.
-    """
-    # --- Variant queued lifecycle ---
-    if variant_semaphore is not None:
-        # Mark as queued and check for pre-acquire cancellation.
-        with store._run_store_lock:
-            stored = store._run_store.get(run_id, {})
-            stored["current_phase"] = "queued"
-            store._store_run_locked(run_id, stored)
-            stop_early = bool(stored.get("stop_requested"))
-
-        if stop_early:
-            store._index_updated(run_id, {"status": "cancelled", "completed_at": time()})
-            with store._run_store_lock:
-                stored = store._run_store.get(run_id, {})
-                store._store_run_locked(run_id, {
-                    "run_id": run_id,
-                    "status": "cancelled",
-                    "completed_at": time(),
-                    **_variant_preserved(stored),
-                })
-            if upload_dir is not None:
-                shutil.rmtree(upload_dir, ignore_errors=True)
-            return
-
-        variant_semaphore.acquire()
-        with store._run_store_lock:
-            stored = store._run_store.get(run_id)
-            stop_after_acquire = bool((stored or {}).get("stop_requested"))
-            if stored is not None:
-                stored["status"] = "running"
-                stored["current_phase"] = "acquired"
-                store._store_run_locked(run_id, stored)
-
-        if stop_after_acquire:
-            store._index_updated(run_id, {"status": "cancelled", "completed_at": time()})
-            with store._run_store_lock:
-                stored = store._run_store.get(run_id, {})
-                store._store_run_locked(run_id, {
-                    "run_id": run_id,
-                    "status": "cancelled",
-                    "completed_at": time(),
-                    **_variant_preserved(stored),
-                })
-            variant_semaphore.release()
-            if upload_dir is not None:
-                shutil.rmtree(upload_dir, ignore_errors=True)
-            return
-
-    def _progress(phase: str) -> None:
-        with store._run_store_lock:
-            stored = store._run_store.get(run_id)
-            if stored is not None:
-                stored["current_phase"] = phase
-
-    def _strategy_reader() -> dict:
-        with store._run_store_lock:
-            stored = store._run_store.get(run_id) or {}
-            return {
-                "strategy": dict(stored.get("strategy") or {}),
-                "stop_requested": bool(stored.get("stop_requested")),
-            }
-
-    # Mutable cell: a closure can't rebind a bare outer name in Python 3.9; this
-    # remembers the first run_dir a partial reveals so terminal updates can reuse it.
-    seen = {"run_dir": None}
-
-    def _publish_partial(partial: dict) -> None:
-        rd = partial.get("run_dir")
-        if rd and seen["run_dir"] is None:
-            seen["run_dir"] = str(rd)
-            store._index_updated(run_id, {"run_dir": str(rd), "status": "running"})
-        store._publish_partial_to_store(run_id, partial)
-
-    run_log_path = Path("artifacts") / run_id / "run.log"
-    with attach_run_log(run_id=run_id, log_file=run_log_path):
-        log_event(
-            logger,
-            "pipeline_worker_start",
-            run_id=run_id,
-            image=image_path.name,
-            run_log=str(run_log_path),
-            model=model_config.model if model_config else None,
-        )
-        try:
-            with trace_context(
-                "PNG Shader Pipeline",
-                inputs=trace_input,
-                metadata=trace_metadata,
-                tags=["png-shader", run_id],
-            ) as run_tree, use_active_model(model_config):
-                pipeline_result = run_png_shader_pipeline(
-                    image_path,
-                    pipeline_input_spec,
-                    run_id=run_id,
-                    seed_glsl=seed_glsl,
-                    progress_callback=_progress,
-                    strategy_reader=_strategy_reader,
-                    publish_partial=_publish_partial,
-                    **(pipeline_extra or {}),
-                )
-                result_with_status = {**pipeline_result, "status": "completed", "current_phase": "done"}
-                final_run_dir = seen["run_dir"] or (
-                    str(pipeline_result.get("run_dir"))
-                    if pipeline_result.get("run_dir") else None
-                )
-                if final_run_dir:
-                    try:
-                        save_timeline(final_run_dir, pipeline_result, run_id=run_id)
-                    except Exception:
-                        logger.warning("save_timeline failed", exc_info=True)
-                store._index_updated(run_id, {
-                    "status": "completed",
-                    "final_score": pipeline_result.get("quality_router", {}).get("final_score"),
-                    "completed_at": time(),
-                    **({"run_dir": final_run_dir} if final_run_dir else {}),
-                })
-                with store._run_store_lock:
-                    stored = store._run_store.get(run_id, {})
-                    preserved = {
-                        "strategy": stored.get("strategy"),
-                        "stop_requested": stored.get("stop_requested", False),
-                        "strategy_revision": stored.get("strategy_revision", 1),
-                        # Preserve variant identity fields so they survive the
-                        # result overwrite and remain queryable from /status.
-                        **({"variant_group_id": stored["variant_group_id"]}
-                           if "variant_group_id" in stored else {}),
-                        **({"variant_index": stored["variant_index"]}
-                           if "variant_index" in stored else {}),
-                        **({"variant_label": stored["variant_label"]}
-                           if "variant_label" in stored else {}),
-                        **({"lineage": stored["lineage"]}
-                           if "lineage" in stored else {}),
-                    }
-                    store._store_run_locked(run_id, {**result_with_status, **preserved})
-                # Best-effort: close out a fusion plan record so its /fusions
-                # poll terminates instead of reporting 'running' forever (Bug 5).
-                _finalize_fusion_for_run(run_id, "completed")
-                if run_tree is not None:
-                    run_tree.end(
-                        outputs={
-                            "run_id": pipeline_result.get("run_id"),
-                            "selected_id": pipeline_result.get("scoreboard", {}).get("selected_id"),
-                            "score": pipeline_result.get("quality_router", {}).get("final_score"),
-                            "refinement": pipeline_result.get("refinement_summary", {}),
-                        }
-                    )
-                log_event(
-                    logger,
-                    "pipeline_worker_done",
-                    run_id=run_id,
-                    selected_id=pipeline_result.get("scoreboard", {}).get("selected_id"),
-                    score=pipeline_result.get("quality_router", {}).get("final_score"),
-                )
-        except Exception as exc:
-            logger.exception("worker failed: run_id=%s", run_id)
-            log_event(
-                logger,
-                "pipeline_worker_failed",
-                level=logging.ERROR,
-                run_id=run_id,
-                error=f"{exc.__class__.__name__}: {exc}",
-            )
-            store._index_updated(run_id, {
-                "status": "failed",
-                "completed_at": time(),
-                **({"run_dir": seen["run_dir"]} if seen["run_dir"] else {}),
-            })
-            with store._run_store_lock:
-                stored = store._run_store.get(run_id, {})
-                preserved = {
-                    "strategy": stored.get("strategy"),
-                    "stop_requested": stored.get("stop_requested", False),
-                    "strategy_revision": stored.get("strategy_revision", 1),
-                    # Preserve variant identity fields on failure path too.
-                    **({"variant_group_id": stored["variant_group_id"]}
-                       if "variant_group_id" in stored else {}),
-                    **({"variant_index": stored["variant_index"]}
-                       if "variant_index" in stored else {}),
-                    **({"variant_label": stored["variant_label"]}
-                       if "variant_label" in stored else {}),
-                    **({"lineage": stored["lineage"]}
-                       if "lineage" in stored else {}),
-                }
-                store._store_run_locked(run_id, {
-                    "run_id": run_id,
-                    "status": "failed",
-                    "error": f"Pipeline error: {exc}",
-                    "completed_at": time(),
-                    **preserved,
-                })
-            # Best-effort fusion-plan finalization on failure (Bug 5).
-            _finalize_fusion_for_run(run_id, "failed")
-        finally:
-            if upload_dir is not None:
-                shutil.rmtree(upload_dir, ignore_errors=True)
-            if variant_semaphore is not None:
-                variant_semaphore.release()
-            # Release the global top-level worker slot (only set for /run,
-            # /branch-refine and fusion runs) so the next submission is admitted.
-            if global_slot is not None:
-                global_slot.release()
-
-
-def _start_pipeline_worker(
-    *,
-    run_id: str,
-    image_path: Path,
-    upload_dir: Optional[Path],
-    pipeline_input_spec: Optional[dict],
-    seed_glsl: Optional[str],
-    model_config: Optional[ModelConfig],
-    trace_input: dict,
-    trace_metadata: dict,
-    pipeline_extra: Optional[dict] = None,
-    variant_semaphore: Optional[threading.Semaphore] = None,
-) -> None:
-    """Register the run's model and launch the background pipeline thread.
-
-    Shared by ``/run`` (uploaded image, ``upload_dir`` set) and
-    ``/branch-refine`` (parent reference image, ``upload_dir=None``).
-    ``variant_semaphore`` is forwarded to the worker for the queued→acquired
-    lifecycle used by variant child runs.
-
-    Backpressure: TOP-LEVEL runs (``variant_semaphore is None`` — i.e. /run,
-    /branch-refine, fusion) acquire one global worker slot here, before the
-    thread is spawned. If the pool is saturated this raises
-    ``WorkerCapacityError`` and NO thread is started; callers translate that
-    into HTTP 429. Variant child runs (``variant_semaphore`` set) are bounded by
-    their own semaphore and skip the global slot. The acquired global slot is
-    forwarded to the worker, which releases it in its ``finally``.
-    """
-    global_slot: Optional[threading.BoundedSemaphore] = None
-    if variant_semaphore is None:
-        # Resolve via the module attribute so tests can monkeypatch the cap.
-        sem = _global_worker_semaphore
-        if not sem.acquire(blocking=False):
-            raise WorkerCapacityError(
-                "worker pool at capacity; retry shortly"
-            )
-        global_slot = sem
-
-    try:
-        store._store_run_model(run_id, model_config)
-        threading.Thread(
-            target=_run_png_shader_background,
-            kwargs={
-                "run_id": run_id,
-                "image_path": image_path,
-                "upload_dir": upload_dir,
-                "pipeline_input_spec": pipeline_input_spec,
-                "seed_glsl": seed_glsl,
-                "model_config": model_config,
-                "trace_input": trace_input,
-                "trace_metadata": trace_metadata,
-                "pipeline_extra": pipeline_extra,
-                "variant_semaphore": variant_semaphore,
-                "global_slot": global_slot,
-            },
-            daemon=True,
-        ).start()
-    except BaseException:
-        # Thread never launched → release the slot we just took so it is not
-        # leaked (the worker's finally only runs if the thread actually starts).
-        if global_slot is not None:
-            global_slot.release()
-        raise
 
 
 @router.post("/run", dependencies=[Depends(_check_content_length)])
@@ -2844,7 +2503,7 @@ def _fusions_results_root() -> Path:
     same ``<root>`` so composite_target.png + region_masks/ land under
     ``<root>/fusions/<fusion_id>/``.
     """
-    return Path(_FUSIONS_ROOT) if _FUSIONS_ROOT is not None else DEFAULT_RESULTS_ROOT
+    return Path(sessions._FUSIONS_ROOT) if sessions._FUSIONS_ROOT is not None else DEFAULT_RESULTS_ROOT
 
 
 def _fusion_artifacts_dir(fusion_id: str) -> Path:
@@ -2872,14 +2531,14 @@ def _resolve_run_render(stored: dict, run_dir: "str | None") -> "Path | None":
 
 def _save_plan_best_effort(record: FusionPlanRecord) -> None:
     try:
-        save_plan(record, root=_FUSIONS_ROOT)
+        save_plan(record, root=sessions._FUSIONS_ROOT)
     except Exception:
         logger.warning("fusion save_plan failed for fusion_id=%s", record.fusion_id, exc_info=True)
 
 
 def _append_fusion_event_best_effort(fusion_id: str, event: dict) -> None:
     try:
-        append_plan_event(fusion_id, event, root=_FUSIONS_ROOT)
+        append_plan_event(fusion_id, event, root=sessions._FUSIONS_ROOT)
     except Exception:
         logger.warning("fusion append_plan_event failed for fusion_id=%s", fusion_id, exc_info=True)
 
@@ -2997,7 +2656,7 @@ async def create_fusion(payload: dict) -> dict:
 async def get_fusion(fusion_id: str) -> dict:
     """Return a fusion plan's status + regions (FusionStatus shape)."""
     validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
-    record = load_plan(fusion_id, root=_FUSIONS_ROOT)
+    record = load_plan(fusion_id, root=sessions._FUSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 
@@ -3026,7 +2685,7 @@ async def create_composite_target(fusion_id: str) -> dict:
     the error (per design: composite failure → fusion status failed, not 500).
     """
     validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
-    record = load_plan(fusion_id, root=_FUSIONS_ROOT)
+    record = load_plan(fusion_id, root=sessions._FUSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 
@@ -3097,7 +2756,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
 
     validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
-    record = load_plan(fusion_id, root=_FUSIONS_ROOT)
+    record = load_plan(fusion_id, root=sessions._FUSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"fusion_id '{fusion_id}' not found")
 

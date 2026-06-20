@@ -44,7 +44,7 @@ def _isolate_run_index(tmp_path, monkeypatch):
         str(tmp_path / "prefs"),
     )
     monkeypatch.setattr(
-        "app.routers.png_shader._FUSIONS_ROOT",
+        "p2s_agent.orchestration.sessions._FUSIONS_ROOT",
         str(tmp_path / "fusions_root"),
     )
 
@@ -269,7 +269,7 @@ def test_run_accepts_seed_glsl_and_defaults_refinement_on(tmp_path, monkeypatch)
         }
 
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", fake_pipeline
+        "p2s_agent.workers.run_png_shader_pipeline", fake_pipeline
     )
     client = _client()
     seed = "void mainImage(out vec4 c, in vec2 p){ c = vec4(0.3); }"
@@ -445,7 +445,7 @@ def test_branch_refine_creates_child_run(tmp_path, monkeypatch):
     parent_dir = _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
 
@@ -541,7 +541,7 @@ def test_branch_refine_continue_mode_allows_empty_feedback(tmp_path, monkeypatch
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
     resp = client.post(
@@ -558,7 +558,7 @@ def test_branch_refine_stop_parent_sets_flag(tmp_path, monkeypatch):
     _seed_parent(tmp_path, status="running")
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
     resp = client.post(
@@ -575,7 +575,7 @@ def test_branch_refine_refine_mode_enables_directed_acceptance(tmp_path, monkeyp
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
     resp = client.post(
@@ -598,7 +598,7 @@ def test_branch_refine_polish_mode_zero_tolerance(tmp_path, monkeypatch):
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
     resp = client.post(
@@ -616,7 +616,7 @@ def test_branch_refine_continue_mode_disables_directed_acceptance(tmp_path, monk
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
     resp = client.post(
@@ -657,7 +657,7 @@ def test_run_index_root_run_completed(tmp_path, monkeypatch):
             "refinement_summary": {},
         }
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", fake_pipeline)
     client = _client()
 
     resp = client.post(
@@ -704,7 +704,7 @@ def test_run_index_branch_run_completed(tmp_path, monkeypatch):
             "lineage": lineage,
         }
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline_branch)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", fake_pipeline_branch)
     client = _client()
 
     resp = client.post(
@@ -741,7 +741,7 @@ def test_run_index_failed_run(tmp_path, monkeypatch):
     def failing_pipeline(image_path, input_spec=None, run_id=None, **kwargs):
         raise RuntimeError("simulated pipeline crash")
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", failing_pipeline)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", failing_pipeline)
     client = _client()
 
     resp = client.post(
@@ -1090,7 +1090,7 @@ def test_save_timeline_written_on_success(tmp_path, monkeypatch):
             "refinement_history": [],
         }
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", fake_pipeline)
     client = _client()
     resp = client.post(
         "/png-shader/run",
@@ -1118,7 +1118,7 @@ def test_run_index_completed_run_dir_from_result(tmp_path, monkeypatch):
         return {"run_id": run_id, "selected_glsl": "x", "scoreboard": {},
                 "quality_router": {"final_score": 0.5}, "refinement_summary": {}, "run_dir": rd}
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", fake_pipeline)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", fake_pipeline)
     client = _client()
     resp = client.post("/png-shader/run", files={"image": ("input.png", _png_bytes(tmp_path), "image/png")})
     run_id = resp.json()["run_id"]
@@ -1189,7 +1189,7 @@ def test_explore_variants_creates_4_children(tmp_path, monkeypatch):
     _seed_parent(tmp_path)
     captures: list[dict] = []
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline(captures),
     )
     client = _client()
@@ -1244,7 +1244,7 @@ def test_explore_variants_run_index_has_variant_fields(tmp_path, monkeypatch):
 
     _seed_parent(tmp_path)
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
     client = _client()
@@ -1371,7 +1371,7 @@ def test_explore_variants_concurrency_all_complete(tmp_path, monkeypatch):
     _seed_parent(tmp_path)
     captures: list[dict] = []
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline(captures),
     )
     client = _client()
@@ -1428,7 +1428,7 @@ def test_stop_before_acquire_cancels_without_acquiring(tmp_path, monkeypatch):
     must cancel immediately without calling acquire(), leaving status='cancelled' and
     group identity intact."""
     import threading as _threading
-    from app.routers.png_shader import _run_png_shader_background, _variant_preserved
+    from p2s_agent.workers import _run_png_shader_background, _variant_preserved
     from p2s_agent.store import _run_store as _rs
 
     _rs.clear()
@@ -1529,7 +1529,7 @@ def test_variant_concurrency_peak_le_2(tmp_path, monkeypatch):
             "refinement_summary": {},
         }
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", measuring_pipeline)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", measuring_pipeline)
     client = _client()
 
     resp = client.post(
@@ -2072,7 +2072,7 @@ def test_draw_session_create_8_two_groups(tmp_path, monkeypatch):
     all cards complete after workers drain."""
     _run_store.clear()
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
     _seed_parent(tmp_path)
@@ -2112,7 +2112,7 @@ def test_draw_session_create_12_batches_6_6(tmp_path, monkeypatch):
     """card_count=12 -> batches [6,6] => 2 groups of 6, 12 cards."""
     _run_store.clear()
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
     _seed_parent(tmp_path)
@@ -2139,7 +2139,7 @@ def test_draw_session_create_4_one_group(tmp_path, monkeypatch):
     """card_count=4 -> a single group of 4 cards."""
     _run_store.clear()
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
     _seed_parent(tmp_path)
@@ -2315,7 +2315,7 @@ def test_draw_session_draw_more_extends_record(tmp_path, monkeypatch):
     """draw-more keeps the original group, grows card_run_ids, adds distinct group."""
     _run_store.clear()
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
     _seed_parent(tmp_path)
@@ -2385,7 +2385,7 @@ def test_draw_session_redraw_links_replacement(tmp_path, monkeypatch):
     _run_store.clear()
     idx = str(tmp_path / "run_index.jsonl")  # matches autouse fixture path
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
     _seed_parent(tmp_path)
@@ -2601,7 +2601,7 @@ def test_branch_refine_with_constraints_adds_notes_and_artifacts(tmp_path, monke
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
 
@@ -2642,7 +2642,7 @@ def test_branch_refine_without_constraints_unchanged(tmp_path, monkeypatch):
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
 
@@ -2697,7 +2697,7 @@ def test_explore_variants_with_constraints_each_child_has_notes_and_artifact(tmp
     _seed_parent(tmp_path)
     captures: list[dict] = []
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline(captures),
     )
     client = _client()
@@ -2794,7 +2794,7 @@ def test_branch_refine_forwards_protect_regions(tmp_path, monkeypatch):
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _capturing_protect_pipeline(captured),
     )
     client = _client()
@@ -2825,7 +2825,7 @@ def test_branch_refine_no_constraints_forwards_empty_protect_regions(tmp_path, m
     _seed_parent(tmp_path)
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _capturing_protect_pipeline(captured),
     )
     client = _client()
@@ -2863,7 +2863,7 @@ def test_explore_variants_forwards_protect_regions(tmp_path, monkeypatch):
             "lineage": lineage,
         }
 
-    monkeypatch.setattr("app.routers.png_shader.run_png_shader_pipeline", _fake)
+    monkeypatch.setattr("p2s_agent.workers.run_png_shader_pipeline", _fake)
     client = _client()
 
     resp = client.post(
@@ -2893,7 +2893,7 @@ def test_draw_session_create_with_constraints_children_carry_notes(tmp_path, mon
     _seed_parent(tmp_path)
     captures: list[dict] = []
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline(captures),
     )
     client = _client()
@@ -3365,7 +3365,7 @@ def test_branch_refine_injects_preference_notes_and_snapshot(tmp_path, monkeypat
     _seed_nonempty_profile()
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
 
@@ -3404,7 +3404,7 @@ def test_branch_refine_use_preferences_false_no_injection(tmp_path, monkeypatch)
     _seed_nonempty_profile()
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
 
@@ -3444,7 +3444,7 @@ def test_branch_refine_empty_profile_no_preference_injection(tmp_path, monkeypat
     # Do NOT seed a non-empty profile — the router will load the default (empty) profile.
     captured: dict = {}
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline", _fake_branch_pipeline(captured)
+        "p2s_agent.workers.run_png_shader_pipeline", _fake_branch_pipeline(captured)
     )
     client = _client()
 
@@ -3479,7 +3479,7 @@ def test_explore_variants_injects_preference_notes(tmp_path, monkeypatch):
     _seed_nonempty_profile(["clearer reflections without darkening"])
     captures: list[dict] = []
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline(captures),
     )
     client = _client()
@@ -3686,7 +3686,7 @@ def test_create_fusion_draft_200(tmp_path, monkeypatch):
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
     fusions_root = str(tmp_path / "fusions_root")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT", fusions_root)
 
     client = _client()
     resp = client.post("/png-shader/fusions", json=_fusion_body())
@@ -3709,7 +3709,7 @@ def test_create_fusion_source_missing_render_422(tmp_path, monkeypatch):
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src", with_render=False)
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
 
     client = _client()
@@ -3723,7 +3723,7 @@ def test_create_fusion_base_missing_glsl_422(tmp_path, monkeypatch):
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base", with_glsl=False)
     _seed_fusion_run(tmp_path, "run_src")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
 
     client = _client()
@@ -3734,7 +3734,7 @@ def test_create_fusion_base_missing_glsl_422(tmp_path, monkeypatch):
 def test_create_fusion_unknown_base_404(tmp_path, monkeypatch):
     """Unknown base run → 404."""
     _run_store.clear()
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
     client = _client()
     resp = client.post("/png-shader/fusions",
@@ -3745,7 +3745,7 @@ def test_create_fusion_unknown_base_404(tmp_path, monkeypatch):
 def test_create_fusion_missing_base_run_id_422(tmp_path, monkeypatch):
     """Missing base_run_id → 422."""
     _run_store.clear()
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
     client = _client()
     resp = client.post("/png-shader/fusions", json={"feedback": "x", "regions": []})
@@ -3757,7 +3757,7 @@ def test_create_fusion_out_of_bounds_region_422(tmp_path, monkeypatch):
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
 
     client = _client()
@@ -3772,7 +3772,7 @@ def test_get_fusion_status_shape(tmp_path, monkeypatch):
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
 
     client = _client()
@@ -3792,7 +3792,7 @@ def test_get_fusion_status_shape(tmp_path, monkeypatch):
 
 def test_get_fusion_unknown_404(tmp_path, monkeypatch):
     _run_store.clear()
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
     client = _client()
     assert client.get("/png-shader/fusions/fusion_ghost").status_code == 404
@@ -3805,7 +3805,7 @@ def test_composite_target_creates_png_and_url(tmp_path, monkeypatch):
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
     fusions_root = str(tmp_path / "fusions_root")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT", fusions_root)
 
     client = _client()
     fusion_id = client.post("/png-shader/fusions", json=_fusion_body()).json()["fusion_id"]
@@ -3838,11 +3838,11 @@ def test_fusion_run_creates_child(tmp_path, monkeypatch):
     _seed_fusion_run(tmp_path, "run_src")
     fusions_root = str(tmp_path / "fusions_root")
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT", fusions_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
     captures: list[dict] = []
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline(captures),
     )
 
@@ -3886,7 +3886,7 @@ def test_fusion_run_creates_child(tmp_path, monkeypatch):
 
 def test_fusion_run_unknown_404(tmp_path, monkeypatch):
     _run_store.clear()
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
     client = _client()
     assert client.post("/png-shader/fusions/fusion_ghost/run", json={}).status_code == 404
@@ -3897,7 +3897,7 @@ def test_fusion_artifacts_traversal_422(tmp_path, monkeypatch):
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT",
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT",
                         str(tmp_path / "fusions_root"))
 
     client = _client()
@@ -4030,10 +4030,10 @@ def test_fusion_run_completion_marks_plan_completed(tmp_path, monkeypatch):
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
     fusions_root = str(tmp_path / "fusions_root")
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", fusions_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT", fusions_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", str(tmp_path / "ri.jsonl"))
     monkeypatch.setattr(
-        "app.routers.png_shader.run_png_shader_pipeline",
+        "p2s_agent.workers.run_png_shader_pipeline",
         _fake_variant_pipeline([]),
     )
 
@@ -4071,7 +4071,7 @@ def test_get_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch, bad_id):
     import app.routers.png_shader as mod
 
     fusions_root = tmp_path / "fusions_root"
-    monkeypatch.setattr("app.routers.png_shader._FUSIONS_ROOT", str(fusions_root))
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT", str(fusions_root))
 
     # Spy on load_plan to prove no filesystem lookup happens for a rejected id.
     calls: list = []
@@ -4092,7 +4092,7 @@ def test_get_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch, bad_id):
 
 def test_run_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "app.routers.png_shader._FUSIONS_ROOT", str(tmp_path / "fusions_root")
+        "p2s_agent.orchestration.sessions._FUSIONS_ROOT", str(tmp_path / "fusions_root")
     )
     client = _client()
     resp = client.post("/png-shader/fusions/..%2e/run", json={})
@@ -4101,7 +4101,7 @@ def test_run_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch):
 
 def test_fusion_artifact_rejects_unsafe_fusion_id(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "app.routers.png_shader._FUSIONS_ROOT", str(tmp_path / "fusions_root")
+        "p2s_agent.orchestration.sessions._FUSIONS_ROOT", str(tmp_path / "fusions_root")
     )
     client = _client()
     resp = client.get("/png-shader/fusions/..../artifacts/composite_target")
@@ -4111,7 +4111,7 @@ def test_fusion_artifact_rejects_unsafe_fusion_id(tmp_path, monkeypatch):
 def test_valid_fusion_id_still_accepted(tmp_path, monkeypatch):
     """A normal fusion_id passes validate_safe_id (regression for Item 2)."""
     monkeypatch.setattr(
-        "app.routers.png_shader._FUSIONS_ROOT", str(tmp_path / "fusions_root")
+        "p2s_agent.orchestration.sessions._FUSIONS_ROOT", str(tmp_path / "fusions_root")
     )
     client = _client()
     # Unknown-but-safe id → 404 (not a 422 validation error).
