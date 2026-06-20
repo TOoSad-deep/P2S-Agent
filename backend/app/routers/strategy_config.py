@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.strategy_config_loader import get_strategy_config
+from p2s_agent.strategy import get_strategy_config
 
 router = APIRouter(prefix="/api", tags=["strategy-config"])
 

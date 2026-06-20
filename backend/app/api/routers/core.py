@@ -20,22 +20,22 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from app.llm.model_resolver import ModelResolutionError, resolve_model_config
-from app.pipeline.checkpoints import (
+from p2s_agent.core.llm.model_resolver import ModelResolutionError, resolve_model_config
+from p2s_agent.orchestration.checkpoints import (
     CheckpointError,
     build_timeline,
     list_checkpoints,
     resolve_checkpoint_artifact,
 )
-from app.pipeline.input_spec import build_input_spec, validate_input_spec
-from app.pipeline.run_index import (
+from p2s_agent.core.pipeline.input_spec import build_input_spec, validate_input_spec
+from p2s_agent.orchestration.run_index import (
     RunIndexError,
     RunLineageRecord,
     build_branch_tree,
     load_run_index,
     update_run_metadata,
 )
-from app.services.logging_config import log_event, logging_context
+from p2s_agent.core.logging_config import log_event, logging_context
 from app.api.guards import _check_content_length, _guard_upload
 from app.api.routers._shared import (
     _enforce_text_cap,
@@ -162,7 +162,7 @@ async def run_png_shader(
         if pipeline_input_spec is not None:
             quality_for_store = dict(pipeline_input_spec.get("quality") or {})
         else:
-            from app.pipeline.input_spec import build_input_spec as _default_spec
+            from p2s_agent.core.pipeline.input_spec import build_input_spec as _default_spec
             quality_for_store = dict(_default_spec(image_path)["quality"])
 
         trace_input = {
@@ -310,7 +310,7 @@ async def refine_png_shader(
     canvas_height = int(canvas.get("height", 512))
 
     try:
-        from app.candidates.llm_scene import generate_llm_refinement
+        from p2s_agent.core.candidates.llm_scene import generate_llm_refinement
 
         with use_active_model(store._get_run_model(run_id)):
             revised = generate_llm_refinement(
@@ -345,8 +345,8 @@ async def refine_png_shader(
             },
         )
 
-    from app.dsl.compiler import compile_dsl
-    from app.dsl.validator import validate_dsl
+    from p2s_agent.core.dsl.compiler import compile_dsl
+    from p2s_agent.core.dsl.validator import validate_dsl
 
     val = validate_dsl(revised)
     if not val.valid:
@@ -406,7 +406,7 @@ async def parameterize_png_shader(
     )
 
     try:
-        from app.candidates.llm_scene import parameterize_glsl
+        from p2s_agent.core.candidates.llm_scene import parameterize_glsl
 
         with use_active_model(store._get_run_model(run_id)):
             result = parameterize_glsl(glsl)
@@ -429,7 +429,7 @@ async def parameterize_png_shader(
             },
         )
 
-    from app.services.shader_validator import validate_shader_static
+    from p2s_agent.core.render.shader_validator import validate_shader_static
 
     val = validate_shader_static(result["glsl"])
     if not val.get("valid", False):

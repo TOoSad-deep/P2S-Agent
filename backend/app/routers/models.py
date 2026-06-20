@@ -5,7 +5,7 @@ Returns safe preset metadata only; api_keys are never exposed.
 
 from fastapi import APIRouter
 
-from app.llm.model_resolver import list_presets
+from p2s_agent.core.llm.model_resolver import list_presets
 
 router = APIRouter(prefix="/api", tags=["models"])
 

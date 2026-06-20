@@ -8,21 +8,21 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 
-from app.pipeline.variant_groups import build_variant_strategies
-from app.pipeline.draw_sessions import (
+from p2s_agent.orchestration.variant_groups import build_variant_strategies
+from p2s_agent.orchestration.draw_sessions import (
     DrawSessionRecord,
     aggregate_draw_status,
     append_session_event,
     load_session,
     save_session,
 )
-from app.pipeline.human_constraints import (
+from p2s_agent.orchestration.human_constraints import (
     HumanConstraintSpec,
     parse_constraint_spec,
     validate_constraint_spec,
 )
-from app.pipeline.run_index import RunIndexError, load_run_index, update_run_metadata
-from app.services.logging_config import log_event
+from p2s_agent.orchestration.run_index import RunIndexError, load_run_index, update_run_metadata
+from p2s_agent.core.logging_config import log_event
 from app.api.routers._shared import _coerce_int, _enforce_text_cap, _MAX_FEEDBACK_CHARS
 
 from p2s_agent import store

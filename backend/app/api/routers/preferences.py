@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 
-from app.pipeline.preferences import (
+from p2s_agent.orchestration.preferences import (
     PreferenceEvent,
     append_preference_event,
     clear_preferences,

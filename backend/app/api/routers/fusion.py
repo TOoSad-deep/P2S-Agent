@@ -11,25 +11,25 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from app.pipeline.checkpoints import _selected_candidate
-from app.pipeline.human_constraints import (
+from p2s_agent.orchestration.checkpoints import _selected_candidate
+from p2s_agent.orchestration.human_constraints import (
     HumanConstraintSpec,
     RegionConstraint,
     validate_constraint_spec,
 )
-from app.pipeline.region_metrics import compute_region_metrics
-from app.pipeline.fusion_plans import (
+from p2s_agent.core.pipeline.region_metrics import compute_region_metrics
+from p2s_agent.orchestration.fusion_plans import (
     build_fusion_notes,
     load_plan,
     parse_fusion_plan,
     plan_to_dict,
     validate_fusion_plan,
 )
-from app.pipeline.image_composite import build_composite_target
-from app.pipeline.artifacts import save_json
-from app.pipeline.input_spec import build_input_spec, validate_input_spec
-from app.pipeline.run_index import RunLineageRecord
-from app.services.logging_config import log_event
+from p2s_agent.core.pipeline.image_composite import build_composite_target
+from p2s_agent.core.pipeline.artifacts import save_json
+from p2s_agent.core.pipeline.input_spec import build_input_spec, validate_input_spec
+from p2s_agent.orchestration.run_index import RunLineageRecord
+from p2s_agent.core.logging_config import log_event
 from app.api.routers._shared import validate_safe_id, _coerce_int, _REGION_ID_RE
 
 from p2s_agent import store

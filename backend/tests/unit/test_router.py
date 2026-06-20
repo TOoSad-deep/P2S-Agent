@@ -670,7 +670,7 @@ def test_run_index_root_run_completed(tmp_path, monkeypatch):
     run_id = resp.json()["run_id"]
     _wait_for_completion(client, run_id)
 
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     records = load_run_index(path=idx)
 
     assert run_id in records, f"run_id {run_id!r} not in index; keys={list(records)}"
@@ -721,7 +721,7 @@ def test_run_index_branch_run_completed(tmp_path, monkeypatch):
     child_id = resp.json()["run_id"]
     _wait_for_completion(client, child_id)
 
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     records = load_run_index(path=idx)
 
     assert child_id in records, f"child {child_id!r} not in index; keys={list(records)}"
@@ -754,7 +754,7 @@ def test_run_index_failed_run(tmp_path, monkeypatch):
     run_id = resp.json()["run_id"]
     _wait_for_completion(client, run_id)
 
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     records = load_run_index(path=idx)
 
     assert run_id in records, f"run_id {run_id!r} not in index; keys={list(records)}"
@@ -769,7 +769,7 @@ def test_run_index_failed_run(tmp_path, monkeypatch):
 
 def _seed_index(idx_path, **fields):
     """Helper: append a RunLineageRecord to the isolated test index."""
-    from app.pipeline.run_index import RunLineageRecord, append_run_created
+    from p2s_agent.orchestration.run_index import RunLineageRecord, append_run_created
     rec = RunLineageRecord(
         run_id=fields["run_id"],
         root_run_id=fields.get("root_run_id", fields["run_id"]),
@@ -927,7 +927,7 @@ def test_metadata_update(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200
 
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     rec = load_run_index(path=idx)["run_m"]
     assert rec.title == "my branch"
     assert rec.favorite is True
@@ -1125,7 +1125,7 @@ def test_run_index_completed_run_dir_from_result(tmp_path, monkeypatch):
     resp = client.post("/png-shader/run", files={"image": ("input.png", _png_bytes(tmp_path), "image/png")})
     run_id = resp.json()["run_id"]
     _wait_for_completion(client, run_id)
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     rec = load_run_index(path=idx)[run_id]
     assert rec.status == "completed"
     assert rec.run_dir == rd
@@ -1228,7 +1228,7 @@ def test_explore_variants_creates_4_children(tmp_path, monkeypatch):
         assert stored["lineage"]["variant_group_id"] == group_id
 
     # Verify the group record was persisted.
-    from app.pipeline.variant_groups import load_group
+    from p2s_agent.orchestration.variant_groups import load_group
     rec = load_group(group_id, root=vg_root)
     assert rec is not None
     assert set(rec.child_run_ids) == set(child_run_ids)
@@ -1263,7 +1263,7 @@ def test_explore_variants_run_index_has_variant_fields(tmp_path, monkeypatch):
     for cid in child_run_ids:
         _wait_for_variant_completion(client, cid)
 
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     records = load_run_index(path=idx)
     for idx_child, cid in enumerate(child_run_ids):
         assert cid in records, f"{cid} missing from run index"
@@ -1566,7 +1566,7 @@ def test_variant_concurrency_peak_le_2(tmp_path, monkeypatch):
 
 def _seed_group(vg_root, group_id="group_x", children=None):
     """Seed a VariantGroupRecord + child entries in _run_store directly."""
-    from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
+    from p2s_agent.orchestration.variant_groups import VariantGroupRecord, save_group as _save_group
     children = children or []
     rec = VariantGroupRecord(
         group_id=group_id,
@@ -1745,7 +1745,7 @@ def test_winner_marks_group_and_favorite(tmp_path, monkeypatch):
     assert body["winner_run_id"] == "w_a"
 
     # Group record must be updated on disk.
-    from app.pipeline.variant_groups import load_group as _load_group
+    from p2s_agent.orchestration.variant_groups import load_group as _load_group
     rec = _load_group("group_win", root=vg_root)
     assert rec is not None
     assert rec.winner_run_id == "w_a"
@@ -1807,7 +1807,7 @@ def test_ratings_appends_event(tmp_path, monkeypatch):
     assert body["rating"] == 1
 
     # Verify event was appended.
-    from app.pipeline.variant_groups import load_group_events
+    from p2s_agent.orchestration.variant_groups import load_group_events
     events = load_group_events("group_rate", root=vg_root)
     rating_events = [e for e in events if e.get("event") == "rating"]
     assert len(rating_events) == 1
@@ -1867,7 +1867,7 @@ def test_get_variant_group_winner_sorted_first(tmp_path, monkeypatch):
     monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     # Build group with 3 completed children; set winner to the one with lowest score.
-    from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
+    from p2s_agent.orchestration.variant_groups import VariantGroupRecord, save_group as _save_group
     children = [
         {"run_id": "ws_a", "status": "completed", "variant_index": 0, "variant_label": "A",
          "quality_router": {"final_score": 0.9}},
@@ -1920,7 +1920,7 @@ def test_winner_persists_run_index_favorite_and_appends_event(tmp_path, monkeypa
     _seed_group(vg_root, group_id="group_windex", children=children)
 
     # Seed the winner run into the run index before calling the endpoint.
-    from app.pipeline.run_index import RunLineageRecord, append_run_created, load_run_index
+    from p2s_agent.orchestration.run_index import RunLineageRecord, append_run_created, load_run_index
     idx_path = tmp_path / "ri.jsonl"
     winner_rec = RunLineageRecord(
         run_id="wi_a",
@@ -1954,7 +1954,7 @@ def test_winner_persists_run_index_favorite_and_appends_event(tmp_path, monkeypa
     assert index["wi_a"].favorite is True, "favorite must be True after /winner"
 
     # Verify 'winner' event was appended to the group event log.
-    from app.pipeline.variant_groups import load_group_events
+    from p2s_agent.orchestration.variant_groups import load_group_events
     evs = load_group_events("group_windex", root=vg_root)
     assert any(
         e.get("event") == "winner" and e.get("run_id") == "wi_a"
@@ -2000,7 +2000,7 @@ def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     # Seed a group with one child, but do NOT put that child in _run_store.
-    from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
+    from p2s_agent.orchestration.variant_groups import VariantGroupRecord, save_group as _save_group
     rec = VariantGroupRecord(
         group_id="group_evict",
         root_run_id="run_parent",
@@ -2018,7 +2018,7 @@ def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
     # _run_store intentionally left empty — ev_run is "evicted".
 
     # Seed ev_run into the run index (as if it was previously completed).
-    from app.pipeline.run_index import RunLineageRecord, append_run_created
+    from p2s_agent.orchestration.run_index import RunLineageRecord, append_run_created
     idx_path = tmp_path / "ri.jsonl"
     ev_rec = RunLineageRecord(
         run_id="ev_run",
@@ -2096,7 +2096,7 @@ def test_draw_session_create_8_two_groups(tmp_path, monkeypatch):
     assert len(set(body["card_run_ids"])) == 8
 
     # Record round-trips with parent / feedback / group_ids / card_run_ids.
-    from app.pipeline.draw_sessions import load_session
+    from p2s_agent.orchestration.draw_sessions import load_session
     rec = load_session(draw_id, root=_ds_root(tmp_path))
     assert rec is not None
     assert rec.parent_run_id == "run_parent"
@@ -2129,7 +2129,7 @@ def test_draw_session_create_12_batches_6_6(tmp_path, monkeypatch):
     assert len(body["group_ids"]) == 2
     assert len(body["card_run_ids"]) == 12
 
-    from app.pipeline.variant_groups import load_group
+    from p2s_agent.orchestration.variant_groups import load_group
     sizes = sorted(
         len(load_group(gid, root=str(tmp_path / "vg")).child_run_ids)
         for gid in body["group_ids"]
@@ -2214,7 +2214,7 @@ def test_draw_session_create_422_bad_checkpoint(tmp_path):
 def _seed_draw_session(tmp_path, *, draw_id="draw_test1", card_run_ids, feedback="brighten",
                        requested_count=None, group_ids=None):
     """Persist a DrawSessionRecord directly (no worker spawn)."""
-    from app.pipeline.draw_sessions import DrawSessionRecord, save_session
+    from p2s_agent.orchestration.draw_sessions import DrawSessionRecord, save_session
     rec = DrawSessionRecord(
         draw_id=draw_id,
         root_run_id="run_parent",
@@ -2345,7 +2345,7 @@ def test_draw_session_draw_more_extends_record(tmp_path, monkeypatch):
     assert new_gid not in orig_groups
     assert len(mbody["card_run_ids"]) == 4
 
-    from app.pipeline.draw_sessions import load_session
+    from p2s_agent.orchestration.draw_sessions import load_session
     rec = load_session(draw_id, root=_ds_root(tmp_path))
     assert rec is not None
     # original group still present
@@ -2414,13 +2414,13 @@ def test_draw_session_redraw_links_replacement(tmp_path, monkeypatch):
     assert rbody["group_id"]
 
     # replacement's run-index record points back to the original.
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     records = load_run_index(path=idx)
     assert new_run_id in records
     assert records[new_run_id].replacement_of_run_id == original
 
     # original still tracked in the record's card_run_ids.
-    from app.pipeline.draw_sessions import load_session, load_session_events
+    from p2s_agent.orchestration.draw_sessions import load_session, load_session_events
     rec = load_session(draw_id, root=_ds_root(tmp_path))
     assert original in rec.card_run_ids
     assert new_run_id in rec.card_run_ids
@@ -2453,7 +2453,7 @@ def test_draw_session_card_event_favorite(tmp_path, monkeypatch):
     _run_store.clear()
     idx = str(tmp_path / "run_index.jsonl")
     # seed a run-index 'created' record so update_run_metadata can patch it.
-    from app.pipeline.run_index import RunLineageRecord, append_run_created
+    from p2s_agent.orchestration.run_index import RunLineageRecord, append_run_created
     append_run_created(
         RunLineageRecord(
             run_id="c_fav", root_run_id="run_parent", parent_run_id="run_parent",
@@ -2480,12 +2480,12 @@ def test_draw_session_card_event_favorite(tmp_path, monkeypatch):
     assert ev.json()["ok"] is True
 
     # session event written
-    from app.pipeline.draw_sessions import load_session_events
+    from p2s_agent.orchestration.draw_sessions import load_session_events
     events = load_session_events(draw_id="draw_fav", root=_ds_root(tmp_path))
     assert any(e.get("event") == "favorite" and e.get("run_id") == "c_fav" for e in events)
 
     # run-index favorite mirrored
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     assert load_run_index(path=idx)["c_fav"].favorite is True
 
     # GET reflects favorite
@@ -3210,7 +3210,7 @@ def test_preference_events_post_and_readable(tmp_path, monkeypatch):
     assert event_id.startswith("pref_")
 
     # Verify via load_preference_events.
-    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    from p2s_agent.orchestration.preferences import load_preference_events as _load_pref_events
     events = _load_pref_events(root=prefs_root)
     assert len(events) == 1
     assert events[0].event_id == event_id
@@ -3267,7 +3267,7 @@ def test_preference_clear_resets_events_and_profile(tmp_path, monkeypatch):
     assert clear_resp.json()["ok"] is True
 
     # Events should be gone.
-    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    from p2s_agent.orchestration.preferences import load_preference_events as _load_pref_events
     events = _load_pref_events(root=prefs_root)
     assert events == []
 
@@ -3302,7 +3302,7 @@ def test_variant_winner_mirrors_preference_event(tmp_path, monkeypatch):
     assert resp.status_code == 200, resp.text
 
     # A preference event must have been appended.
-    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    from p2s_agent.orchestration.preferences import load_preference_events as _load_pref_events
     events = _load_pref_events(root=prefs_root)
     winner_evts = [e for e in events if e.event_type == "winner_selected"]
     assert len(winner_evts) == 1
@@ -3332,7 +3332,7 @@ def test_rate_variant_mirrors_preference_event(tmp_path, monkeypatch):
     assert resp.status_code == 200, resp.text
 
     # A preference event must have been appended.
-    from app.pipeline.preferences import load_preference_events as _load_pref_events
+    from p2s_agent.orchestration.preferences import load_preference_events as _load_pref_events
     events = _load_pref_events(root=prefs_root)
     rated_evts = [e for e in events if e.event_type == "variant_rated"]
     assert len(rated_evts) == 1
@@ -3351,7 +3351,7 @@ def _seed_nonempty_profile(positive_prefs: list[str] | None = None) -> None:
     """Write an enabled profile with at least one positive preference into the
     current _PREFERENCES_ROOT (already monkeypatched by autouse fixture)."""
     from p2s_agent.orchestration import sessions
-    from app.pipeline import preferences as prefs
+    from p2s_agent.orchestration import preferences as prefs
 
     root = sessions._PREFERENCES_ROOT
     prof = prefs.default_profile()
@@ -3526,7 +3526,7 @@ def test_get_variant_group_preference_ranking_enabled(tmp_path, monkeypatch):
     monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
 
     import app.routers.png_shader as ps
-    from app.pipeline.preferences import save_profile, default_profile
+    from p2s_agent.orchestration.preferences import save_profile, default_profile
 
     # Seed an enabled profile that prefers "conservative".
     prof = default_profile()
@@ -3588,7 +3588,7 @@ def test_get_variant_group_preference_ranking_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
 
-    from app.pipeline.preferences import save_profile, default_profile
+    from p2s_agent.orchestration.preferences import save_profile, default_profile
 
     # Seed a disabled profile.
     prof = default_profile()
@@ -3683,7 +3683,7 @@ def _fusion_body(base_run_id="run_base", source_run_id="run_src",
 def test_create_fusion_draft_200(tmp_path, monkeypatch):
     """POST /fusions → 200 {fusion_id, status:"draft"}; plan persisted with
     base/source/regions."""
-    from app.pipeline.fusion_plans import load_plan
+    from p2s_agent.orchestration.fusion_plans import load_plan
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base")
     _seed_fusion_run(tmp_path, "run_src")
@@ -3865,7 +3865,7 @@ def test_fusion_run_creates_child(tmp_path, monkeypatch):
     assert final["status"] == "completed"
 
     # Run-index record carries fusion lineage fields.
-    from app.pipeline.run_index import load_run_index
+    from p2s_agent.orchestration.run_index import load_run_index
     records = load_run_index(path=idx)
     assert output_run_id in records
     rec = records[output_run_id]
@@ -4026,7 +4026,7 @@ def test_status_concurrent_mutation_does_not_500(tmp_path):
 def test_fusion_run_completion_marks_plan_completed(tmp_path, monkeypatch):
     """After the fusion output run completes, the fusion plan record status must
     leave 'running' and become 'completed' (so the frontend poll terminates)."""
-    from app.pipeline.fusion_plans import load_plan
+    from p2s_agent.orchestration.fusion_plans import load_plan
 
     _run_store.clear()
     _seed_fusion_run(tmp_path, "run_base")

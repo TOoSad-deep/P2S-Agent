@@ -9,29 +9,29 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 
-from app.pipeline.checkpoints import (
+from p2s_agent.orchestration.checkpoints import (
     CheckpointError,
     checkpoint_metadata,
     list_checkpoints,
     resolve_checkpoint,
 )
-from app.pipeline.preferences import build_preference_notes, load_profile
-from app.pipeline.human_feedback import (
+from p2s_agent.orchestration.preferences import build_preference_notes, load_profile
+from p2s_agent.orchestration.human_feedback import (
     MODES,
     FeedbackValidationError,
     build_human_feedback_notes,
     validate_feedback,
 )
-from app.pipeline.human_constraints import (
+from p2s_agent.orchestration.human_constraints import (
     HumanConstraintSpec,
     build_constraint_notes,
     parse_constraint_spec,
     spec_to_dict,
     validate_constraint_spec,
 )
-from app.pipeline.input_spec import build_input_spec, validate_input_spec
-from app.pipeline.run_index import RunLineageRecord
-from app.services.logging_config import log_event
+from p2s_agent.core.pipeline.input_spec import build_input_spec, validate_input_spec
+from p2s_agent.orchestration.run_index import RunLineageRecord
+from p2s_agent.core.logging_config import log_event
 from app.api.routers._shared import _coerce_int, _enforce_text_cap, _MAX_FEEDBACK_CHARS
 
 from p2s_agent import store
