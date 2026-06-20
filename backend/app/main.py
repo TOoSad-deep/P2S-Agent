@@ -17,7 +17,7 @@ from p2s_agent.core.errors import AgentConflictError, AgentInputError, AgentNotF
 
 from app.routers import models, png_shader, strategy_config
 from app.services.langsmith_tracing import configure_langsmith
-from app.services.logging_config import log_event, logging_context, setup_logging
+from p2s_agent.core.logging_config import log_event, logging_context, setup_logging
 
 logger = logging.getLogger(__name__)
 

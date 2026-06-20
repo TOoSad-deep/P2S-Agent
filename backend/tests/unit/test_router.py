@@ -1977,7 +1977,7 @@ def test_winner_save_group_failure_returns_500(tmp_path, monkeypatch):
 
     # Patch save_group to simulate an I/O failure.
     monkeypatch.setattr(
-        "app.routers.png_shader.save_group",
+        "app.api.routers.variant.save_group",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
 
@@ -4070,7 +4070,7 @@ def test_fusion_run_completion_marks_plan_completed(tmp_path, monkeypatch):
 def test_get_fusion_rejects_unsafe_fusion_id(tmp_path, monkeypatch, bad_id):
     """A fusion_id with path-traversal / non-allowlisted chars is rejected 4xx
     and never touches the filesystem outside the fusions root."""
-    import app.routers.png_shader as mod
+    import app.api.routers.fusion as mod
 
     fusions_root = tmp_path / "fusions_root"
     monkeypatch.setattr("p2s_agent.orchestration.sessions._FUSIONS_ROOT", str(fusions_root))
