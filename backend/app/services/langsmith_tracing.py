@@ -11,7 +11,7 @@ import os
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from app.config import settings
+from p2s_agent.config import settings
 
 
 def _truthy(value: Any) -> bool:

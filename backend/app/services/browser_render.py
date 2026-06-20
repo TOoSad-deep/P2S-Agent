@@ -11,7 +11,7 @@ import tempfile
 from playwright.async_api import async_playwright
 from playwright.sync_api import sync_playwright
 
-from app.config import settings
+from p2s_agent.config import settings
 
 
 def _new_screenshot_path(prefix: str) -> str:

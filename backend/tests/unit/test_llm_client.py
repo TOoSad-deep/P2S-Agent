@@ -6,7 +6,7 @@ httpx.Client) per ModelConfig identity so repeated calls reuse one keep-alive
 client; different configs get different clients; the cache is bounded.
 """
 import app.llm.client as client_mod
-from app.config import ModelConfig
+from p2s_agent.config import ModelConfig
 from app.llm.client import BaseAgent, get_agent
 
 

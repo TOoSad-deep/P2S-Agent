@@ -13,7 +13,7 @@ from openai import OpenAI, BadRequestError
 from google import genai
 from google.genai import types
 
-from app.config import ModelConfig
+from p2s_agent.config import ModelConfig
 from app.services.langsmith_tracing import wrap_openai_client
 from app.services.logging_config import log_event
 

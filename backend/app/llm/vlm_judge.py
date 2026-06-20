@@ -20,7 +20,7 @@ from typing import Callable, Optional, Union
 
 from PIL import Image, ImageDraw
 
-from app.config import settings
+from p2s_agent.config import settings
 
 logger = logging.getLogger(__name__)
 

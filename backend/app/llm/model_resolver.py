@@ -19,7 +19,7 @@ import socket
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from app.config import ModelConfig, settings
+from p2s_agent.config import ModelConfig, settings
 
 
 class ModelResolutionError(ValueError):

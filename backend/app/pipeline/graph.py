@@ -422,7 +422,7 @@ def _run_post_pipeline(
     optimizer_iterations = state.get("optimizer_iterations", 0)
     protected_aspects = state.get("protected_aspects", ["layer_count", "primitive_types", "background"])
 
-    from app.config import settings as _veto_settings
+    from p2s_agent.config import settings as _veto_settings
     _region_veto_fn = _build_region_veto_fn(
         selected,
         state.get("protect_regions"),

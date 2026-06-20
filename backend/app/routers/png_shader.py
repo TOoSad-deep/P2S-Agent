@@ -27,7 +27,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from app.config import ModelConfig, use_active_model
+from p2s_agent.config import ModelConfig, use_active_model
 from app.llm.model_resolver import ModelResolutionError, resolve_model_config
 
 from app.pipeline.checkpoints import (

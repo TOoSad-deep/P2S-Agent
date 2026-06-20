@@ -4,7 +4,7 @@ import json
 from PIL import Image
 
 import app.llm.vlm_judge as vj
-from app.config import ModelConfig, use_active_model
+from p2s_agent.config import ModelConfig, use_active_model
 from app.llm.vlm_judge import judge_pairwise, judge_rubric
 
 

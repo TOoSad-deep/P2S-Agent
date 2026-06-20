@@ -1,6 +1,6 @@
 """/status must never serialize api keys / ModelConfig. Anchors the store split (later task)."""
 import json
-from app.config import ModelConfig
+from p2s_agent.config import ModelConfig
 from app.routers import png_shader as ps
 
 

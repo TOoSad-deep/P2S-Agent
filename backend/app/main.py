@@ -11,7 +11,8 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
+from p2s_agent.config import settings as agent_settings
+
 from app.routers import models, png_shader, strategy_config
 from app.services.langsmith_tracing import configure_langsmith
 from app.services.logging_config import log_event, logging_context, setup_logging
@@ -26,7 +27,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url],
+    allow_origins=[agent_settings.frontend_url],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

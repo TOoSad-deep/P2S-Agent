@@ -21,7 +21,7 @@ from typing import Any, Literal, Optional, Union
 
 logger = logging.getLogger(__name__)
 
-from app.config import settings
+from p2s_agent.config import settings
 from app.dsl.schema import DSL_SCHEMA_VERSION
 from app.pipeline.preprocess import feature_num
 from app.services.logging_config import log_event
