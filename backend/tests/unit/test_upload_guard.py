@@ -17,7 +17,8 @@ fastapi = pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
 from app.routers import png_shader
-from app.routers.png_shader import _MAX_UPLOAD_BYTES, _run_store, router
+from app.routers.png_shader import _run_store, router
+from app.api.guards import _MAX_UPLOAD_BYTES
 
 FastAPI = fastapi.FastAPI
 TestClient = testclient.TestClient

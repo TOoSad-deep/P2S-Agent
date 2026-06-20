@@ -112,6 +112,13 @@ from app.pipeline.run_index import (
 )
 from app.services.langsmith_tracing import trace_context
 from app.services.logging_config import attach_run_log, log_event, logging_context
+from app.api.guards import (  # re-export: moved to web-layer guards module
+    _check_content_length,
+    _env_int,
+    _guard_upload,
+    _ALLOWED_IMAGE_CONTENT_TYPES,
+    _MAX_UPLOAD_BYTES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,27 +174,8 @@ _REGION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 # ---------------------------------------------------------------------------
 # Security / input-validation guards (configurable via env).
 # ---------------------------------------------------------------------------
-
-def _env_int(name: str, default: int) -> int:
-    """Read a positive int from the environment, falling back to *default*."""
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
-
-
-# Item 1 — cap the multipart upload body so an unauthenticated client cannot
-# OOM the worker by streaming an enormous image. Default ~25 MB.
-_MAX_UPLOAD_BYTES = _env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024)
-
-# Item 1 — content-type allowlist for the uploaded image.
-_ALLOWED_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset({
-    "image/png", "image/jpeg", "image/jpg", "image/webp",
-})
+# _env_int, _MAX_UPLOAD_BYTES, _ALLOWED_IMAGE_CONTENT_TYPES, _guard_upload,
+# and _check_content_length are imported from app.api.guards (see top of file).
 
 # Item 3 — length caps (chars) for free-text / code inputs. Over-cap → 422.
 _MAX_SEED_GLSL_CHARS = _env_int("MAX_SEED_GLSL_CHARS", 256 * 1024)
@@ -232,61 +220,6 @@ def _enforce_text_cap(value: Optional[str], cap: int, *, field: str) -> None:
         raise HTTPException(
             status_code=422,
             detail=f"{field} exceeds maximum length of {cap} characters",
-        )
-
-
-def _guard_upload(request: Request, image: UploadFile, contents: bytes) -> None:
-    """Validate an uploaded image: content-type allowlist + real-image bytes.
-
-    Content-Length is checked separately (up front) before the body is read.
-    Here we verify the declared content-type is an allowed image type (415)
-    and that the bytes actually decode as an image (422).
-    """
-    content_type = (image.content_type or "").split(";", 1)[0].strip().lower()
-    if content_type not in _ALLOWED_IMAGE_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail=f"unsupported image content-type: {image.content_type!r}",
-        )
-    # Enforce the size cap on the actual bytes too (Content-Length can lie or
-    # be absent under chunked transfer-encoding).
-    if len(contents) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"upload exceeds maximum size of {_MAX_UPLOAD_BYTES} bytes",
-        )
-    # Verify the bytes are a real image (defends against content-type spoofing).
-    try:
-        from PIL import Image as _PILImage
-
-        with _PILImage.open(io.BytesIO(contents)) as img:
-            img.verify()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            status_code=422,
-            detail="uploaded file is not a valid image",
-        ) from exc
-
-
-def _check_content_length(request: Request) -> None:
-    """Reject (413) up front when the declared Content-Length exceeds the cap.
-
-    Used as a FastAPI route dependency so it runs BEFORE the multipart body is
-    parsed/validated — i.e. before the worker buffers the body in memory.
-    """
-    raw = request.headers.get("content-length")
-    if not raw:
-        return
-    try:
-        declared = int(raw)
-    except (TypeError, ValueError):
-        return
-    if declared > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"upload exceeds maximum size of {_MAX_UPLOAD_BYTES} bytes",
         )
 
 
