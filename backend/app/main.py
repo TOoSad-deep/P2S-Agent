@@ -10,8 +10,10 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from p2s_agent.config import settings as agent_settings
+from p2s_agent.core.errors import AgentConflictError, AgentInputError, AgentNotFoundError
 
 from app.routers import models, png_shader, strategy_config
 from app.services.langsmith_tracing import configure_langsmith
@@ -32,6 +34,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Central translation of agent-domain errors to HTTP responses.
+# These handlers are DORMANT until later tasks switch call sites to raise
+# AgentInputError / AgentConflictError / AgentNotFoundError instead of
+# HTTPException directly.  Registering them now is additive and safe.
+def _agent_error_handler(status: int):
+    async def handler(_: Request, exc: AgentInputError) -> JSONResponse:
+        body: dict = {"detail": exc.message}
+        if getattr(exc, "field", None):
+            body["field"] = exc.field
+        return JSONResponse(status_code=status, content=body)
+
+    return handler
+
+
+app.add_exception_handler(AgentInputError, _agent_error_handler(422))
+app.add_exception_handler(AgentConflictError, _agent_error_handler(409))
+app.add_exception_handler(AgentNotFoundError, _agent_error_handler(404))
 
 app.include_router(png_shader.router)
 app.include_router(strategy_config.router)
