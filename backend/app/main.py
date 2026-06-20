@@ -36,23 +36,33 @@ app.add_middleware(
 )
 
 
-# Central translation of agent-domain errors to HTTP responses.
-# These handlers are DORMANT until later tasks switch call sites to raise
-# AgentInputError / AgentConflictError / AgentNotFoundError instead of
-# HTTPException directly.  Registering them now is additive and safe.
+# Central translation of agent-domain errors to HTTP responses. The agent
+# package (p2s_agent/**) raises these instead of HTTPException; this is the ONE
+# place they become HTTP responses, keeping the agent layer framework-free.
 def _agent_error_handler(status: int):
     async def handler(_: Request, exc: AgentInputError) -> JSONResponse:
-        body: dict = {"detail": exc.message}
-        if getattr(exc, "field", None):
-            body["field"] = exc.field
-        return JSONResponse(status_code=status, content=body)
+        # Body is EXACTLY {"detail": <message>} to stay byte-identical with the
+        # pre-refactor HTTPException(status_code=..., detail=<message>) responses
+        # these agent errors replaced. ``exc.field`` is retained on the exception
+        # for internal use but is deliberately NOT serialized into the body.
+        return JSONResponse(status_code=status, content={"detail": exc.message})
 
     return handler
 
 
-app.add_exception_handler(AgentInputError, _agent_error_handler(422))
-app.add_exception_handler(AgentConflictError, _agent_error_handler(409))
-app.add_exception_handler(AgentNotFoundError, _agent_error_handler(404))
+def register_agent_error_handlers(target_app: FastAPI) -> None:
+    """Register the agent-domain → HTTP exception handlers on *target_app*.
+
+    Single source of truth for the AgentInputError→422 / AgentConflictError→409 /
+    AgentNotFoundError→404 mapping, so tests building a bare app (and the real
+    app) translate these identically.
+    """
+    target_app.add_exception_handler(AgentInputError, _agent_error_handler(422))
+    target_app.add_exception_handler(AgentConflictError, _agent_error_handler(409))
+    target_app.add_exception_handler(AgentNotFoundError, _agent_error_handler(404))
+
+
+register_agent_error_handlers(app)
 
 app.include_router(png_shader.router)
 app.include_router(strategy_config.router)

@@ -12,6 +12,7 @@ from PIL import Image
 fastapi = pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
+from app.main import register_agent_error_handlers
 from app.routers.png_shader import router
 from p2s_agent.store import _run_store
 
@@ -32,15 +33,15 @@ def _isolate_run_index(tmp_path, monkeypatch):
         str(tmp_path / "run_index.jsonl"),
     )
     monkeypatch.setattr(
-        "app.routers.png_shader._VARIANT_GROUPS_ROOT",
+        "p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT",
         str(tmp_path / "vg"),
     )
     monkeypatch.setattr(
-        "app.routers.png_shader._DRAW_SESSIONS_ROOT",
+        "p2s_agent.orchestration.sessions._DRAW_SESSIONS_ROOT",
         str(tmp_path / "ds"),
     )
     monkeypatch.setattr(
-        "app.routers.png_shader._PREFERENCES_ROOT",
+        "p2s_agent.orchestration.sessions._PREFERENCES_ROOT",
         str(tmp_path / "prefs"),
     )
     monkeypatch.setattr(
@@ -54,6 +55,7 @@ TestClient = testclient.TestClient
 
 def _client() -> TestClient:
     app = FastAPI()
+    register_agent_error_handlers(app)
     app.include_router(router)
     return TestClient(app)
 
@@ -1182,7 +1184,7 @@ def test_explore_variants_creates_4_children(tmp_path, monkeypatch):
     The group record is persisted with all 4 child_run_ids."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH",
                         str(tmp_path / "ri.jsonl"))
 
@@ -1240,7 +1242,7 @@ def test_explore_variants_run_index_has_variant_fields(tmp_path, monkeypatch):
     idx = str(tmp_path / "ri_v.jsonl")
     vg_root = str(tmp_path / "vg")
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     _seed_parent(tmp_path)
     monkeypatch.setattr(
@@ -1364,7 +1366,7 @@ def test_explore_variants_concurrency_all_complete(tmp_path, monkeypatch):
     """All 4 children complete even though semaphore allows only 2 concurrent workers."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH",
                         str(tmp_path / "ri_conc.jsonl"))
 
@@ -1494,7 +1496,7 @@ def test_variant_concurrency_peak_le_2(tmp_path, monkeypatch):
 
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH",
                         str(tmp_path / "ri_peak.jsonl"))
 
@@ -1589,7 +1591,7 @@ def test_get_variant_group_aggregates_and_sorts(tmp_path, monkeypatch):
     """GET /variant-groups/{id} returns correct aggregate status and sorted variants."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     children = [
         {
@@ -1668,7 +1670,7 @@ def test_get_variant_group_404_unknown(tmp_path, monkeypatch):
     """GET /variant-groups/{id} returns 404 for unknown group_id."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     client = _client()
     resp = client.get("/png-shader/variant-groups/ghost_group")
     assert resp.status_code == 404
@@ -1679,7 +1681,7 @@ def test_stop_variant_group_sets_stop_requested(tmp_path, monkeypatch):
     but not on completed ones."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     children = [
         {"run_id": "s_queued", "status": "queued", "stop_requested": False,
@@ -1709,7 +1711,7 @@ def test_stop_variant_group_404_unknown(tmp_path, monkeypatch):
     """POST /variant-groups/{id}/stop returns 404 for unknown group."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     client = _client()
     resp = client.post("/png-shader/variant-groups/ghost_grp/stop")
     assert resp.status_code == 404
@@ -1721,7 +1723,7 @@ def test_winner_marks_group_and_favorite(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     children = [
@@ -1759,7 +1761,7 @@ def test_winner_422_non_member_run_id(tmp_path, monkeypatch):
     """POST /winner with a run_id not in child_run_ids returns 422."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     children = [{"run_id": "w_only", "status": "completed", "variant_index": 0, "variant_label": "A"}]
     _seed_group(vg_root, group_id="group_422w", children=children)
@@ -1776,7 +1778,7 @@ def test_winner_404_unknown_group(tmp_path, monkeypatch):
     """POST /winner for unknown group returns 404."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     client = _client()
     resp = client.post("/png-shader/variant-groups/ghost/winner", json={"winner_run_id": "x"})
     assert resp.status_code == 404
@@ -1786,7 +1788,7 @@ def test_ratings_appends_event(tmp_path, monkeypatch):
     """POST /ratings appends a rating event that is readable via load_group_events."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     children = [
         {"run_id": "r_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
@@ -1820,7 +1822,7 @@ def test_ratings_422_non_member_run_id(tmp_path, monkeypatch):
     """POST /ratings with a run_id not in child_run_ids returns 422."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     children = [{"run_id": "r_only", "status": "completed", "variant_index": 0, "variant_label": "A"}]
     _seed_group(vg_root, group_id="group_422r", children=children)
@@ -1837,7 +1839,7 @@ def test_ratings_422_invalid_rating(tmp_path, monkeypatch):
     """POST /ratings with rating outside {-1, 0, 1} returns 422."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     children = [{"run_id": "r_val", "status": "completed", "variant_index": 0, "variant_label": "A"}]
     _seed_group(vg_root, group_id="group_422rv", children=children)
@@ -1862,7 +1864,7 @@ def test_get_variant_group_winner_sorted_first(tmp_path, monkeypatch):
     """When winner_run_id is set, that variant appears first in sorted output."""
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
 
     # Build group with 3 completed children; set winner to the one with lowest score.
     from app.pipeline.variant_groups import VariantGroupRecord, save_group as _save_group
@@ -1905,7 +1907,7 @@ def test_winner_persists_run_index_favorite_and_appends_event(tmp_path, monkeypa
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     # Seed children and group.
@@ -1965,7 +1967,7 @@ def test_winner_save_group_failure_returns_500(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     children = [
@@ -1994,7 +1996,7 @@ def test_get_variant_group_evicted_child_fallback(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     # Seed a group with one child, but do NOT put that child in _run_store.
@@ -3166,7 +3168,7 @@ def test_preference_profile_get_default(tmp_path):
 def test_preference_profile_patch_editable_fields(tmp_path, monkeypatch):
     """PATCH editable fields persists; subsequent GET reflects the change."""
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
     client = _client()
 
     patch_body = {"enabled": False, "positive_preferences": ["x"]}
@@ -3194,7 +3196,7 @@ def test_preference_profile_patch_disallowed_key_422(tmp_path):
 def test_preference_events_post_and_readable(tmp_path, monkeypatch):
     """POST /preferences/events stores an event; load_preference_events shows it."""
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
     client = _client()
 
     resp = client.post(
@@ -3219,7 +3221,7 @@ def test_preference_events_post_and_readable(tmp_path, monkeypatch):
 def test_preference_rebuild_reflects_winner_event(tmp_path, monkeypatch):
     """POST rebuild after a winner_selected event updates positive_preferences."""
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
     client = _client()
 
     # Post a winner_selected event with reason and tags.
@@ -3249,7 +3251,7 @@ def test_preference_rebuild_reflects_winner_event(tmp_path, monkeypatch):
 def test_preference_clear_resets_events_and_profile(tmp_path, monkeypatch):
     """POST /preferences/clear empties events and resets profile to defaults."""
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
     client = _client()
 
     # Add some data first.
@@ -3282,8 +3284,8 @@ def test_variant_winner_mirrors_preference_event(tmp_path, monkeypatch):
     vg_root = str(tmp_path / "vg")
     prefs_root = str(tmp_path / "prefs")
     idx = str(tmp_path / "ri.jsonl")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
     monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
 
     children = [
@@ -3314,8 +3316,8 @@ def test_rate_variant_mirrors_preference_event(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
 
     children = [
         {"run_id": "pr_a", "status": "completed", "variant_index": 0, "variant_label": "A"},
@@ -3347,11 +3349,11 @@ def test_rate_variant_mirrors_preference_event(tmp_path, monkeypatch):
 
 def _seed_nonempty_profile(positive_prefs: list[str] | None = None) -> None:
     """Write an enabled profile with at least one positive preference into the
-    router's current _PREFERENCES_ROOT (already monkeypatched by autouse fixture)."""
-    from app.routers import png_shader as ps
+    current _PREFERENCES_ROOT (already monkeypatched by autouse fixture)."""
+    from p2s_agent.orchestration import sessions
     from app.pipeline import preferences as prefs
 
-    root = ps._PREFERENCES_ROOT
+    root = sessions._PREFERENCES_ROOT
     prof = prefs.default_profile()
     prof["positive_preferences"] = positive_prefs or ["clearer reflections without darkening"]
     prefs.save_profile(prof, root=root)
@@ -3520,8 +3522,8 @@ def test_get_variant_group_preference_ranking_enabled(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
 
     import app.routers.png_shader as ps
     from app.pipeline.preferences import save_profile, default_profile
@@ -3583,8 +3585,8 @@ def test_get_variant_group_preference_ranking_disabled(tmp_path, monkeypatch):
     _run_store.clear()
     vg_root = str(tmp_path / "vg")
     prefs_root = str(tmp_path / "prefs")
-    monkeypatch.setattr("app.routers.png_shader._VARIANT_GROUPS_ROOT", vg_root)
-    monkeypatch.setattr("app.routers.png_shader._PREFERENCES_ROOT", prefs_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._VARIANT_GROUPS_ROOT", vg_root)
+    monkeypatch.setattr("p2s_agent.orchestration.sessions._PREFERENCES_ROOT", prefs_root)
 
     from app.pipeline.preferences import save_profile, default_profile
 

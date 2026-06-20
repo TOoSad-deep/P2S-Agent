@@ -18,6 +18,7 @@ testclient = pytest.importorskip("fastapi.testclient")
 
 from app.routers.png_shader import router
 from app.api.guards import _MAX_UPLOAD_BYTES
+from app.main import register_agent_error_handlers
 from p2s_agent.store import _run_store
 
 FastAPI = fastapi.FastAPI
@@ -34,6 +35,7 @@ def _isolate_run_index(tmp_path, monkeypatch):
 
 def _client() -> TestClient:
     app = FastAPI()
+    register_agent_error_handlers(app)
     app.include_router(router)
     return TestClient(app)
 

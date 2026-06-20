@@ -140,9 +140,11 @@ from p2s_agent.orchestration import sessions
 # lives with the worker layer in p2s_agent.workers.
 _MAX_VARIANT_COUNT = 6
 
-_VARIANT_GROUPS_ROOT: Optional[str] = None  # tests override to isolate
-_DRAW_SESSIONS_ROOT: Optional[str] = None  # tests override to isolate
-_PREFERENCES_ROOT: Optional[str] = None  # tests override to isolate
+# The variant-groups / draw-sessions / preferences / fusions persistence roots
+# live in p2s_agent.orchestration.sessions (single source of truth). The route
+# handlers reference them by ATTRIBUTE (``sessions._VARIANT_GROUPS_ROOT`` …) so a
+# test that overrides one is seen by both these endpoints and the session helpers
+# in p2s_agent.orchestration.sessions.
 
 # Draw-session (V3.5 batch draw) card-event vocabulary.
 _DRAW_CARD_EVENT_TYPES: frozenset[str] = frozenset({
@@ -503,7 +505,7 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
 
     # V4.4: inject user preference notes (gated by use_preferences flag).
     _use_preferences: bool = _constraint_spec.use_preferences if _constraint_spec is not None else True
-    _pref_profile = load_profile(root=_PREFERENCES_ROOT)
+    _pref_profile = load_profile(root=sessions._PREFERENCES_ROOT)
     _pref_notes = build_preference_notes(_pref_profile)
 
     parent_lineage = parent.get("lineage") or {}
@@ -660,216 +662,6 @@ async def branch_refine(run_id: str, payload: dict) -> dict:
     return initial_result
 
 
-def _create_variant_group(
-    *,
-    parent_run_id: str,
-    root_run_id: str,
-    checkpoint,
-    checkpoint_id: str,
-    reference_path: Path,
-    feedback: str,
-    mode: str,
-    diversity: str,
-    strategies: list[dict],
-    quality_overrides: dict,
-    draw_session_id: "str | None" = None,
-    constraint_spec: "HumanConstraintSpec | None" = None,
-    use_preferences: bool = True,
-) -> tuple[str, list[str]]:
-    """Create one variant group: spawn N child runs (one per strategy), persist
-    the VariantGroupRecord, append the 'created' event. Returns (group_id, child_run_ids).
-
-    Behavior-identical to the inline loop previously in explore_variants. When
-    draw_session_id is set it is recorded on the group record and on each child's
-    run-index lineage (additive; None preserves prior explore-variants behavior).
-    """
-    group_id = "group_" + uuid4().hex[:8]
-    child_run_ids: list[str] = []
-
-    # V4.4: load preference profile once for the whole group (all children share it).
-    _vg_pref_profile = load_profile(root=_PREFERENCES_ROOT)
-    _vg_pref_notes = build_preference_notes(_vg_pref_profile)
-
-    for idx, strategy in enumerate(strategies):
-        child_run_id = "run_" + uuid4().hex[:8]
-
-        variant_lineage = {
-            "parent_run_id": parent_run_id,
-            "root_run_id": root_run_id,
-            "source_checkpoint_id": checkpoint_id,
-            "source_checkpoint_label": checkpoint.label,
-            "mode": mode,
-            "feedback": feedback,
-            "variant_group_id": group_id,
-            "variant_index": idx,
-            "variant_label": strategy["label"],
-            "variant_strategy": strategy,
-        }
-
-        notes = build_human_feedback_notes(
-            feedback=feedback,
-            mode=mode,
-            locks=strategy.get("locks") or {},
-            checkpoint=checkpoint,
-        ) + list(strategy.get("notes") or [])
-        # V4.1: append constraint notes when constraints were supplied.
-        if constraint_spec is not None:
-            notes += build_constraint_notes(constraint_spec)
-
-        quality = dict(quality_overrides)
-        quality["refinement_mode"] = "on"
-        quality["max_refinement_iterations"] = max(
-            _coerce_int(
-                quality.get("max_refinement_iterations"),
-                "max_refinement_iterations", 0, 0, 20,
-            ),
-            1,
-        )
-        quality["vlm_judge_enabled"] = 1
-
-        directed_acceptance = {
-            "enabled": True,
-            "feedback": feedback,
-            "mode": mode,
-            "score_drop_tolerance": strategy["score_drop_tolerance"],
-            "require_vlm_for_score_drop": True,
-        }
-
-        child_input_spec = build_input_spec(str(reference_path), quality=quality)
-        errors = validate_input_spec(child_input_spec)
-        if errors:
-            raise HTTPException(status_code=422, detail={"input_spec_errors": errors})
-
-        branch_request = {
-            "checkpoint_id": checkpoint_id,
-            "feedback": feedback,
-            "mode": mode,
-            "variant_index": idx,
-            "variant_label": strategy["label"],
-            "group_id": group_id,
-        }
-        extra_artifacts = {
-            "branch_request.json": branch_request,
-            "lineage.json": variant_lineage,
-            "source_checkpoint.json": checkpoint_metadata(checkpoint),
-            "source_checkpoint.glsl": checkpoint.glsl,
-            "human_feedback.txt": feedback,
-            "directed_acceptance.json": directed_acceptance,
-            "variant_strategy.json": strategy,
-        }
-        # V4.1: add constraints artifacts when present.
-        if constraint_spec is not None:
-            _cspec_dict = spec_to_dict(constraint_spec)
-            extra_artifacts["constraints.json"] = _cspec_dict
-            directed_acceptance["constraints"] = _cspec_dict
-
-        # V4.4: inject preference notes + snapshot when enabled and profile is non-empty.
-        if use_preferences and _vg_pref_notes:
-            notes += _vg_pref_notes
-            extra_artifacts["preference_profile_snapshot.json"] = _vg_pref_profile
-            directed_acceptance["preference_score_drop_tolerance_hint"] = _vg_pref_profile.get(
-                "score_drop_tolerance_hint"
-            )
-
-        initial_result = {
-            "run_id": child_run_id,
-            "status": "queued",
-            "current_phase": "queued",
-            "parent_run_id": parent_run_id,
-            "source_checkpoint_id": checkpoint_id,
-            "lineage": variant_lineage,
-            "variant_group_id": group_id,
-            "variant_index": idx,
-            "variant_label": strategy["label"],
-            "submitted_at": time(),
-            "strategy": dict(child_input_spec.get("quality") or quality),
-            "stop_requested": False,
-            "strategy_revision": 1,
-        }
-        store._store_run(child_run_id, initial_result)
-        store._index_created(RunLineageRecord(
-            run_id=child_run_id,
-            root_run_id=root_run_id,
-            parent_run_id=parent_run_id,
-            source_checkpoint_id=checkpoint_id,
-            source_checkpoint_label=checkpoint.label,
-            mode=mode,
-            feedback=feedback,
-            title=None,
-            status="queued",
-            run_dir=None,
-            created_at=time(),
-            variant_group_id=group_id,
-            variant_index=idx,
-            variant_label=strategy["label"],
-            draw_session_id=draw_session_id,
-        ))
-        _start_pipeline_worker(
-            run_id=child_run_id,
-            image_path=reference_path,
-            upload_dir=None,
-            pipeline_input_spec=child_input_spec,
-            seed_glsl=checkpoint.glsl,
-            model_config=store._get_run_model(parent_run_id),
-            trace_input={
-                "run_id": child_run_id,
-                "parent_run_id": parent_run_id,
-                "checkpoint_id": checkpoint_id,
-                "variant_group_id": group_id,
-                "variant_index": idx,
-            },
-            trace_metadata={
-                "run_id": child_run_id,
-                "pipeline": "png-shader-variant",
-                "parent_run_id": parent_run_id,
-                "variant_group_id": group_id,
-                "variant_index": idx,
-            },
-            pipeline_extra={
-                "human_feedback_notes": notes,
-                "directed_acceptance": directed_acceptance,
-                "force_first_refinement_iteration": True,
-                "lineage": variant_lineage,
-                "extra_artifacts": extra_artifacts,
-                # V4.5 region veto: forward protect-mode regions (empty when no
-                # constraints → pipeline no-op, backward compatible).
-                "protect_regions": (
-                    [r for r in constraint_spec.regions if r.mode == "protect"]
-                    if constraint_spec is not None else []
-                ),
-            },
-            variant_semaphore=_variant_worker_semaphore,
-        )
-        child_run_ids.append(child_run_id)
-
-    # Persist the group record best-effort (I/O errors must not fail the request).
-    record = VariantGroupRecord(
-        group_id=group_id,
-        root_run_id=root_run_id,
-        parent_run_id=parent_run_id,
-        source_checkpoint_id=checkpoint_id,
-        feedback=feedback,
-        mode=mode,
-        variant_count=len(strategies),
-        diversity=diversity,
-        status="running",
-        child_run_ids=child_run_ids,
-        created_at=time(),
-        draw_session_id=draw_session_id,
-    )
-    try:
-        save_group(record, root=_VARIANT_GROUPS_ROOT)
-        append_group_event(
-            group_id,
-            {"event": "created", "child_run_ids": child_run_ids, "at": time()},
-            root=_VARIANT_GROUPS_ROOT,
-        )
-    except Exception:
-        logger.warning("variant group persist failed for group_id=%s", group_id, exc_info=True)
-
-    return group_id, child_run_ids
-
-
 @router.post("/runs/{run_id}/explore-variants")
 async def explore_variants(run_id: str, payload: dict) -> dict:
     """Fan one checkpoint into N variant child runs, each guided by a different strategy.
@@ -948,7 +740,7 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
     )
 
     _ev_use_preferences: bool = _ev_constraint_spec.use_preferences if _ev_constraint_spec is not None else True
-    group_id, child_run_ids = _create_variant_group(
+    group_id, child_run_ids = sessions._create_variant_group(
         parent_run_id=run_id,
         root_run_id=root_run_id,
         checkpoint=checkpoint,
@@ -987,117 +779,8 @@ async def explore_variants(run_id: str, payload: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# V3.5 draw-session (gacha-style batch draw) helpers + endpoints
+# V3.5 draw-session (gacha-style batch draw) endpoints
 # ---------------------------------------------------------------------------
-
-
-def _resolve_draw_checkpoint(parent: dict, checkpoint_id: str):
-    """Resolve a draw-session checkpoint + reference image from a parent run.
-
-    Mirrors explore_variants' pre-checks. Returns ``(checkpoint, reference_path)``.
-
-    Raises:
-        HTTPException(409): no branchable checkpoint / no run_dir / no reference.
-        HTTPException(422): checkpoint_id cannot be resolved.
-    """
-    if not list_checkpoints(parent):
-        raise HTTPException(status_code=409, detail="no branchable checkpoint yet")
-    try:
-        checkpoint = resolve_checkpoint(parent, checkpoint_id)
-    except CheckpointError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    parent_run_dir = parent.get("run_dir")
-    if not parent_run_dir:
-        raise HTTPException(status_code=409, detail="parent run_dir is not available yet")
-    reference_path = Path(parent_run_dir) / "reference_input.png"
-    if not reference_path.exists():
-        raise HTTPException(status_code=409, detail="parent reference image is not available")
-    return checkpoint, reference_path
-
-
-def _prevalidate_draw_quality(reference_path: Path, quality: dict) -> None:
-    """Validate ONCE up-front, before any child run is created, to avoid leaving
-    orphaned/partial groups behind when an input-spec error would otherwise fire
-    mid-loop inside ``_create_variant_group``.
-
-    Builds the same probe quality dict the helper applies per child.
-
-    Raises:
-        HTTPException(422): when the probe input-spec has validation errors.
-    """
-    probe = {
-        **quality,
-        "refinement_mode": "on",
-        "max_refinement_iterations": max(
-            _coerce_int(
-                quality.get("max_refinement_iterations"),
-                "max_refinement_iterations", 0, 0, 20,
-            ),
-            1,
-        ),
-        "vlm_judge_enabled": 1,
-    }
-    probe_spec = build_input_spec(str(reference_path), quality=probe)
-    errors = validate_input_spec(probe_spec)
-    if errors:
-        raise HTTPException(status_code=422, detail={"input_spec_errors": errors})
-
-
-def _create_draw_groups(
-    *,
-    parent_run_id: str,
-    root_run_id: str,
-    checkpoint,
-    checkpoint_id: str,
-    reference_path: Path,
-    feedback: str,
-    mode: str,
-    diversity: str,
-    quality: dict,
-    request_locks: dict,
-    draw_id: str,
-    card_count: int,
-    on_group=None,
-    constraint_spec: "HumanConstraintSpec | None" = None,
-    use_preferences: bool = True,
-) -> tuple[list[str], list[str]]:
-    """Plan *card_count* into batches and create one variant group per batch.
-
-    Each strategy gets request_locks merged in. ``on_group(gid, cids)`` (if given)
-    is invoked after each successful group so callers can incrementally persist —
-    a mid-loop failure then still leaves a consistent record of what succeeded.
-
-    Returns ``(group_ids, card_run_ids)`` across all batches.
-    """
-    group_ids: list[str] = []
-    card_run_ids: list[str] = []
-    for batch in plan_draw_batches(card_count):
-        strategies = build_variant_strategies(
-            feedback=feedback, count=batch, diversity=diversity, mode=mode,
-        )
-        for s in strategies:
-            s["locks"] = {**(s.get("locks") or {}), **request_locks}
-        gid, cids = _create_variant_group(
-            parent_run_id=parent_run_id,
-            root_run_id=root_run_id,
-            checkpoint=checkpoint,
-            checkpoint_id=checkpoint_id,
-            reference_path=reference_path,
-            feedback=feedback,
-            mode=mode,
-            diversity=diversity,
-            strategies=strategies,
-            quality_overrides=quality,
-            draw_session_id=draw_id,
-            constraint_spec=constraint_spec,
-            use_preferences=use_preferences,
-        )
-        group_ids.append(gid)
-        card_run_ids.extend(cids)
-        if on_group is not None:
-            on_group(gid, cids)
-    return group_ids, card_run_ids
 
 
 @router.post("/runs/{run_id}/draw-session")
@@ -1143,15 +826,15 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
         if _ds_constraint_errors:
             raise HTTPException(status_code=422, detail={"constraint_errors": _ds_constraint_errors})
 
-    checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
+    checkpoint, reference_path = sessions._resolve_draw_checkpoint(parent, checkpoint_id)
     # Pre-validate ONCE up-front so a bad spec can't leave partial groups behind.
-    _prevalidate_draw_quality(reference_path, quality)
+    sessions._prevalidate_draw_quality(reference_path, quality)
 
     draw_id = "draw_" + uuid4().hex[:8]
     root_run_id = (parent.get("lineage") or {}).get("root_run_id") or run_id
 
     _ds_use_preferences: bool = _ds_constraint_spec.use_preferences if _ds_constraint_spec is not None else True
-    group_ids, card_run_ids = _create_draw_groups(
+    group_ids, card_run_ids = sessions._create_draw_groups(
         parent_run_id=run_id,
         root_run_id=root_run_id,
         checkpoint=checkpoint,
@@ -1185,12 +868,12 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
         metadata={"locks": request_locks, "quality": quality, "mode": mode},
     )
     try:
-        save_session(record, root=_DRAW_SESSIONS_ROOT)
+        save_session(record, root=sessions._DRAW_SESSIONS_ROOT)
         append_session_event(
             draw_id,
             {"event": "draw_session_created", "card_run_ids": card_run_ids,
              "group_ids": group_ids, "at": time()},
-            root=_DRAW_SESSIONS_ROOT,
+            root=sessions._DRAW_SESSIONS_ROOT,
         )
     except Exception:
         logger.warning("draw session persist failed for draw_id=%s", draw_id, exc_info=True)
@@ -1216,48 +899,14 @@ async def create_draw_session(run_id: str, payload: dict) -> dict:
     }
 
 
-def _fold_draw_overlay(draw_id: str) -> dict[str, dict]:
-    """Fold a draw session's events into a per-run overlay map.
-
-    Tracks (later events override earlier):
-    - ``favorite`` (event "favorite" -> bool(value))
-    - ``eliminated`` (event "eliminate"/"draw_card_eliminated" -> bool(value, default True);
-      an "eliminate" with value False clears it)
-    - ``tags`` (event "tag" -> union of any ``tags`` list on the event)
-    """
-    overlay: dict[str, dict] = {}
-    for ev in load_session_events(draw_id, root=_DRAW_SESSIONS_ROOT):
-        run_id = ev.get("run_id")
-        if not run_id:
-            continue
-        cur = overlay.setdefault(run_id, {})
-        etype = ev.get("event")
-        if etype == "favorite":
-            cur["favorite"] = bool(ev.get("value"))
-        elif etype in ("eliminate", "draw_card_eliminated"):
-            value = ev.get("value", True)
-            cur["eliminated"] = bool(value)
-        elif etype == "tag":
-            tags = ev.get("tags") or []
-            if tags:
-                existing = cur.get("tags") or []
-                merged = list(existing)
-                # Tags are append-only in V3.5 (no untag event type); each tag event unions in new tags.
-                for t in tags:
-                    if t not in merged:
-                        merged.append(t)
-                cur["tags"] = merged
-    return overlay
-
-
 @router.get("/draw-sessions/{draw_id}")
 async def get_draw_session(draw_id: str) -> dict:
     """Return a draw session's aggregated status + per-card details."""
-    record = load_session(draw_id, root=_DRAW_SESSIONS_ROOT)
+    record = load_session(draw_id, root=sessions._DRAW_SESSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"draw_id '{draw_id}' not found")
 
-    overlay = _fold_draw_overlay(draw_id)
+    overlay = sessions._fold_draw_overlay(draw_id)
     index_records = load_run_index(path=store._RUN_INDEX_PATH)
 
     cards: list[dict] = []
@@ -1349,7 +998,7 @@ async def get_draw_session(draw_id: str) -> dict:
 
 
 def _load_draw_session_or_404(draw_id: str) -> DrawSessionRecord:
-    record = load_session(draw_id, root=_DRAW_SESSIONS_ROOT)
+    record = load_session(draw_id, root=sessions._DRAW_SESSIONS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"draw_id '{draw_id}' not found")
     return record
@@ -1399,8 +1048,8 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
         if _dm_constraint_errors:
             raise HTTPException(status_code=422, detail={"constraint_errors": _dm_constraint_errors})
 
-    checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
-    _prevalidate_draw_quality(reference_path, quality)
+    checkpoint, reference_path = sessions._resolve_draw_checkpoint(parent, checkpoint_id)
+    sessions._prevalidate_draw_quality(reference_path, quality)
 
     new_group_ids: list[str] = []
     new_card_ids: list[str] = []
@@ -1413,12 +1062,12 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
         record.group_ids.append(gid)
         record.card_run_ids.extend(cids)
         try:
-            save_session(record, root=_DRAW_SESSIONS_ROOT)
+            save_session(record, root=sessions._DRAW_SESSIONS_ROOT)
         except Exception:
             logger.warning("draw-more incremental save failed for draw_id=%s", draw_id, exc_info=True)
 
     _dm_use_preferences: bool = _dm_constraint_spec.use_preferences if _dm_constraint_spec is not None else True
-    _create_draw_groups(
+    sessions._create_draw_groups(
         parent_run_id=record.parent_run_id,
         root_run_id=record.root_run_id,
         checkpoint=checkpoint,
@@ -1439,12 +1088,12 @@ async def draw_more(draw_id: str, payload: dict) -> dict:
     record.status = "running"
     record.updated_at = time()
     try:
-        save_session(record, root=_DRAW_SESSIONS_ROOT)
+        save_session(record, root=sessions._DRAW_SESSIONS_ROOT)
         append_session_event(
             draw_id,
             {"event": "draw_more_requested", "card_count": card_count,
              "group_ids": new_group_ids, "card_run_ids": new_card_ids, "at": time()},
-            root=_DRAW_SESSIONS_ROOT,
+            root=sessions._DRAW_SESSIONS_ROOT,
         )
     except Exception:
         logger.warning("draw-more persist failed for draw_id=%s", draw_id, exc_info=True)
@@ -1483,8 +1132,8 @@ async def redraw_card(draw_id: str, payload: dict) -> dict:
     quality = record.metadata.get("quality") or {}
     checkpoint_id = record.source_checkpoint_id
 
-    checkpoint, reference_path = _resolve_draw_checkpoint(parent, checkpoint_id)
-    _prevalidate_draw_quality(reference_path, quality)
+    checkpoint, reference_path = sessions._resolve_draw_checkpoint(parent, checkpoint_id)
+    sessions._prevalidate_draw_quality(reference_path, quality)
 
     # Build a ONE-element strategies list.
     # build_variant_strategies requires count>=2, so we request 2 and take only the first.
@@ -1494,7 +1143,7 @@ async def redraw_card(draw_id: str, payload: dict) -> dict:
     for s in strategies:
         s["locks"] = {**(s.get("locks") or {}), **request_locks}
 
-    gid, cids = _create_variant_group(
+    gid, cids = sessions._create_variant_group(
         parent_run_id=record.parent_run_id,
         root_run_id=record.root_run_id,
         checkpoint=checkpoint,
@@ -1520,18 +1169,18 @@ async def redraw_card(draw_id: str, payload: dict) -> dict:
     record.card_run_ids.extend(cids)
     record.updated_at = time()
     try:
-        save_session(record, root=_DRAW_SESSIONS_ROOT)
+        save_session(record, root=sessions._DRAW_SESSIONS_ROOT)
         append_session_event(
             draw_id,
             {"event": "draw_card_eliminated", "run_id": target_run_id,
              "value": True, "auto": True, "at": time()},
-            root=_DRAW_SESSIONS_ROOT,
+            root=sessions._DRAW_SESSIONS_ROOT,
         )
         append_session_event(
             draw_id,
             {"event": "draw_card_redrawn", "run_id": target_run_id,
              "replacement_run_id": new_run_id, "reason": payload.get("reason"), "at": time()},
-            root=_DRAW_SESSIONS_ROOT,
+            root=sessions._DRAW_SESSIONS_ROOT,
         )
     except Exception:
         logger.warning("redraw persist failed for draw_id=%s", draw_id, exc_info=True)
@@ -1575,7 +1224,7 @@ async def draw_card_event(draw_id: str, run_id: str, payload: dict) -> dict:
             draw_id,
             {"event": event_type, "run_id": run_id, "value": payload.get("value"),
              "reason": payload.get("reason"), "tags": payload.get("tags") or [], "at": time()},
-            root=_DRAW_SESSIONS_ROOT,
+            root=sessions._DRAW_SESSIONS_ROOT,
         )
     except Exception:
         logger.warning("append_session_event failed for draw_id=%s", draw_id, exc_info=True)
@@ -2087,7 +1736,7 @@ _STATUS_RANK = {"completed": 0, "running": 1, "queued": 2, "cancelled": 3, "fail
 
 
 def _get_group_or_404(group_id: str):
-    record = load_group(group_id, root=_VARIANT_GROUPS_ROOT)
+    record = load_group(group_id, root=sessions._VARIANT_GROUPS_ROOT)
     if record is None:
         raise HTTPException(status_code=404, detail=f"group_id '{group_id}' not found")
     return record
@@ -2184,7 +1833,7 @@ async def get_variant_group(group_id: str) -> dict:
 
     # Annotate each variant with preference ranking (recommendation hint only;
     # winner is NEVER changed here).
-    profile = load_profile(root=_PREFERENCES_ROOT)
+    profile = load_profile(root=sessions._PREFERENCES_ROOT)
     ranking = rank_variants_by_preference(variants, profile)
     for v in variants:
         pref = ranking.get(v["run_id"], {"preference_score": 0.0, "recommended": False})
@@ -2220,7 +1869,7 @@ async def stop_variant_group(group_id: str) -> dict:
         append_group_event(
             group_id,
             {"event": "stopped", "at": time()},
-            root=_VARIANT_GROUPS_ROOT,
+            root=sessions._VARIANT_GROUPS_ROOT,
         )
     except Exception:
         logger.warning("append_group_event failed for group_id=%s", group_id, exc_info=True)
@@ -2245,7 +1894,7 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
 
     record.winner_run_id = winner_run_id
     try:
-        save_group(record, root=_VARIANT_GROUPS_ROOT)
+        save_group(record, root=sessions._VARIANT_GROUPS_ROOT)
     except Exception as exc:
         logger.error("save_group failed for group_id=%s", group_id, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to persist winner") from exc
@@ -2275,7 +1924,7 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
                 "reason": payload.get("reason"),
                 "at": time(),
             },
-            root=_VARIANT_GROUPS_ROOT,
+            root=sessions._VARIANT_GROUPS_ROOT,
         )
     except Exception:
         logger.warning("append_group_event failed for group_id=%s", group_id, exc_info=True)
@@ -2294,7 +1943,7 @@ async def set_variant_winner(group_id: str, payload: dict) -> dict:
                 reason=payload.get("reason"),
                 context={"source": "variant_winner"},
             ),
-            root=_PREFERENCES_ROOT,
+            root=sessions._PREFERENCES_ROOT,
         )
     except Exception:
         logger.warning(
@@ -2337,7 +1986,7 @@ async def rate_variant(group_id: str, payload: dict) -> dict:
                 "tags": payload.get("tags") or [],
                 "at": time(),
             },
-            root=_VARIANT_GROUPS_ROOT,
+            root=sessions._VARIANT_GROUPS_ROOT,
         )
     except Exception:
         logger.warning("append_group_event failed for group_id=%s", group_id, exc_info=True)
@@ -2358,7 +2007,7 @@ async def rate_variant(group_id: str, payload: dict) -> dict:
                 tags=payload.get("tags") or [],
                 context={"source": "variant_rating"},
             ),
-            root=_PREFERENCES_ROOT,
+            root=sessions._PREFERENCES_ROOT,
         )
     except Exception:
         logger.warning(
@@ -2496,53 +2145,6 @@ async def region_mask(run_id: str, payload: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _fusions_results_root() -> Path:
-    """Resolve the on-disk root that holds the per-fusion artifacts dir.
-
-    ``save_plan`` writes ``<root>/fusions/<fusion_id>.json``; this returns the
-    same ``<root>`` so composite_target.png + region_masks/ land under
-    ``<root>/fusions/<fusion_id>/``.
-    """
-    return Path(sessions._FUSIONS_ROOT) if sessions._FUSIONS_ROOT is not None else DEFAULT_RESULTS_ROOT
-
-
-def _fusion_artifacts_dir(fusion_id: str) -> Path:
-    """Per-fusion artifacts dir: ``<root>/fusions/<fusion_id>/``."""
-    return _fusions_results_root() / "fusions" / fusion_id
-
-
-def _resolve_run_render(stored: dict, run_dir: "str | None") -> "Path | None":
-    """Resolve a run's selected render PNG, mirroring the region-mask endpoint.
-
-    Returns the path to ``<run_dir>/candidates/<selected_id>_render.png`` if it
-    exists, else None.
-    """
-    if not run_dir:
-        return None
-    selected_cand = _selected_candidate(stored)
-    if selected_cand is None:
-        return None
-    sid = selected_cand.get("id")
-    if not sid:
-        return None
-    render_path = Path(run_dir) / "candidates" / f"{sid}_render.png"
-    return render_path if render_path.exists() else None
-
-
-def _save_plan_best_effort(record: FusionPlanRecord) -> None:
-    try:
-        save_plan(record, root=sessions._FUSIONS_ROOT)
-    except Exception:
-        logger.warning("fusion save_plan failed for fusion_id=%s", record.fusion_id, exc_info=True)
-
-
-def _append_fusion_event_best_effort(fusion_id: str, event: dict) -> None:
-    try:
-        append_plan_event(fusion_id, event, root=sessions._FUSIONS_ROOT)
-    except Exception:
-        logger.warning("fusion append_plan_event failed for fusion_id=%s", fusion_id, exc_info=True)
-
-
 @router.post("/fusions")
 async def create_fusion(payload: dict) -> dict:
     """Create a draft fusion plan from a base run + one or more source runs.
@@ -2574,7 +2176,7 @@ async def create_fusion(payload: dict) -> dict:
             detail="base run has no selected GLSL — cannot be a fusion base",
         )
 
-    base_render = _resolve_run_render(base, base_run_dir)
+    base_render = sessions._resolve_run_render(base, base_run_dir)
     if base_render is None:
         raise HTTPException(status_code=422, detail="base render not available")
 
@@ -2606,7 +2208,7 @@ async def create_fusion(payload: dict) -> dict:
                 status_code=422,
                 detail=f"source run '{sid}' not found",
             )
-        if _resolve_run_render(src, src.get("run_dir")) is None:
+        if sessions._resolve_run_render(src, src.get("run_dir")) is None:
             raise HTTPException(
                 status_code=422,
                 detail=f"source run '{sid}' render not available",
@@ -2631,8 +2233,8 @@ async def create_fusion(payload: dict) -> dict:
     if errors:
         raise HTTPException(status_code=422, detail={"fusion_errors": errors})
 
-    _save_plan_best_effort(record)
-    _append_fusion_event_best_effort(fusion_id, {
+    sessions._save_plan_best_effort(record)
+    sessions._append_fusion_event_best_effort(fusion_id, {
         "event": "fusion_plan_created",
         "base_run_id": base_run_id,
         "source_run_ids": source_ids,
@@ -2693,7 +2295,7 @@ async def create_composite_target(fusion_id: str) -> dict:
     base = store._touch_run(record.base_run_id)
     if base is None:
         raise HTTPException(status_code=422, detail=f"base run '{record.base_run_id}' not found")
-    base_render = _resolve_run_render(base, base.get("run_dir"))
+    base_render = sessions._resolve_run_render(base, base.get("run_dir"))
     if base_render is None:
         raise HTTPException(status_code=422, detail="base render not available")
 
@@ -2702,7 +2304,7 @@ async def create_composite_target(fusion_id: str) -> dict:
     for sid in record.source_run_ids:
         with store._run_store_lock:
             src = store._run_store.get(sid)
-        render = _resolve_run_render(src, src.get("run_dir")) if src is not None else None
+        render = sessions._resolve_run_render(src, src.get("run_dir")) if src is not None else None
         if render is None:
             raise HTTPException(
                 status_code=422,
@@ -2710,7 +2312,7 @@ async def create_composite_target(fusion_id: str) -> dict:
             )
         source_render_paths[sid] = render
 
-    output_dir = _fusion_artifacts_dir(fusion_id)
+    output_dir = sessions._fusion_artifacts_dir(fusion_id)
     try:
         build_composite_target(
             base_render_path=base_render,
@@ -2723,8 +2325,8 @@ async def create_composite_target(fusion_id: str) -> dict:
         record.status = "failed"
         record.metadata["error"] = str(exc)
         record.updated_at = time()
-        _save_plan_best_effort(record)
-        _append_fusion_event_best_effort(fusion_id, {
+        sessions._save_plan_best_effort(record)
+        sessions._append_fusion_event_best_effort(fusion_id, {
             "event": "fusion_composite_target_failed", "error": str(exc), "at": time(),
         })
         return {"fusion_id": fusion_id, "status": "failed", "error": str(exc)}
@@ -2732,8 +2334,8 @@ async def create_composite_target(fusion_id: str) -> dict:
     record.composite_target_artifact_id = "composite_target"
     record.status = "target_ready"
     record.updated_at = time()
-    _save_plan_best_effort(record)
-    _append_fusion_event_best_effort(fusion_id, {
+    sessions._save_plan_best_effort(record)
+    sessions._append_fusion_event_best_effort(fusion_id, {
         "event": "fusion_composite_target_created", "at": time(),
     })
 
@@ -2769,7 +2371,7 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
     base_selected_glsl = base.get("selected_glsl")
     if not base_run_dir or not base_selected_glsl:
         raise HTTPException(status_code=422, detail="base run is no longer usable as a fusion base")
-    if _resolve_run_render(base, base_run_dir) is None:
+    if sessions._resolve_run_render(base, base_run_dir) is None:
         raise HTTPException(status_code=422, detail="base render not available")
 
     base_reference = Path(base_run_dir) / "reference_input.png"
@@ -2900,8 +2502,8 @@ async def run_fusion(fusion_id: str, payload: dict) -> dict:
     record.output_run_id = child_run_id
     record.status = "running"
     record.updated_at = time()
-    _save_plan_best_effort(record)
-    _append_fusion_event_best_effort(fusion_id, {
+    sessions._save_plan_best_effort(record)
+    sessions._append_fusion_event_best_effort(fusion_id, {
         "event": "fusion_run_started", "output_run_id": child_run_id, "at": time(),
     })
 
@@ -2928,12 +2530,12 @@ async def get_fusion_artifact(fusion_id: str, artifact_id: str) -> FileResponse:
     containment (``.resolve().relative_to(dir)``) safety.
     """
     validate_safe_id(fusion_id, field="fusion_id")  # Item 2 — block path traversal
-    fusion_dir = _fusion_artifacts_dir(fusion_id)
+    fusion_dir = sessions._fusion_artifacts_dir(fusion_id)
 
     if artifact_id == "composite_target":
         target = fusion_dir / "composite_target.png"
     elif artifact_id == "fusion_plan":
-        target = _fusions_results_root() / "fusions" / f"{fusion_id}.json"
+        target = sessions._fusions_results_root() / "fusions" / f"{fusion_id}.json"
     elif artifact_id.startswith("region_mask:"):
         region_id = artifact_id[len("region_mask:"):]
         if not region_id or not _REGION_ID_RE.match(region_id):
@@ -2949,7 +2551,7 @@ async def get_fusion_artifact(fusion_id: str, artifact_id: str) -> FileResponse:
     if target.suffix.lower() not in (".png", ".json"):
         raise HTTPException(status_code=422, detail="disallowed artifact suffix")
     containment_root = (
-        _fusions_results_root() / "fusions"
+        sessions._fusions_results_root() / "fusions"
         if artifact_id == "fusion_plan"
         else fusion_dir
     )
@@ -2974,7 +2576,7 @@ async def get_fusion_artifact(fusion_id: str, artifact_id: str) -> FileResponse:
 async def get_preference_profile() -> dict:
     """Return the current preference profile (default if none saved)."""
     try:
-        return load_profile(root=_PREFERENCES_ROOT)
+        return load_profile(root=sessions._PREFERENCES_ROOT)
     except Exception:
         logger.warning("load_profile failed, returning default", exc_info=True)
         return default_profile()
@@ -2991,12 +2593,12 @@ async def patch_preference_profile(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="payload must be a JSON object")
     try:
-        return patch_profile(payload, updated_at=time(), root=_PREFERENCES_ROOT)
+        return patch_profile(payload, updated_at=time(), root=sessions._PREFERENCES_ROOT)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
         logger.warning("patch_profile failed", exc_info=True)
-        return load_profile(root=_PREFERENCES_ROOT)
+        return load_profile(root=sessions._PREFERENCES_ROOT)
 
 
 @router.post("/preferences/events")
@@ -3041,7 +2643,7 @@ async def post_preference_event(payload: dict) -> dict:
         context=dict(payload.get("context") or {}),
     )
     try:
-        append_preference_event(event, root=_PREFERENCES_ROOT)
+        append_preference_event(event, root=sessions._PREFERENCES_ROOT)
     except Exception:
         logger.warning("append_preference_event failed", exc_info=True)
 
@@ -3052,21 +2654,21 @@ async def post_preference_event(payload: dict) -> dict:
 async def rebuild_preference_profile() -> dict:
     """Rebuild the preference profile from all stored events and save it."""
     try:
-        events = load_preference_events(root=_PREFERENCES_ROOT)
-        base = load_profile(root=_PREFERENCES_ROOT)
+        events = load_preference_events(root=sessions._PREFERENCES_ROOT)
+        base = load_profile(root=sessions._PREFERENCES_ROOT)
         profile = rebuild_profile(events, updated_at=time(), base_profile=base)
-        save_profile(profile, root=_PREFERENCES_ROOT)
+        save_profile(profile, root=sessions._PREFERENCES_ROOT)
         return profile
     except Exception:
         logger.warning("rebuild_preference_profile failed", exc_info=True)
-        return load_profile(root=_PREFERENCES_ROOT)
+        return load_profile(root=sessions._PREFERENCES_ROOT)
 
 
 @router.post("/preferences/clear")
 async def clear_preference_data() -> dict:
     """Clear all preference events and reset the profile to defaults."""
     try:
-        clear_preferences(root=_PREFERENCES_ROOT)
+        clear_preferences(root=sessions._PREFERENCES_ROOT)
     except Exception:
         logger.warning("clear_preferences failed", exc_info=True)
     return {"ok": True}

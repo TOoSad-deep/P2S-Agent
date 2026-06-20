@@ -20,6 +20,7 @@ fastapi = pytest.importorskip("fastapi")
 testclient = pytest.importorskip("fastapi.testclient")
 
 import p2s_agent.workers as workers
+from app.main import register_agent_error_handlers
 from app.routers.png_shader import router
 from p2s_agent.store import _run_store
 
@@ -37,6 +38,7 @@ def _isolate_run_index(tmp_path, monkeypatch):
 
 def _client() -> TestClient:
     app = FastAPI()
+    register_agent_error_handlers(app)
     app.include_router(router)
     return TestClient(app)
 
