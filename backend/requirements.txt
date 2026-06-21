@@ -31,3 +31,7 @@ python-dotenv==1.0.1
 
 # WebSocket
 websockets==13.1
+
+# Data layer (SQLite + migrations)
+SQLAlchemy>=2.0,<2.1
+alembic>=1.13

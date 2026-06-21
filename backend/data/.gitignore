@@ -1,0 +1,4 @@
+# 本地数据库文件不入库（含 WAL/shm 边车文件）
+p2s.db
+p2s.db-wal
+p2s.db-shm
