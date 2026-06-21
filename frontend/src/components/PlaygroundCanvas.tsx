@@ -12,6 +12,11 @@ interface PlaygroundCanvasProps {
 
 type ResolutionOption = "fit" | "512" | "1024";
 
+/** 空输入时编译这个透明 shader 以清空画布（黑底透出），而不是把上一个 shader 继续渲染。 */
+const BLANK_SHADER = `void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  fragColor = vec4(0.0);
+}`;
+
 export default function PlaygroundCanvas({ glsl, onError }: PlaygroundCanvasProps) {
   const viewRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<ShaderRenderer | null>(null);
@@ -19,11 +24,13 @@ export default function PlaygroundCanvas({ glsl, onError }: PlaygroundCanvasProp
   const [time, setTime] = useState(0);
   const [resolution, setResolution] = useState<ResolutionOption>("fit");
 
-  // 用 ref 读取最新的播放/时间状态，避免它们进入编译 effect 的依赖。
+  // 用 ref 读取最新的播放/时间/回调，避免它们进入编译 effect 的依赖（编译应只随 glsl 变化）。
   const playingRef = useRef(playing);
   const timeRef = useRef(time);
+  const onErrorRef = useRef(onError);
   playingRef.current = playing;
   timeRef.current = time;
+  onErrorRef.current = onError;
 
   // 仅创建一次渲染器。
   useEffect(() => {
@@ -37,20 +44,17 @@ export default function PlaygroundCanvas({ glsl, onError }: PlaygroundCanvasProp
     };
   }, []);
 
-  // 源码变化时重新编译。
+  // 源码变化时重新编译；空输入编译透明 shader 以清空画布。
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
-    if (!glsl.trim()) {
-      onError(null);
-      return;
-    }
-    const result = renderer.compileShader(toShaderToyFragment(glsl));
+    const source = glsl.trim() ? glsl : BLANK_SHADER;
+    const result = renderer.compileShader(toShaderToyFragment(source));
     if (!result.success) {
-      onError(result.error ?? "Shader compile error");
+      onErrorRef.current(result.error ?? "Shader compile error");
       return;
     }
-    onError(null);
+    onErrorRef.current(null);
     if (playingRef.current) {
       renderer.unfreezeTime();
       renderer.startRendering();
@@ -58,7 +62,7 @@ export default function PlaygroundCanvas({ glsl, onError }: PlaygroundCanvasProp
       // 暂停态：渲染一帧到当前时间。
       renderer.setTime(timeRef.current);
     }
-  }, [glsl, onError]);
+  }, [glsl]);
 
   // 播放 / 暂停。
   useEffect(() => {
