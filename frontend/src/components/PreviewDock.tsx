@@ -42,14 +42,18 @@ export default function PreviewDock({ referenceUrl, node }: PreviewDockProps) {
 
   const runId =
     typeof node?.data?.run_id === "string" ? node.data.run_id : null;
+  const status =
+    typeof node?.data?.status === "string" ? node.data.status : null;
 
-  // Reset error state whenever the selected node changes so the new img gets a
-  // fresh load attempt. A key on the img alone can't recover: once renderError
-  // is true the <img> is unmounted, so its onLoad/onError never fire again and
-  // the dock would stay stuck on "无渲染" for every node thereafter.
+  // Reset error state when the selected node changes OR when this same node's
+  // run finishes. selected_render 409s while a run is still rendering, latching
+  // renderError; once latched the <img> is unmounted so its onLoad/onError never
+  // fire again and the dock stays stuck on "无渲染". Resetting on status change
+  // (e.g. a directed-optimization child going running→completed) gives the
+  // now-ready render a fresh load attempt. Mirrors BranchCompareStrip I-1.
   useEffect(() => {
     setRenderError(false);
-  }, [runId]);
+  }, [runId, status]);
 
   const renderImgKey = runId ?? "none";
 
