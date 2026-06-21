@@ -7,6 +7,16 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  build: {
+    rollupOptions: {
+      // 多页：主应用 + 独立 shader playground。相对路径相对项目根解析，
+      // 避免引入 node:path/__dirname（未安装 @types/node）。
+      input: {
+        main: 'index.html',
+        playground: 'playground.html',
+      },
+    },
+  },
   server: {
     port: 5174,
     proxy: {
