@@ -686,3 +686,39 @@ def update_run_metadata(
 
     # Return the merged record.
     return _merge_fields(index[run_id], patch)
+
+
+# ---------------------------------------------------------------------------
+# Read-cutover step 1: backfill the runs table from the JSONL + reconcile.
+# Additive — does NOT change any read path. Idempotent (upsert by run_id).
+# ---------------------------------------------------------------------------
+
+
+def backfill_runs_to_db(*, path: Path | str | None = None, engine=None) -> int:
+    """Fold the JSONL and upsert every record into the runs table. Idempotent.
+    Returns the number of records upserted; 0 if the JSONL is absent."""
+    resolved = _resolve_path(path)
+    if not resolved.exists():
+        return 0
+    records = _fold_index_file(resolved)
+    eng = engine if engine is not None else _shadow_engine(path)
+    from p2s_agent.core.db.repositories import runs as runs_repo
+    for rec in records.values():
+        runs_repo.upsert_run(eng, asdict(rec))
+    return len(records)
+
+
+def reconcile_runs_with_db(*, path: Path | str | None = None, engine=None) -> list[str]:
+    """Return run_ids that differ between the JSONL fold and the DB (empty = parity)."""
+    resolved = _resolve_path(path)
+    folded = _fold_index_file(resolved) if resolved.exists() else {}
+    eng = engine if engine is not None else _shadow_engine(path)
+    from p2s_agent.core.db.repositories import runs as runs_repo
+    db_rows = runs_repo.get_all_runs(eng)
+    mismatches: list[str] = []
+    for rid, rec in folded.items():
+        db = db_rows.get(rid)
+        if db is None or _dict_to_record(db) != rec:
+            mismatches.append(rid)
+    mismatches.extend(rid for rid in db_rows if rid not in folded)
+    return mismatches
