@@ -39,7 +39,27 @@ from typing import Any, Callable, Mapping
 # Tests can override by passing ``root=`` explicitly.
 # parents[3] == backend/ (this file lives at backend/p2s_agent/core/pipeline/artifacts.py
 # after the L1 move); keeps the root at backend/test_results, unchanged from app/pipeline.
-DEFAULT_RESULTS_ROOT = Path(__file__).resolve().parents[3] / "test_results"
+_PACKAGED_RESULTS_ROOT = Path(__file__).resolve().parents[3] / "test_results"
+
+
+def _results_root_from_env(env: Mapping[str, str]) -> Path:
+    """Resolve the data root, honoring the ``P2S_RESULTS_ROOT`` override.
+
+    A set, non-blank ``P2S_RESULTS_ROOT`` relocates every run artifact (useful
+    for moving the data root out of ``~/Documents`` to dodge the macOS TCC/EPERM
+    trap on ``uvicorn --reload`` workers). Unset or blank → the packaged
+    ``backend/test_results`` default, so behavior is unchanged when the env var
+    is absent.
+    """
+    override = (env.get("P2S_RESULTS_ROOT") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _PACKAGED_RESULTS_ROOT
+
+
+# Resolved once at import time. ``P2S_RESULTS_ROOT`` must be set before the
+# process starts (all derived ``_DEFAULT_*`` constants read this on import).
+DEFAULT_RESULTS_ROOT = _results_root_from_env(os.environ)
 
 # Manifest schema version. Bump on breaking changes so downstream
 # tooling can detect old layouts.

@@ -120,6 +120,11 @@ async def request_logging_middleware(request: Request, call_next):
 async def startup_event():
     setup_logging()
     configure_langsmith()
+    # One retention pass per boot (P2S_RETENTION_* env). Never raises — a cleanup
+    # failure must not block the server coming up.
+    from p2s_agent.orchestration.retention import cleanup_at_startup
+
+    cleanup_at_startup()
 
 
 @app.get("/health")

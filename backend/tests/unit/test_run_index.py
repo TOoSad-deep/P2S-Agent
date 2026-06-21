@@ -25,6 +25,7 @@ from p2s_agent.orchestration.run_index import (
     compact_run_index,
     load_run_index,
     maybe_compact_run_index,
+    prune_run_index,
     update_run_metadata,
 )
 
@@ -1017,3 +1018,67 @@ def test_load_run_index_empty_on_permission_error_during_stat(tmp_path, monkeypa
     monkeypatch.setattr(Path, "stat", _denying_stat)
 
     assert load_run_index(path=idx) == {}
+
+
+# ---------------------------------------------------------------------------
+# prune_run_index: drop specific run_ids (retention cleanup)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_removes_only_named_runs(tmp_path):
+    """prune drops the named run_ids and leaves the rest fold-equivalent."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("pr1", status="completed", created_at=1.0), path=p)
+    append_run_created(_record("pr2", status="completed", created_at=2.0), path=p)
+    append_run_created(_record("pr3", status="completed", created_at=3.0), path=p)
+
+    removed = prune_run_index({"pr1", "pr3"}, path=p)
+
+    assert removed == 2
+    after = load_run_index(path=p)
+    assert set(after.keys()) == {"pr2"}
+    # surviving lines are folded "created" events with the schema version
+    for line in p.read_text().splitlines():
+        data = json.loads(line)
+        assert data["event"] == "created"
+        assert data["v"] == SCHEMA_VERSION
+
+
+def test_prune_ignores_unknown_run_ids(tmp_path):
+    """run_ids not present in the index contribute 0 to the removed count."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("pk1", status="completed"), path=p)
+
+    removed = prune_run_index({"nope", "missing"}, path=p)
+
+    assert removed == 0
+    assert set(load_run_index(path=p).keys()) == {"pk1"}
+
+
+def test_prune_empty_set_is_noop(tmp_path):
+    """An empty run_id set writes nothing and returns 0."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("pe1", status="completed"), path=p)
+    before_bytes = p.read_bytes()
+
+    assert prune_run_index(set(), path=p) == 0
+    assert p.read_bytes() == before_bytes
+
+
+def test_prune_missing_file_is_noop(tmp_path):
+    """prune on an absent index returns 0 and creates nothing."""
+    missing = tmp_path / "no_such.jsonl"
+    assert prune_run_index({"x"}, path=missing) == 0
+    assert not missing.exists()
+
+
+def test_prune_invalidates_cache(tmp_path):
+    """After prune, load returns the pruned fold, not a stale cache."""
+    p = tmp_path / "idx.jsonl"
+    append_run_created(_record("pc1", status="completed"), path=p)
+    append_run_created(_record("pc2", status="completed"), path=p)
+
+    load_run_index(path=p)  # populate cache
+    prune_run_index({"pc1"}, path=p)
+
+    assert set(load_run_index(path=p).keys()) == {"pc2"}

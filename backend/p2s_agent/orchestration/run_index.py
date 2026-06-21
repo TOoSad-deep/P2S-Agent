@@ -410,6 +410,52 @@ def compact_run_index(*, path: Path | str | None = None) -> int:
     return len(records)
 
 
+def prune_run_index(run_ids: set[str], *, path: Path | str | None = None) -> int:
+    """Atomically rewrite the index, dropping every record in *run_ids*.
+
+    Used by retention cleanup: when a run directory is deleted from disk, its
+    lineage record must also leave the index so the branch tree never points at
+    a missing directory. Like :func:`compact_run_index` this folds the file,
+    writes a single ``.bak`` of the prior file, replaces atomically, and
+    invalidates the cache for this path.
+
+    Returns the number of records actually removed (run_ids absent from the
+    index contribute 0). No-op (returns 0) if the file is absent or *run_ids*
+    is empty.
+    """
+    resolved = _resolve_path(path)
+
+    if not run_ids or not resolved.exists():
+        return 0
+
+    tmp = resolved.with_suffix(resolved.suffix + ".tmp")
+    bak = resolved.with_suffix(resolved.suffix + ".bak")
+
+    # Hold the append lock across read+write so no append interleaves with the
+    # snapshot (mirrors compact_run_index).
+    with _APPEND_LOCK:
+        records = _fold_index_file(resolved)
+        removed = sum(1 for rid in run_ids if rid in records)
+        if removed == 0:
+            return 0
+
+        with tmp.open("w", encoding="utf-8") as fh:
+            for rid, rec in records.items():
+                if rid in run_ids:
+                    continue
+                line_data: dict[str, Any] = {"event": "created", "v": SCHEMA_VERSION}
+                line_data.update(_record_to_dict(rec))
+                fh.write(json.dumps(line_data, ensure_ascii=False) + "\n")
+
+        shutil.copy2(resolved, bak)
+        os.replace(tmp, resolved)
+
+    with _CACHE_LOCK:
+        _INDEX_CACHE.pop(str(resolved), None)
+
+    return removed
+
+
 def maybe_compact_run_index(
     *, path: Path | str | None = None, min_lines: int = 2000, bloat_ratio: float = 3.0
 ) -> bool:

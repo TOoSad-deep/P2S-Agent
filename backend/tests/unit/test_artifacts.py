@@ -19,6 +19,28 @@ def test_default_results_root_is_backend_test_results():
     assert artifacts.DEFAULT_RESULTS_ROOT.parent.name == "backend"
 
 
+# === P2S_RESULTS_ROOT env override ===
+
+
+def test_results_root_from_env_falls_back_to_backend_test_results():
+    root = artifacts._results_root_from_env({})
+    assert root.name == "test_results"
+    assert root.parent.name == "backend"
+
+
+def test_results_root_from_env_honors_p2s_results_root():
+    root = artifacts._results_root_from_env({"P2S_RESULTS_ROOT": "/tmp/p2s-data"})
+    assert root == Path("/tmp/p2s-data")
+
+
+def test_results_root_from_env_ignores_blank_value():
+    # A blank/whitespace-only override must NOT collapse the root to "" — fall
+    # back to the packaged default instead.
+    root = artifacts._results_root_from_env({"P2S_RESULTS_ROOT": "   "})
+    assert root.name == "test_results"
+    assert root.parent.name == "backend"
+
+
 def test_create_run_dir_uses_date_and_slugified_label(tmp_path):
     fixed = datetime(2026, 6, 7, 12, 30, 0, tzinfo=timezone.utc)
     handle = artifacts.create_run_dir(
