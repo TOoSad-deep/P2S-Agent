@@ -101,6 +101,9 @@ class BaseAgent:
                     api_key=model_config.api_key,
                     base_url=model_config.base_url.replace("/v1beta", "/v1beta/openai"),
                     http_client=self._http_client,
+                    # Retry transient connection errors (APIConnectionError wraps
+                    # both TLS ConnectError and RemoteProtocolError) with backoff.
+                    max_retries=5,
                 )
             )
         else:
@@ -110,6 +113,9 @@ class BaseAgent:
                     api_key=model_config.api_key,
                     base_url=model_config.base_url,
                     http_client=self._http_client,
+                    # Retry transient connection errors (APIConnectionError wraps
+                    # both TLS ConnectError and RemoteProtocolError) with backoff.
+                    max_retries=5,
                 )
             )
 
@@ -132,21 +138,33 @@ class BaseAgent:
         self.close()
 
     def _create_http_client(self, proxy: Optional[str]) -> httpx.Client:
-        """创建 httpx client，支持代理和超时配置"""
+        """创建 httpx client，支持代理和超时配置。
+
+        韧性加固：macOS 系统 Python 链接的是 LibreSSL，对部分上游端点
+        （如 dashscope/qwen）偶发 TLS 中断（``_ssl.c:1129`` EOF）和被服务端
+        静默关闭的 keep-alive 连接（``Server disconnected without sending a
+        response``）。这里禁用连接复用——每次请求新建连接，从根本上消除
+        "复用陈旧连接" 这一类 ``RemoteProtocolError``；瞬时 TLS 抖动则交给
+        OpenAI 客户端的 ``max_retries`` 退避重试兜底（见构造处）。低频 LLM
+        调用不依赖连接池性能，禁用复用没有实际代价。
+        """
         # Increase timeout for LLM API calls (may need longer for code generation)
         timeout = httpx.Timeout(120.0, connect=10.0, read=120.0, write=120.0)
-        
+        # No keep-alive reuse: stale pooled sockets are the main source of
+        # "Server disconnected" on this SSL stack; force a fresh connection.
+        limits = httpx.Limits(max_keepalive_connections=0)
+
         # 获取代理配置
         proxy_url = proxy
         if not proxy_url:
             # 检查环境变量中的代理
             import os
             proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("ALL_PROXY")
-        
+
         if proxy_url:
-            return httpx.Client(timeout=timeout, proxy=proxy_url)
+            return httpx.Client(timeout=timeout, limits=limits, proxy=proxy_url)
         else:
-            return httpx.Client(timeout=timeout)
+            return httpx.Client(timeout=timeout, limits=limits)
 
     def _detect_gemini_api(self, base_url: str) -> bool:
         """检测是否为 Gemini 原生 API（非 OpenAI-compatible）"""
