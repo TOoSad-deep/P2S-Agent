@@ -25,9 +25,11 @@ orchestration never imports store, so there is no cycle. This module imports no
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import threading
 from collections import OrderedDict
+from pathlib import Path
 from typing import Optional
 
 from p2s_agent.config import ModelConfig
@@ -219,6 +221,109 @@ def _snapshot_run(run_id: str) -> Optional[dict]:
             return None
         _run_store.move_to_end(run_id)
         return copy.deepcopy(stored)
+
+
+# ---------------------------------------------------------------------------
+# Disk rehydration — recover a completed run's result after it has fallen out
+# of the in-memory _run_store (LRU eviction at _MAX_STORE_SIZE, or a process
+# restart / uvicorn --reload wiping the store). The run_dir is self-contained
+# on disk, so /status (and callers) can serve it again instead of 404-ing.
+# ---------------------------------------------------------------------------
+
+# Result keys reconstructable 1:1 from individual artifacts for runs that
+# predate the canonical result.json snapshot.
+_RESULT_FILE_KEYS = {
+    "scoreboard": "scoreboard.json",
+    "objective_metrics": "objective_metrics.json",
+    "quality_router": "quality_router.json",
+    "refinement_summary": "refinement_summary.json",
+    "input_spec": "input_spec.json",
+    "preprocess": "preprocess.json",
+    "selected_dsl": "selected_dsl.json",
+    "lineage": "lineage.json",
+}
+
+
+def _reconstruct_result_from_dir(run_dir: Path) -> Optional[dict]:
+    """Best-effort result for a run_dir that has no result.json snapshot.
+
+    Requires at least ``selected_shader.glsl`` (the shader output the UI needs);
+    returns None otherwise. ``candidate_details`` / ``refinement_history`` are
+    left empty — their on-disk shapes differ from the in-memory result, so we do
+    not risk a mismatched reconstruction.
+    """
+    glsl_path = run_dir / "selected_shader.glsl"
+    if not glsl_path.exists():
+        return None
+
+    def _load(name: str):
+        p = run_dir / name
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    result: dict = {key: _load(fname) for key, fname in _RESULT_FILE_KEYS.items()}
+    # Default the dict-shaped fields so the frontend never sees null where it
+    # expects an object; selected_dsl/lineage may legitimately be null.
+    for key in ("scoreboard", "objective_metrics", "quality_router",
+                "refinement_summary", "input_spec", "preprocess"):
+        if result.get(key) is None:
+            result[key] = {}
+    try:
+        result["selected_glsl"] = glsl_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    result["selected_candidate_id"] = (result.get("scoreboard") or {}).get("selected_id")
+    result["candidate_details"] = []
+    result["refinement_history"] = []
+    return result
+
+
+def rehydrate_run(run_id: str) -> Optional[dict]:
+    """Rebuild a completed run's result from its persisted run_dir, or None.
+
+    Prefers the canonical ``result.json`` snapshot (exact); falls back to a
+    best-effort reconstruction from individual artifacts for runs that predate
+    it. Returns None when the run is unknown to the index, its dir is gone, or
+    no shader output is on disk. Never raises — a rehydration failure must
+    degrade to a 404, never a 500.
+    """
+    try:
+        records = run_index.load_run_index(path=_RUN_INDEX_PATH)
+    except Exception:
+        logger.warning("rehydrate_run: load_run_index failed", exc_info=True)
+        return None
+
+    rec = records.get(run_id)
+    if rec is None or not rec.run_dir:
+        return None
+    run_dir = Path(rec.run_dir)
+    if not run_dir.is_dir():
+        return None
+
+    result: Optional[dict] = None
+    result_json = run_dir / "result.json"
+    if result_json.exists():
+        try:
+            loaded = json.loads(result_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict):
+            result = loaded
+
+    if result is None:
+        result = _reconstruct_result_from_dir(run_dir)
+    if result is None:
+        return None
+
+    result["run_id"] = run_id
+    result["run_dir"] = str(run_dir)
+    result.setdefault("status", "completed")
+    result.setdefault("current_phase", "done")
+    return result
 
 
 def _publish_partial_to_store(run_id: str, partial: dict) -> None:

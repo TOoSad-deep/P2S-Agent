@@ -14,7 +14,9 @@ testclient = pytest.importorskip("fastapi.testclient")
 
 from app.main import register_agent_error_handlers
 from app.routers.png_shader import router
+from p2s_agent import store
 from p2s_agent.store import _run_store
+from p2s_agent.orchestration.run_index import RunLineageRecord, append_run_created
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,9 @@ def test_run_returns_run_id_then_status_returns_full_pipeline_result(tmp_path):
     assert data["preprocess"]["width"] == 32
     assert data["selected_glsl"].startswith("#version 300 es")
     assert data["quality_router"]["final_score"] >= 0.0
+    # A result.json snapshot is written so /status can rebuild this run after it
+    # is evicted from the in-memory store or the process restarts.
+    assert (Path(data["run_dir"]) / "result.json").exists()
 
 
 def test_run_accepts_input_spec_overrides(tmp_path):
@@ -4257,3 +4262,53 @@ def test_branch_refine_rejects_oversized_feedback(tmp_path):
         json={"feedback": oversized, "mode": "refine"},
     )
     assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------
+# /status disk rehydration: a completed run that has fallen out of the
+# in-memory _run_store (LRU eviction / process restart) is served from disk
+# instead of 404-ing.
+# ---------------------------------------------------------------------------
+
+
+def _seed_disk_run(tmp_path, run_id: str, result: dict) -> None:
+    rd = tmp_path / f"2026-06-21_png-shader_single_run_{run_id}"
+    rd.mkdir(parents=True)
+    (rd / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    append_run_created(
+        RunLineageRecord(
+            run_id=run_id, root_run_id=run_id, parent_run_id=None,
+            source_checkpoint_id=None, source_checkpoint_label=None, mode=None,
+            feedback=None, title=None, status="completed", run_dir=str(rd),
+            created_at=1.0,
+        ),
+        path=store._RUN_INDEX_PATH,
+    )
+
+
+def test_status_rehydrates_completed_run_from_disk_on_store_miss(tmp_path):
+    _run_store.clear()
+    client = _client()
+    _seed_disk_run(tmp_path, "diskrun", {
+        "run_id": "diskrun",
+        "selected_glsl": "void main(){}",
+        "scoreboard": {"selected_id": "seed_0"},
+        "quality_router": {"final_score": 0.9},
+        "status": "completed",
+    })
+    assert "diskrun" not in _run_store  # genuinely not in memory
+
+    resp = client.get("/png-shader/status/diskrun")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "completed"
+    assert body["selected_glsl"] == "void main(){}"
+    assert body["quality_router"]["final_score"] == 0.9
+
+
+def test_status_still_404s_for_truly_unknown_run(tmp_path):
+    _run_store.clear()
+    client = _client()
+    resp = client.get("/png-shader/status/does_not_exist")
+    assert resp.status_code == 404

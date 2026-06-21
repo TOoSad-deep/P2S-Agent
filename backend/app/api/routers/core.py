@@ -235,6 +235,11 @@ async def get_status(run_id: str) -> dict:
     the mutable store entry (Bug 4)."""
     result = store._snapshot_run(run_id)
     if result is None:
+        # Run fell out of the in-memory store (LRU eviction at capacity, or a
+        # process restart / uvicorn --reload). Rebuild it from the persisted
+        # run_dir so the UI can still load the result instead of going blank.
+        result = store.rehydrate_run(run_id)
+    if result is None:
         raise HTTPException(
             status_code=404,
             detail=f"run_id '{run_id}' not found",

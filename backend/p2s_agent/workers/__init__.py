@@ -34,6 +34,7 @@ from typing import Optional
 from p2s_agent import store
 from p2s_agent.config import ModelConfig, use_active_model
 from p2s_agent.core.logging_config import attach_run_log, log_event
+from p2s_agent.core.pipeline.artifacts import save_json
 from p2s_agent.core.pipeline.graph import run_png_shader_pipeline
 from p2s_agent.core.tracing import trace_context
 from p2s_agent.orchestration.checkpoints import save_timeline
@@ -268,6 +269,17 @@ def _run_png_shader_background(
                            if "lineage" in stored else {}),
                     }
                     store._store_run_locked(run_id, {**result_with_status, **preserved})
+                # Snapshot the canonical result to disk so /status can rebuild it
+                # after the run is evicted from the in-memory store or the process
+                # restarts. Best-effort: a write failure must not fail the run.
+                if final_run_dir:
+                    try:
+                        save_json(
+                            Path(final_run_dir) / "result.json",
+                            {**result_with_status, **preserved},
+                        )
+                    except Exception:
+                        logger.warning("save result.json failed", exc_info=True)
                 # Best-effort: close out a fusion plan record so its /fusions
                 # poll terminates instead of reporting 'running' forever (Bug 5).
                 _finalize_fusion_for_run(run_id, "completed")
