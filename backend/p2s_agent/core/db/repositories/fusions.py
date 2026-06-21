@@ -9,9 +9,9 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from app.db.repositories import _base
-from app.db.schema import fusion_plans as _fp
-from app.db.schema import fusion_regions as _fr
+from p2s_agent.core.db.repositories import _base
+from p2s_agent.core.db.schema import fusion_plans as _fp
+from p2s_agent.core.db.schema import fusion_regions as _fr
 
 _REGION_DEFAULTS = {
     "label": "", "source_run_id": "", "instruction": "",

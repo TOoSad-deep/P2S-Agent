@@ -1,8 +1,8 @@
 """runs table repository (thin wrappers over _base)."""
 from __future__ import annotations
 
-from app.db.repositories import _base
-from app.db.schema import runs as _runs
+from p2s_agent.core.db.repositories import _base
+from p2s_agent.core.db.schema import runs as _runs
 
 
 def upsert_run(engine, row: dict) -> None:

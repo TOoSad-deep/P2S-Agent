@@ -5,8 +5,8 @@ entity_type='preference'; this module only owns the profile row.
 """
 from __future__ import annotations
 
-from app.db.repositories import _base
-from app.db.schema import preference_profile as _pp
+from p2s_agent.core.db.repositories import _base
+from p2s_agent.core.db.schema import preference_profile as _pp
 
 # 表里除 id 外的列（save 时只取这些键，忽略外来键）
 _PROFILE_COLS = (

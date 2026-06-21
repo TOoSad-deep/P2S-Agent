@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.db.schema import events as _events
+from p2s_agent.core.db.schema import events as _events
 
 
 def append_event(engine, *, entity_type: str, entity_id, event_type: str,

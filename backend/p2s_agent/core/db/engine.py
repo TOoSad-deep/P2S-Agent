@@ -11,10 +11,10 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 
-from app.db.schema import metadata
+from p2s_agent.core.db.schema import metadata
 
-# backend/ 根：engine.py 在 backend/app/db/ → parents[2] == backend/
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "p2s.db"
+# backend/ 根：engine.py 在 backend/p2s_agent/core/db/ → parents[3] == backend/
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "p2s.db"
 
 _engines: dict[str, Engine] = {}
 

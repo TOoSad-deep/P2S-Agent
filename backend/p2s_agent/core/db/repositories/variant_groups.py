@@ -1,8 +1,8 @@
 """variant_groups table repository."""
 from __future__ import annotations
 
-from app.db.repositories import _base
-from app.db.schema import variant_groups as _vg
+from p2s_agent.core.db.repositories import _base
+from p2s_agent.core.db.schema import variant_groups as _vg
 
 
 def upsert_group(engine, row: dict) -> None:

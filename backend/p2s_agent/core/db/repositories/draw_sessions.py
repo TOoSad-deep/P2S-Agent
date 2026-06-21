@@ -1,8 +1,8 @@
 """draw_sessions table repository."""
 from __future__ import annotations
 
-from app.db.repositories import _base
-from app.db.schema import draw_sessions as _ds
+from p2s_agent.core.db.repositories import _base
+from p2s_agent.core.db.schema import draw_sessions as _ds
 
 
 def upsert_session(engine, row: dict) -> None:
