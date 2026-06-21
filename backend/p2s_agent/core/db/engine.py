@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -17,6 +18,7 @@ from p2s_agent.core.db.schema import metadata
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "p2s.db"
 
 _engines: dict[str, Engine] = {}
+_engines_lock = threading.Lock()
 
 
 def _resolve_db_url(override: "Path | str | None") -> str:
@@ -36,9 +38,9 @@ def _make_engine(url: str) -> Engine:
     @event.listens_for(engine, "connect")
     def _set_pragmas(dbapi_conn, _record):  # noqa: ANN001
         cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA busy_timeout=5000;")   # FIRST: lets journal_mode wait out a lock
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=NORMAL;")
-        cur.execute("PRAGMA busy_timeout=5000;")
         cur.execute("PRAGMA foreign_keys=ON;")
         cur.close()
 
@@ -47,9 +49,18 @@ def _make_engine(url: str) -> Engine:
 
 def get_engine(override: "Path | str | None" = None) -> Engine:
     url = _resolve_db_url(override)
-    if url not in _engines:
-        _engines[url] = _make_engine(url)
-    return _engines[url]
+    eng = _engines.get(url)
+    if eng is None:
+        # Double-checked locking: without it, concurrent first-touch (FastAPI
+        # background workers) created duplicate engines/pools over the SAME
+        # sqlite file — leaking pooled connections and racing PRAGMA/create_all
+        # on a cold DB (which silently dropped the first writes).
+        with _engines_lock:
+            eng = _engines.get(url)
+            if eng is None:
+                eng = _make_engine(url)
+                _engines[url] = eng
+    return eng
 
 
 def init_db(engine: Engine | None = None) -> Engine:

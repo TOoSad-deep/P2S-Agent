@@ -35,7 +35,6 @@ from p2s_agent.orchestration.run_index import (
     build_branch_tree,
     load_run,
     load_run_family,
-    load_run_index,
     update_run_metadata,
 )
 from p2s_agent.core.logging_config import log_event, logging_context

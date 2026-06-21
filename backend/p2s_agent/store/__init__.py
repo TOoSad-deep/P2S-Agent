@@ -292,12 +292,11 @@ def rehydrate_run(run_id: str) -> Optional[dict]:
     degrade to a 404, never a 500.
     """
     try:
-        records = run_index.load_run_index(path=_RUN_INDEX_PATH)
+        rec = run_index.load_run(run_id, path=_RUN_INDEX_PATH)
     except Exception:
-        logger.warning("rehydrate_run: load_run_index failed", exc_info=True)
+        logger.warning("rehydrate_run: load_run failed", exc_info=True)
         return None
 
-    rec = records.get(run_id)
     if rec is None or not rec.run_dir:
         return None
     run_dir = Path(rec.run_dir)

@@ -181,35 +181,27 @@ def _merge_fields(record: RunLineageRecord, fields: dict[str, Any]) -> RunLineag
 
 
 # ---------------------------------------------------------------------------
-# Shadow SQLite mirror (additive; JSONL remains authoritative).
-# Best-effort: a DB failure NEVER breaks the JSONL write path or reads. Reads
-# still fold JSONL; this only populates the `runs` table so the eventual
-# read-cutover has live data. Known shadow-mode divergences (resolved at
-# read-cutover): update-before-create is dropped (no row to update),
-# terminal-status stickiness is not enforced DB-side, and compact/prune are
-# not mirrored.
+# Shadow SQLite mirror + read-cutover.
+# Writes mirror into the `runs` table (best-effort: a DB failure NEVER breaks
+# the JSONL write path). Reads are DB-first but UNION with the JSONL fold so a
+# run present in the JSONL yet missing from the DB (orphan update, swallowed /
+# failed shadow write) is never lost. Terminal-status stickiness is enforced on
+# the DB write; prune is mirrored to the DB.
 # ---------------------------------------------------------------------------
 _SHADOW_DB_ENABLED = True
-_SHADOW_INIT_LOCK = threading.Lock()
-_SHADOW_INITED: set[str] = set()
 
 
 def _shadow_engine(path: Path | str | None):
-    """Engine for the shadow DB sitting BESIDE the JSONL (never the same file).
+    """Engine for the shadow DB beside the JSONL (path=None → canonical DB;
+    path=<jsonl file> → <its parent dir>/p2s.db).
 
-    path=None → canonical app DB (backend/data/p2s.db);
-    path=<jsonl file> → <its parent dir>/p2s.db (per-test isolation).
-    Lazily ensures the schema exists (idempotent).
+    Delegates to the shared ``shadow.shadow_engine`` so there is exactly ONE
+    lazy-init guard per DB file. Previously this module and shadow.py each held
+    their own init guard over the SAME file and could race on
+    ``metadata.create_all`` on a cold DB, silently dropping the first writes.
     """
-    from p2s_agent.core.db.engine import get_engine, init_db
-    eng = get_engine(None) if path is None else get_engine(Path(path).parent)
-    key = str(eng.url)
-    if key not in _SHADOW_INITED:
-        with _SHADOW_INIT_LOCK:
-            if key not in _SHADOW_INITED:
-                init_db(eng)  # create_all: only adds missing tables
-                _SHADOW_INITED.add(key)
-    return eng
+    from p2s_agent.core.db import shadow
+    return shadow.shadow_engine(None if path is None else Path(path).parent)
 
 
 def _shadow_upsert_created(record: RunLineageRecord, path: Path | str | None) -> None:
@@ -371,24 +363,30 @@ def _fold_index_file(resolved: Path) -> dict[str, RunLineageRecord]:
 
 
 def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
-    """Load the run index, preferring the SQLite ``runs`` table.
+    """Load the run index as the UNION of the SQLite ``runs`` table and the
+    JSONL fold.
 
-    Read-cutover: reads the DB first; falls back to folding the JSONL when the
-    DB read fails or returns empty (transitional until the JSONL retires).
+    The DB is the primary source; the JSONL fold fills in any run present on
+    disk but missing from the DB (orphan update, swallowed/failed shadow write),
+    so no completed run ever disappears from the run list / retention / overlays.
+    The DB wins on shared keys (it carries the post-stickiness current state).
     """
+    db: dict[str, RunLineageRecord] = {}
     try:
         from p2s_agent.core.db.repositories import runs as runs_repo
         rows = runs_repo.get_all_runs(_shadow_engine(path))
-        if rows:
-            return {rid: _dict_to_record(row) for rid, row in rows.items()}
+        db = {rid: _dict_to_record(row) for rid, row in rows.items()}
     except Exception:
         logger.debug("load_run_index: DB read failed; folding JSONL", exc_info=True)
-    return _fold_jsonl_cached(path=path)
+    merged = _fold_jsonl_cached(path=path)  # JSONL fills DB gaps...
+    merged.update(db)                       # ...but the DB wins on conflict
+    return merged
 
 
 def load_run(run_id: str, *, path: Path | str | None = None) -> "RunLineageRecord | None":
     """Load a single run by id from the DB (indexed PK) without scanning the
-    whole index. Falls back to the full fold when the DB misses/errors."""
+    whole index. On a DB miss/error, falls back to the JSONL fold for that id so
+    a JSONL-only run is still found."""
     try:
         from p2s_agent.core.db.repositories import runs as runs_repo
         row = runs_repo.get_run(_shadow_engine(path), run_id)
@@ -396,13 +394,21 @@ def load_run(run_id: str, *, path: Path | str | None = None) -> "RunLineageRecor
             return _dict_to_record(row)
     except Exception:
         logger.debug("load_run: DB read failed; folding JSONL", exc_info=True)
-    return load_run_index(path=path).get(run_id)
+    return _fold_jsonl_cached(path=path).get(run_id)
 
 
 def load_run_family(run_id: str, *, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
     """Load only the runs sharing *run_id*'s root (indexed by root_run_id) — for
-    building a branch tree without scanning the whole index. Falls back to the
-    full index when the DB misses/errors."""
+    building a branch tree without scanning the whole index.
+
+    The HIT path returns the DB family only (kept O(family) for the branch-tree
+    endpoint), so its completeness depends on the DB being complete — which the
+    engine/init-guard concurrency fixes ensure in normal operation. The MISS
+    path (anchor absent from the DB) folds the full index via load_run_index
+    (DB ∪ JSONL). A run lost to a rare mid-session DB-write failure is therefore
+    never dropped from load_run_index / load_run / the JSONL — it would only be
+    transiently absent from this by-root tree until its next successful DB write.
+    """
     try:
         from p2s_agent.core.db.repositories import runs as runs_repo
         eng = _shadow_engine(path)
@@ -543,34 +549,37 @@ def prune_run_index(run_ids: set[str], *, path: Path | str | None = None) -> int
     """
     resolved = _resolve_path(path)
 
-    if not run_ids or not resolved.exists():
+    if not run_ids:
         return 0
 
-    tmp = resolved.with_suffix(resolved.suffix + ".tmp")
-    bak = resolved.with_suffix(resolved.suffix + ".bak")
+    removed = 0
+    if resolved.exists():
+        tmp = resolved.with_suffix(resolved.suffix + ".tmp")
+        bak = resolved.with_suffix(resolved.suffix + ".bak")
 
-    # Hold the append lock across read+write so no append interleaves with the
-    # snapshot (mirrors compact_run_index).
-    with _APPEND_LOCK:
-        records = _fold_index_file(resolved)
-        removed = sum(1 for rid in run_ids if rid in records)
-        if removed == 0:
-            return 0
+        # Hold the append lock across read+write so no append interleaves with
+        # the snapshot (mirrors compact_run_index).
+        with _APPEND_LOCK:
+            records = _fold_index_file(resolved)
+            removed = sum(1 for rid in run_ids if rid in records)
+            if removed:
+                with tmp.open("w", encoding="utf-8") as fh:
+                    for rid, rec in records.items():
+                        if rid in run_ids:
+                            continue
+                        line_data: dict[str, Any] = {"event": "created", "v": SCHEMA_VERSION}
+                        line_data.update(_record_to_dict(rec))
+                        fh.write(json.dumps(line_data, ensure_ascii=False) + "\n")
+                shutil.copy2(resolved, bak)
+                os.replace(tmp, resolved)
 
-        with tmp.open("w", encoding="utf-8") as fh:
-            for rid, rec in records.items():
-                if rid in run_ids:
-                    continue
-                line_data: dict[str, Any] = {"event": "created", "v": SCHEMA_VERSION}
-                line_data.update(_record_to_dict(rec))
-                fh.write(json.dumps(line_data, ensure_ascii=False) + "\n")
+        if removed:
+            with _CACHE_LOCK:
+                _INDEX_CACHE.pop(str(resolved), None)
 
-        shutil.copy2(resolved, bak)
-        os.replace(tmp, resolved)
-
-    with _CACHE_LOCK:
-        _INDEX_CACHE.pop(str(resolved), None)
-
+    # Always mirror the prune into the DB — even when the run is absent from the
+    # JSONL (removed==0) or the JSONL file is gone — so a DB-only run can't be
+    # resurrected by DB-first reads.
     _shadow_prune(run_ids, path)
     return removed
 
