@@ -251,6 +251,30 @@ export default function BranchCanvasWorkspace({
     [branchInfo?.active_run_id, runId],
   );
 
+  // ── Derive activeDrawId from the active run's draw_session_id (BUG-006) ─────
+  // Draw-card runs (those carrying a draw_session_id) are excluded from the
+  // regular graph pass and only reappear via buildDrawSessionModel once
+  // `drawSession` is loaded. A live draw action sets activeDrawId directly, but
+  // switching to a draw-card run from the branch list (or after a reload) does
+  // not — leaving the active run invisible in the graph. Derive the pointer
+  // from the branch tree so the run's draw session is fetched and its cards
+  // render. Only acts when the active run IS a draw card; otherwise it leaves
+  // a live action's pointer untouched.
+  useEffect(() => {
+    const tree = branchInfo?.tree;
+    if (!tree) return;
+    let drawId: string | null = null;
+    (function walk(node: BranchTreeResponse["tree"]): void {
+      if (drawId) return;
+      if (node.run_id === activeRunId) {
+        drawId = node.draw_session_id ?? null;
+        return;
+      }
+      for (const child of node.children) walk(child);
+    })(tree);
+    if (drawId && drawId !== activeDrawId) setActiveDrawId(drawId);
+  }, [activeRunId, branchInfo?.tree, activeDrawId]);
+
   // ── Derived: favoriteRunIds ────────────────────────────────────────────────
   const favoriteRunIds = useMemo<Set<string>>(() => {
     if (!branchInfo) return new Set();

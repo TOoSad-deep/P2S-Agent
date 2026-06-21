@@ -283,7 +283,7 @@ function Vec2PairControl({ param, currentGlsl, onGlslChange }: {
           <input
             type="number"
             value={current[idx].toFixed(3)}
-            onChange={(e) => handleChange(idx, parseFloat(e.target.value) || 0)}
+            onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) handleChange(idx, v); }}
             className="w-16 px-1 py-0.5 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded text-xs font-mono text-[var(--text-primary)] text-right focus:border-[var(--accent-primary)] focus:outline-none"
             step={ranges[idx].step}
           />
@@ -329,7 +329,7 @@ function Vec4GenericControl({ param, currentGlsl, onGlslChange }: {
           <input
             type="number"
             value={v.toFixed(3)}
-            onChange={(e) => handleChange(idx, parseFloat(e.target.value) || 0)}
+            onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) handleChange(idx, v); }}
             className="w-16 px-1 py-0.5 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded text-xs font-mono text-[var(--text-primary)] text-right focus:border-[var(--accent-primary)] focus:outline-none"
             step={ranges[idx].step}
           />
@@ -372,7 +372,7 @@ function SliderControl({ param, currentGlsl, onGlslChange }: {
         <input
           type="number"
           value={currentVal.toFixed(3)}
-          onChange={(e) => handleChange(parseFloat(e.target.value) || 0)}
+          onChange={(e) => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) handleChange(v); }}
           className="w-16 px-1 py-0.5 bg-[var(--bg-tertiary)] border border-[var(--border-color)]
                      rounded text-xs font-mono text-[var(--text-primary)] text-right
                      focus:border-[var(--accent-primary)] focus:outline-none"

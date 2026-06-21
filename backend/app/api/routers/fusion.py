@@ -11,7 +11,6 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from p2s_agent.orchestration.checkpoints import _selected_candidate
 from p2s_agent.orchestration.human_constraints import (
     HumanConstraintSpec,
     RegionConstraint,
@@ -124,14 +123,10 @@ async def region_mask(run_id: str, payload: dict) -> dict:
     if run_dir:
         try:
             reference_path = Path(run_dir) / "reference_input.png"
-            # Resolve selected render: reuse the same logic as GET /artifacts/selected_render.
-            # That maps to candidate:selected + kind=render → <run_dir>/candidates/<selected_id>_render.png
-            selected_cand = _selected_candidate(stored)
-            render_path: Path | None = None
-            if selected_cand is not None:
-                sid = selected_cand.get("id")
-                if sid:
-                    render_path = Path(run_dir) / "candidates" / f"{sid}_render.png"
+            # Resolve selected render via the canonical helper, which accepts
+            # either render-backend spelling (<id>_render.png / <id>_webgl.png)
+            # and returns the existing path or None.
+            render_path = sessions._resolve_run_render(stored, run_dir)
 
             if (
                 reference_path.exists()

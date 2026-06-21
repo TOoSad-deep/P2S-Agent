@@ -294,7 +294,12 @@ export function updateShaderParam(
     return code.replace(defineLineRegex(param.name), `$1${literal}`);
   }
 
-  const valueStr = Array.isArray(newValue) ? newValue.join(', ') : String(newValue);
+  // Scalar `float` defines: emit a GLSL float literal (e.g. 0 → "0.0"), never a
+  // bare int. GLSL ES is strictly typed — an int literal in float math throws
+  // `'*' : wrong operand types` and breaks shader compilation (BUG-003).
+  const valueStr = Array.isArray(newValue)
+    ? newValue.map(formatComponent).join(', ')
+    : formatComponent(newValue);
   return code.replace(defineLineRegex(param.name), `$1${valueStr}`);
 }
 

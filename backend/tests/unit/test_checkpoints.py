@@ -505,6 +505,48 @@ def test_resolve_artifact_path_stays_inside_run_dir(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# BUG-005: render artifacts may be written as <id>_webgl.png (WebGL-scored
+# GLSL candidates) instead of <id>_render.png (DSL-rasterized candidates).
+# The resolver must accept either spelling.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_artifact_selected_render_falls_back_to_webgl(tmp_path):
+    """A GLSL candidate scored via WebGL writes <id>_webgl.png. selected_render
+    must resolve to it when the _render.png variant is absent."""
+    (tmp_path / "candidates").mkdir()
+    (tmp_path / "candidates" / "llm_0_webgl.png").write_bytes(b"\x89PNG")
+    p = resolve_checkpoint_artifact(_result(), "candidate:selected", "render", run_dir=tmp_path)
+    assert p.name == "llm_0_webgl.png"
+    assert p.exists()
+
+
+def test_resolve_artifact_named_candidate_render_falls_back_to_webgl(tmp_path):
+    """A non-selected candidate's render also accepts the _webgl.png spelling."""
+    (tmp_path / "candidates").mkdir()
+    (tmp_path / "candidates" / "cv_0_webgl.png").write_bytes(b"\x89PNG")
+    p = resolve_checkpoint_artifact(_result(), "candidate:cv_0", "render", run_dir=tmp_path)
+    assert p.name == "cv_0_webgl.png"
+
+
+def test_resolve_artifact_render_prefers_render_png_when_both_exist(tmp_path):
+    """When both spellings exist, the canonical _render.png wins."""
+    (tmp_path / "candidates").mkdir()
+    (tmp_path / "candidates" / "llm_0_render.png").write_bytes(b"\x89PNG")
+    (tmp_path / "candidates" / "llm_0_webgl.png").write_bytes(b"\x89PNG")
+    p = resolve_checkpoint_artifact(_result(), "candidate:selected", "render", run_dir=tmp_path)
+    assert p.name == "llm_0_render.png"
+
+
+def test_resolve_artifact_render_defaults_to_render_png_when_neither_exists(tmp_path):
+    """Contract preserved: with neither file present, return the canonical
+    _render.png path so the caller's 404 target stays stable."""
+    (tmp_path / "candidates").mkdir()
+    p = resolve_checkpoint_artifact(_result(), "candidate:selected", "render", run_dir=tmp_path)
+    assert p.name == "llm_0_render.png"
+
+
+# ---------------------------------------------------------------------------
 # Important 1: build_timeline selected candidate must be first among candidates
 # ---------------------------------------------------------------------------
 

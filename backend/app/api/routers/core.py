@@ -20,6 +20,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
+from p2s_agent.config import use_active_model
 from p2s_agent.core.llm.model_resolver import ModelResolutionError, resolve_model_config
 from p2s_agent.orchestration.checkpoints import (
     CheckpointError,

@@ -277,6 +277,31 @@ _SUFFIX_ALLOWLIST = {".png", ".json", ".glsl", ".txt"}
 _VALID_ARTIFACT_KINDS = {"shader", "render", "llm_io"}
 
 
+def candidate_render_relative(base: Path, candidate_id: str) -> Path:
+    """Return the run-relative render path for a candidate, accepting either
+    render-backend spelling.
+
+    The scoring pipeline writes a candidate's render under one of two names
+    depending on the backend: DSL-rasterized candidates produce
+    ``candidates/<id>_render.png`` while GLSL candidates scored through the
+    WebGL preview produce ``candidates/<id>_webgl.png`` (see
+    ``core/pipeline/scoring.py``). Resolution must accept both.
+
+    Prefers the canonical ``_render.png``; falls back to ``_webgl.png`` only
+    when the canonical file is absent but the WebGL one exists. When neither
+    exists, returns the canonical ``_render.png`` path so callers get a stable,
+    sensible "not found" target. ``candidate_id`` must already be validated by
+    the caller (it is appended verbatim to a fixed suffix).
+    """
+    primary = Path("candidates") / f"{candidate_id}_render.png"
+    if (base / primary).exists():
+        return primary
+    webgl = Path("candidates") / f"{candidate_id}_webgl.png"
+    if (base / webgl).exists():
+        return webgl
+    return primary
+
+
 def build_timeline(result: dict, *, run_id: str | None = None) -> list[dict]:
     """Build a rich ordered list of CheckpointTimelineEntry dicts.
 
@@ -481,7 +506,7 @@ def resolve_checkpoint_artifact(
                     f"{checkpoint_id}+render: no selected candidate found in scoreboard"
                 )
             sid = selected.get("id")
-            relative = Path("candidates") / f"{sid}_render.png"
+            relative = candidate_render_relative(base, sid)
         else:  # llm_io
             raise CheckpointError(
                 f"{checkpoint_id}+{kind}: no llm_io file for selected candidate"
@@ -502,7 +527,7 @@ def resolve_checkpoint_artifact(
                 f"unknown candidate id {candidate_id!r} (not in scoreboard)"
             )
         if kind == "render":
-            relative = Path("candidates") / f"{candidate_id}_render.png"
+            relative = candidate_render_relative(base, candidate_id)
         elif kind == "llm_io":
             relative = Path("candidates") / f"{candidate_id}.json"
         else:  # shader — candidate GLSL is inline, no file

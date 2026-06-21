@@ -1064,6 +1064,80 @@ def test_artifacts_422_malformed_checkpoint_prefix(tmp_path, monkeypatch):
     assert resp.status_code == 422
 
 
+def test_artifacts_selected_render_serves_webgl_named_file(tmp_path, monkeypatch):
+    """BUG-005: a GLSL candidate scored via the WebGL backend writes
+    candidates/<id>_webgl.png, not <id>_render.png. selected_render must serve
+    that file instead of 404ing."""
+    _run_store.clear()
+    idx = str(tmp_path / "ri.jsonl")
+    monkeypatch.setattr("p2s_agent.store._RUN_INDEX_PATH", idx)
+
+    parent_dir = _seed_parent(tmp_path)  # selected candidate id = llm_0
+    cand_dir = parent_dir / "candidates"
+    cand_dir.mkdir(parents=True, exist_ok=True)
+    # Only the WebGL-named render exists on disk.
+    (cand_dir / "llm_0_webgl.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    client = _client()
+    resp = client.get("/png-shader/runs/run_parent/artifacts/selected_render")
+    assert resp.status_code == 200, resp.text
+
+
+def test_resolve_run_render_accepts_webgl_named_file(tmp_path):
+    """BUG-005: the fusion render resolver must find <id>_webgl.png (WebGL-scored
+    candidates), not only <id>_render.png — else fusion compositing silently
+    drops a previewable run."""
+    from p2s_agent.orchestration.sessions import _resolve_run_render
+
+    run_dir = tmp_path / "run_x"
+    (run_dir / "candidates").mkdir(parents=True)
+    (run_dir / "candidates" / "llm_0_webgl.png").write_bytes(b"\x89PNG")
+    stored = {
+        "scoreboard": {
+            "selected_id": "llm_0",
+            "candidates": [{"id": "llm_0", "selected": True, "previewable": True}],
+        },
+    }
+    p = _resolve_run_render(stored, str(run_dir))
+    assert p is not None
+    assert p.name == "llm_0_webgl.png"
+
+
+# --- /parameterize ---
+
+def test_parameterize_resolves_use_active_model(monkeypatch):
+    """BUG-002: parameterize_png_shader references use_active_model, which must
+    be imported in app.api.routers.core. Guards against a 500
+    'name use_active_model is not defined'."""
+    import p2s_agent.core.candidates.llm_scene as llm_scene
+    import p2s_agent.core.render.shader_validator as shader_validator
+
+    monkeypatch.setattr(
+        llm_scene,
+        "parameterize_glsl",
+        lambda glsl: {
+            "glsl": glsl,
+            "tunable_parameters": [],
+            "param_count_before": 0,
+            "param_count_after": 0,
+            "postprocess_warnings": [],
+        },
+    )
+    monkeypatch.setattr(
+        shader_validator,
+        "validate_shader_static",
+        lambda src: {"valid": True, "warnings": [], "errors": []},
+    )
+
+    client = _client()
+    resp = client.post(
+        "/png-shader/parameterize/run_unknown",
+        data={"glsl": "void main(){ gl_FragColor = vec4(1.0); }"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "use_active_model" not in resp.text
+
+
 # --- save_timeline wiring ---
 
 def test_save_timeline_written_on_success(tmp_path, monkeypatch):

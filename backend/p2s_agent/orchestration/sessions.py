@@ -35,6 +35,7 @@ from p2s_agent.core.validation import coerce_int
 from p2s_agent.orchestration.checkpoints import (
     CheckpointError,
     _selected_candidate,
+    candidate_render_relative,
     checkpoint_metadata,
     list_checkpoints,
     resolve_checkpoint,
@@ -483,7 +484,10 @@ def _fusion_artifacts_dir(fusion_id: str) -> Path:
 def _resolve_run_render(stored: dict, run_dir: "str | None") -> "Path | None":
     """Resolve a run's selected render PNG, mirroring the region-mask endpoint.
 
-    Returns the path to ``<run_dir>/candidates/<selected_id>_render.png`` if it
+    Returns the path to the selected candidate's render under
+    ``<run_dir>/candidates/`` — accepting either render-backend spelling
+    (``<id>_render.png`` for DSL-rasterized candidates or ``<id>_webgl.png``
+    for WebGL-scored GLSL candidates, see ``candidate_render_relative``) — if it
     exists, else None.
     """
     if not run_dir:
@@ -494,7 +498,8 @@ def _resolve_run_render(stored: dict, run_dir: "str | None") -> "Path | None":
     sid = selected_cand.get("id")
     if not sid:
         return None
-    render_path = Path(run_dir) / "candidates" / f"{sid}_render.png"
+    base = Path(run_dir)
+    render_path = base / candidate_render_relative(base, sid)
     return render_path if render_path.exists() else None
 
 

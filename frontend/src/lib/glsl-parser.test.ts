@@ -62,6 +62,23 @@ describe("updateShaderParam", () => {
     expect(out).toContain("#define AXB 2.0");
   });
 
+  it("emits a GLSL float literal for whole-number scalar values (BUG-003)", () => {
+    // GLSL ES is strictly typed: `0` is an int literal and breaks float math
+    // (`'*' : wrong operand types`). A scalar #define edited to a whole number
+    // must stay a float (`0.0`), matching how vec components are written.
+    const code = "#define CENTER_X 0.5";
+    const param = floatDefine("CENTER_X", 0.5);
+    expect(updateShaderParam(code, param, 0)).toBe("#define CENTER_X 0.0");
+    expect(updateShaderParam(code, param, 1)).toBe("#define CENTER_X 1.0");
+    expect(updateShaderParam(code, param, 2)).toBe("#define CENTER_X 2.0");
+  });
+
+  it("preserves fractional scalar values precisely", () => {
+    const code = "#define K 0.5";
+    const param = floatDefine("K", 0.5);
+    expect(updateShaderParam(code, param, 0.25)).toBe("#define K 0.25");
+  });
+
   it("updates a vec define and leaves a name-prefixed sibling intact", () => {
     const code = [
       "#define CENTER_OFFSET vec2(1.0, 2.0)",
