@@ -181,6 +181,58 @@ def _merge_fields(record: RunLineageRecord, fields: dict[str, Any]) -> RunLineag
 
 
 # ---------------------------------------------------------------------------
+# Shadow SQLite mirror (additive; JSONL remains authoritative).
+# Best-effort: a DB failure NEVER breaks the JSONL write path or reads. Reads
+# still fold JSONL; this only populates the `runs` table so the eventual
+# read-cutover has live data. Known shadow-mode divergences (resolved at
+# read-cutover): update-before-create is dropped (no row to update),
+# terminal-status stickiness is not enforced DB-side, and compact/prune are
+# not mirrored.
+# ---------------------------------------------------------------------------
+_SHADOW_DB_ENABLED = True
+_SHADOW_INIT_LOCK = threading.Lock()
+_SHADOW_INITED: set[str] = set()
+
+
+def _shadow_engine(path: Path | str | None):
+    """Engine for the shadow DB sitting BESIDE the JSONL (never the same file).
+
+    path=None → canonical app DB (backend/data/p2s.db);
+    path=<jsonl file> → <its parent dir>/p2s.db (per-test isolation).
+    Lazily ensures the schema exists (idempotent).
+    """
+    from p2s_agent.core.db.engine import get_engine, init_db
+    eng = get_engine(None) if path is None else get_engine(Path(path).parent)
+    key = str(eng.url)
+    if key not in _SHADOW_INITED:
+        with _SHADOW_INIT_LOCK:
+            if key not in _SHADOW_INITED:
+                init_db(eng)  # create_all: only adds missing tables
+                _SHADOW_INITED.add(key)
+    return eng
+
+
+def _shadow_upsert_created(record: RunLineageRecord, path: Path | str | None) -> None:
+    if not _SHADOW_DB_ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import runs as runs_repo
+        runs_repo.upsert_run(_shadow_engine(path), asdict(record))
+    except Exception:
+        logger.debug("run_index shadow upsert (created) failed", exc_info=True)
+
+
+def _shadow_update(run_id: str, fields: dict[str, Any], path: Path | str | None) -> None:
+    if not _SHADOW_DB_ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import runs as runs_repo
+        runs_repo.update_run(_shadow_engine(path), run_id, fields)
+    except Exception:
+        logger.debug("run_index shadow update failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -195,6 +247,7 @@ def append_run_created(record: RunLineageRecord, *, path: Path | str | None = No
     data: dict[str, Any] = {"event": "created", "v": SCHEMA_VERSION}
     data.update(_record_to_dict(record))
     _append_line(data, resolved)
+    _shadow_upsert_created(record, path)
 
 
 def append_run_updated(
@@ -212,6 +265,7 @@ def append_run_updated(
     data: dict[str, Any] = {"event": "updated", "v": SCHEMA_VERSION, "run_id": run_id}
     data.update(fields)
     _append_line(data, resolved)
+    _shadow_update(run_id, fields, path)
 
 
 def _fold_index_file(resolved: Path) -> dict[str, RunLineageRecord]:
