@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from p2s_agent.core.db import shadow
 from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT, save_json
 from p2s_agent.core.pipeline.region_types import FusionRegion  # re-exported for back-compat
 
@@ -83,6 +84,7 @@ def save_plan(
     fusions_dir = _resolve_fusions_dir(root)
     target = fusions_dir / f"{record.fusion_id}.json"
     save_json(target, dataclasses.asdict(record))
+    shadow.mirror_fusion(root, record)
     return target
 
 
@@ -197,6 +199,7 @@ def append_plan_event(
     with _EVENTS_LOCK:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+    shadow.mirror_fusion_event(root, fusion_id, event)
 
 
 def load_plan_events(

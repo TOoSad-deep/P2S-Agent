@@ -27,6 +27,7 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
+from p2s_agent.core.db import shadow
 from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT, save_json
 from p2s_agent.orchestration.variant_groups import aggregate_group_status
 
@@ -134,6 +135,7 @@ def save_session(
     sessions_dir = _resolve_sessions_dir(root)
     target = sessions_dir / f"{record.draw_id}.json"
     save_json(target, dataclasses.asdict(record))
+    shadow.mirror_session(root, record)
     return target
 
 
@@ -211,6 +213,7 @@ def append_session_event(
     with _EVENTS_LOCK:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+    shadow.mirror_session_event(root, draw_id, event)
 
 
 def load_session_events(

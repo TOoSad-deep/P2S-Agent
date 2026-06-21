@@ -24,6 +24,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from p2s_agent.core.db import shadow
 from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT, save_json
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,7 @@ def append_preference_event(
     with _EVENTS_LOCK:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+    shadow.mirror_pref_event(root, event)
 
 
 def load_preference_events(
@@ -204,6 +206,7 @@ def save_profile(profile: dict, *, root: "Path | str | None" = None) -> Path:
     prefs_dir = _resolve_prefs_dir(root)
     target = prefs_dir / "profile.json"
     save_json(target, profile)
+    shadow.mirror_profile(root, profile)
     return target
 
 

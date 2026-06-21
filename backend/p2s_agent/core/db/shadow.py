@@ -45,3 +45,83 @@ def _ts(event: dict) -> float:
     """Best-effort timestamp extraction from an event dict (defaults to 0.0)."""
     v = event.get("ts", event.get("timestamp", 0.0))
     return float(v) if isinstance(v, (int, float)) else 0.0
+
+
+def _mirror_event(results_root, entity_type, entity_id, event, event_type) -> None:
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import events as _ev
+        _ev.append_event(shadow_engine(results_root), entity_type=entity_type,
+                         entity_id=entity_id, event_type=event_type,
+                         payload=event, ts=_ts(event))
+    except Exception:
+        logger.debug("%s shadow event failed", entity_type, exc_info=True)
+
+
+# --- variant_groups ---------------------------------------------------------
+def mirror_group(results_root, record) -> None:
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import variant_groups as _r
+        _r.upsert_group(shadow_engine(results_root), dataclasses.asdict(record))
+    except Exception:
+        logger.debug("variant_group shadow upsert failed", exc_info=True)
+
+
+def mirror_group_event(results_root, group_id, event) -> None:
+    _mirror_event(results_root, "variant_group", group_id, event, str(event.get("type", "")))
+
+
+# --- draw_sessions ----------------------------------------------------------
+def mirror_session(results_root, record) -> None:
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import draw_sessions as _r
+        _r.upsert_session(shadow_engine(results_root), dataclasses.asdict(record))
+    except Exception:
+        logger.debug("draw_session shadow upsert failed", exc_info=True)
+
+
+def mirror_session_event(results_root, draw_id, event) -> None:
+    _mirror_event(results_root, "draw_session", draw_id, event, str(event.get("type", "")))
+
+
+# --- preferences ------------------------------------------------------------
+def mirror_profile(results_root, profile) -> None:
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import preferences as _r
+        _r.save_profile(shadow_engine(results_root), profile)
+    except Exception:
+        logger.debug("preference profile shadow save failed", exc_info=True)
+
+
+def mirror_pref_event(results_root, event) -> None:
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import events as _ev
+        _ev.append_event(shadow_engine(results_root), entity_type="preference",
+                         entity_id=None, event_type=event.event_type,
+                         payload=dataclasses.asdict(event), ts=event.timestamp)
+    except Exception:
+        logger.debug("preference event shadow failed", exc_info=True)
+
+
+# --- fusion_plans -----------------------------------------------------------
+def mirror_fusion(results_root, record) -> None:
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import fusions as _r
+        _r.upsert_fusion(shadow_engine(results_root), dataclasses.asdict(record))
+    except Exception:
+        logger.debug("fusion shadow upsert failed", exc_info=True)
+
+
+def mirror_fusion_event(results_root, fusion_id, event) -> None:
+    _mirror_event(results_root, "fusion", fusion_id, event, str(event.get("type", "")))

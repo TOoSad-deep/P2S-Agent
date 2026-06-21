@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from p2s_agent.core.db import shadow
 from p2s_agent.core.pipeline.artifacts import DEFAULT_RESULTS_ROOT, save_json
 
 # ---------------------------------------------------------------------------
@@ -195,6 +196,7 @@ def save_group(
     groups_dir = _resolve_groups_dir(root)
     target = groups_dir / f"{record.group_id}.json"
     save_json(target, dataclasses.asdict(record))
+    shadow.mirror_group(root, record)
     return target
 
 
@@ -260,6 +262,7 @@ def append_group_event(
     with _EVENTS_LOCK:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line)
+    shadow.mirror_group_event(root, group_id, event)
 
 
 def load_group_events(
