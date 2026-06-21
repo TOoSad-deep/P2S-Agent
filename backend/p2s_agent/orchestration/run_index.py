@@ -227,9 +227,27 @@ def _shadow_update(run_id: str, fields: dict[str, Any], path: Path | str | None)
         return
     try:
         from p2s_agent.core.db.repositories import runs as runs_repo
-        runs_repo.update_run(_shadow_engine(path), run_id, fields)
+        eng = _shadow_engine(path)
+        # Terminal-status stickiness (mirror the fold contract): a stale/out-of-order
+        # ``updated`` must not regress a terminal run to a non-terminal status.
+        if "status" in fields and fields["status"] not in _TERMINAL_STATUSES:
+            current = runs_repo.get_run(eng, run_id)
+            if current and current.get("status") in _TERMINAL_STATUSES:
+                fields = {k: v for k, v in fields.items() if k != "status"}
+        runs_repo.update_run(eng, run_id, fields)
     except Exception:
         logger.debug("run_index shadow update failed", exc_info=True)
+
+
+def _shadow_prune(run_ids, path: Path | str | None = None) -> None:
+    """Mirror a JSONL prune into the DB so DB reads don't resurrect dropped runs."""
+    if not _SHADOW_DB_ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import runs as runs_repo
+        runs_repo.delete_runs(_shadow_engine(path), run_ids)
+    except Exception:
+        logger.debug("run_index shadow prune failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +371,22 @@ def _fold_index_file(resolved: Path) -> dict[str, RunLineageRecord]:
 
 
 def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
+    """Load the run index, preferring the SQLite ``runs`` table.
+
+    Read-cutover: reads the DB first; falls back to folding the JSONL when the
+    DB read fails or returns empty (transitional until the JSONL retires).
+    """
+    try:
+        from p2s_agent.core.db.repositories import runs as runs_repo
+        rows = runs_repo.get_all_runs(_shadow_engine(path))
+        if rows:
+            return {rid: _dict_to_record(row) for rid, row in rows.items()}
+    except Exception:
+        logger.debug("load_run_index: DB read failed; folding JSONL", exc_info=True)
+    return _fold_jsonl_cached(path=path)
+
+
+def _fold_jsonl_cached(*, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
     """Read the JSONL file and fold all events into a dict of RunLineageRecord.
 
     Rules:
@@ -507,6 +541,7 @@ def prune_run_index(run_ids: set[str], *, path: Path | str | None = None) -> int
     with _CACHE_LOCK:
         _INDEX_CACHE.pop(str(resolved), None)
 
+    _shadow_prune(run_ids, path)
     return removed
 
 

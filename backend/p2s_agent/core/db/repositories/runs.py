@@ -19,3 +19,13 @@ def get_run(engine, run_id: str) -> "dict | None":
 
 def get_all_runs(engine) -> dict:
     return _base.get_all(engine, _runs, "run_id")
+
+
+def delete_runs(engine, run_ids) -> int:
+    """Delete the given run_ids; returns the number of rows removed."""
+    ids = list(run_ids)
+    if not ids:
+        return 0
+    with engine.begin() as conn:
+        res = conn.execute(_runs.delete().where(_runs.c.run_id.in_(ids)))
+        return res.rowcount

@@ -496,6 +496,7 @@ def test_draw_session_lineage_fields_survive_created_fold(tmp_path):
 def test_draw_card_index_int_coercion_from_string(tmp_path):
     """draw_card_index stored as string in JSONL is coerced back to int on load."""
     idx = tmp_path / "idx.jsonl"
+    from p2s_agent.orchestration.run_index import _fold_jsonl_cached as load_run_index  # read-flip: asserts the JSONL fold path
     rec = _record("ds-run-coerce")
     append_run_created(rec, path=idx)
     # Simulate a JSONL line where draw_card_index is serialised as a string.
@@ -662,6 +663,7 @@ def test_load_run_index_caches_when_file_unchanged(tmp_path, monkeypatch):
     import p2s_agent.orchestration.run_index as ri
 
     idx = tmp_path / "idx.jsonl"
+    from p2s_agent.orchestration.run_index import _fold_jsonl_cached as load_run_index  # read-flip: asserts the JSONL fold cache
     append_run_created(_record("c1", status="running"), path=idx)
     append_run_created(_record("c2", status="running"), path=idx)
 
@@ -703,6 +705,7 @@ def test_load_run_index_cache_isolated_per_path(tmp_path):
     """Caching must be keyed per path so two different files don't collide."""
     idx_a = tmp_path / "a.jsonl"
     idx_b = tmp_path / "b.jsonl"
+    from p2s_agent.orchestration.run_index import _fold_jsonl_cached as load_run_index  # read-flip: asserts per-file fold isolation
     append_run_created(_record("only-a", status="running"), path=idx_a)
     append_run_created(_record("only-b", status="running"), path=idx_b)
 
@@ -737,6 +740,7 @@ def test_malformed_line_emits_warning(tmp_path, caplog):
     import logging
 
     idx = tmp_path / "idx.jsonl"
+    from p2s_agent.orchestration.run_index import _fold_jsonl_cached as load_run_index  # read-flip: asserts JSONL malformed-line warning
     append_run_created(_record("good-1", status="running"), path=idx)
     with idx.open("a", encoding="utf-8") as fh:
         fh.write("{this is not valid json\n")
@@ -989,6 +993,7 @@ def test_load_run_index_empty_on_permission_error_during_read(tmp_path, monkeypa
     return the documented empty value instead of propagating into an HTTP 500.
     """
     idx = tmp_path / "idx.jsonl"
+    from p2s_agent.orchestration.run_index import _fold_jsonl_cached as load_run_index  # read-flip: asserts JSONL read-permission degradation
     append_run_created(_record("perm-read-1", status="running"), path=idx)
 
     real_open = Path.open
@@ -1006,6 +1011,7 @@ def test_load_run_index_empty_on_permission_error_during_read(tmp_path, monkeypa
 def test_load_run_index_empty_on_permission_error_during_stat(tmp_path, monkeypatch):
     """A PermissionError on stat() degrades to an empty index instead of a 500."""
     idx = tmp_path / "idx.jsonl"
+    from p2s_agent.orchestration.run_index import _fold_jsonl_cached as load_run_index  # read-flip: asserts JSONL stat-permission degradation
     append_run_created(_record("perm-stat-1", status="running"), path=idx)
 
     real_stat = Path.stat
