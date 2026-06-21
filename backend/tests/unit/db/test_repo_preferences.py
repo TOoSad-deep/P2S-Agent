@@ -1,5 +1,5 @@
 def test_profile_absent_then_save_load(repo_engine):
-    from app.db.repositories import preferences as pref
+    from p2s_agent.core.db.repositories import preferences as pref
     assert pref.load_profile(repo_engine) is None
     pref.save_profile(repo_engine, {
         "schema_version": 1, "updated_at": 5.0, "enabled": True,
@@ -14,8 +14,8 @@ def test_profile_absent_then_save_load(repo_engine):
 
 
 def test_save_profile_is_singleton(repo_engine):
-    from app.db.repositories import preferences as pref
-    from app.db.schema import preference_profile
+    from p2s_agent.core.db.repositories import preferences as pref
+    from p2s_agent.core.db.schema import preference_profile
     from sqlalchemy import select, func
     pref.save_profile(repo_engine, {"updated_at": 1.0, "enabled": True})
     pref.save_profile(repo_engine, {"updated_at": 2.0, "enabled": False})

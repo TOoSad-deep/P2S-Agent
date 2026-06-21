@@ -1,5 +1,5 @@
 def test_variant_group_roundtrip(repo_engine):
-    from app.db.repositories import variant_groups as vg
+    from p2s_agent.core.db.repositories import variant_groups as vg
     vg.upsert_group(repo_engine, {
         "group_id": "g1", "root_run_id": "r", "parent_run_id": "p",
         "source_checkpoint_id": "c", "variant_count": 3,
@@ -10,7 +10,7 @@ def test_variant_group_roundtrip(repo_engine):
 
 
 def test_draw_session_roundtrip(repo_engine):
-    from app.db.repositories import draw_sessions as ds
+    from p2s_agent.core.db.repositories import draw_sessions as ds
     ds.upsert_session(repo_engine, {
         "draw_id": "d1", "root_run_id": "r", "parent_run_id": "p",
         "source_checkpoint_id": "c", "requested_count": 8,

@@ -7,10 +7,10 @@
 import os
 import sys
 
-# 让 `import app.db...` 在以脚本方式运行时也可用（backend/ 入 sys.path）。
+# 让 `import p2s_agent.core.db...` 在以脚本方式运行时也可用（backend/ 入 sys.path）。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.db.engine import DEFAULT_DB_PATH, get_engine, init_db  # noqa: E402
+from p2s_agent.core.db.engine import DEFAULT_DB_PATH, get_engine, init_db  # noqa: E402
 
 
 def main() -> None:

@@ -14,12 +14,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 让 alembic 能 import app.db（backend/ 入 sys.path）
+# 让 alembic 能 import p2s_agent.core.db（backend/ 入 sys.path）
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # backend/
-from app.db.schema import metadata as target_metadata  # noqa: E402
+from p2s_agent.core.db.schema import metadata as target_metadata  # noqa: E402
 
 # 允许测试/CI 通过环境变量覆盖目标库（默认取 alembic.ini 的 sqlalchemy.url）
 _override = os.environ.get("ALEMBIC_DB_URL")

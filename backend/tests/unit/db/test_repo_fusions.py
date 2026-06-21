@@ -7,7 +7,7 @@ def _plan(regions):
 
 
 def test_upsert_get_fusion_with_regions_ordered(repo_engine):
-    from app.db.repositories import fusions
+    from p2s_agent.core.db.repositories import fusions
     fusions.upsert_fusion(repo_engine, _plan([
         {"id": "reg2", "source_run_id": "s1", "geometry": {"x": 0, "y": 0, "w": 1, "h": 1}},
         {"id": "reg1", "source_run_id": "s1", "strength": 0.7},
@@ -20,7 +20,7 @@ def test_upsert_get_fusion_with_regions_ordered(repo_engine):
 
 
 def test_reupsert_replaces_regions(repo_engine):
-    from app.db.repositories import fusions
+    from p2s_agent.core.db.repositories import fusions
     fusions.upsert_fusion(repo_engine, _plan([{"id": "a", "source_run_id": "s1"},
                                               {"id": "b", "source_run_id": "s1"}]))
     fusions.upsert_fusion(repo_engine, _plan([{"id": "c", "source_run_id": "s1"}]))
@@ -29,5 +29,5 @@ def test_reupsert_replaces_regions(repo_engine):
 
 
 def test_get_missing_fusion_none(repo_engine):
-    from app.db.repositories import fusions
+    from p2s_agent.core.db.repositories import fusions
     assert fusions.get_fusion(repo_engine, "nope") is None

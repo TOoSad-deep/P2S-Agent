@@ -4,14 +4,14 @@ from sqlalchemy.exc import IntegrityError
 
 
 def _eng(tmp_path):
-    from app.db.engine import get_engine, init_db
+    from p2s_agent.core.db.engine import get_engine, init_db
     eng = get_engine(tmp_path)
     init_db(eng)
     return eng
 
 
 def test_fusion_region_cascade_delete(tmp_path):
-    from app.db.schema import fusion_plans, fusion_regions
+    from p2s_agent.core.db.schema import fusion_plans, fusion_regions
     eng = _eng(tmp_path)
     with eng.begin() as conn:
         conn.execute(insert(fusion_plans).values(
@@ -26,7 +26,7 @@ def test_fusion_region_cascade_delete(tmp_path):
 
 
 def test_preference_profile_singleton(tmp_path):
-    from app.db.schema import preference_profile
+    from p2s_agent.core.db.schema import preference_profile
     eng = _eng(tmp_path)
     with eng.begin() as conn:
         conn.execute(insert(preference_profile).values(id=1))
@@ -36,7 +36,7 @@ def test_preference_profile_singleton(tmp_path):
 
 
 def test_runs_defaults_applied(tmp_path):
-    from app.db.schema import runs
+    from p2s_agent.core.db.schema import runs
     eng = _eng(tmp_path)
     with eng.begin() as conn:
         conn.execute(insert(runs).values(

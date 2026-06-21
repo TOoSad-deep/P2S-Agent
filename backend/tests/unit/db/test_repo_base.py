@@ -1,6 +1,6 @@
 def test_upsert_insert_then_update(repo_engine):
-    from app.db.repositories import _base
-    from app.db.schema import runs
+    from p2s_agent.core.db.repositories import _base
+    from p2s_agent.core.db.schema import runs
     _base.upsert(repo_engine, runs, "run_id",
                  {"run_id": "a", "root_run_id": "a", "created_at": 1.0, "status": "pending"})
     _base.upsert(repo_engine, runs, "run_id",
@@ -10,8 +10,8 @@ def test_upsert_insert_then_update(repo_engine):
 
 
 def test_update_by_pk_partial(repo_engine):
-    from app.db.repositories import _base
-    from app.db.schema import runs
+    from p2s_agent.core.db.repositories import _base
+    from p2s_agent.core.db.schema import runs
     _base.upsert(repo_engine, runs, "run_id",
                  {"run_id": "b", "root_run_id": "b", "created_at": 1.0})
     n = _base.update_by_pk(repo_engine, runs, "run_id", "b", {"final_score": 0.9, "favorite": True})
@@ -21,8 +21,8 @@ def test_update_by_pk_partial(repo_engine):
 
 
 def test_get_all_keyed_by_pk(repo_engine):
-    from app.db.repositories import _base
-    from app.db.schema import runs
+    from p2s_agent.core.db.repositories import _base
+    from p2s_agent.core.db.schema import runs
     for rid in ("x", "y"):
         _base.upsert(repo_engine, runs, "run_id",
                      {"run_id": rid, "root_run_id": rid, "created_at": 1.0})
@@ -31,6 +31,6 @@ def test_get_all_keyed_by_pk(repo_engine):
 
 
 def test_get_by_pk_missing_returns_none(repo_engine):
-    from app.db.repositories import _base
-    from app.db.schema import runs
+    from p2s_agent.core.db.repositories import _base
+    from p2s_agent.core.db.schema import runs
     assert _base.get_by_pk(repo_engine, runs, "run_id", "nope") is None

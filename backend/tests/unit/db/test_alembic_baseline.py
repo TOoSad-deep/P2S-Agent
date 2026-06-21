@@ -17,6 +17,6 @@ def test_alembic_upgrade_head_builds_full_schema(tmp_path):
     assert result.returncode == 0, f"alembic upgrade failed:\n{result.stderr}"
 
     tables = set(inspect(create_engine(f"sqlite:///{db}")).get_table_names())
-    from app.db.schema import metadata
+    from p2s_agent.core.db.schema import metadata
     expected = set(metadata.tables.keys())
     assert expected.issubset(tables), f"missing tables: {expected - tables}"

@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, inspect
 def _fresh_engine():
     # 纯内存库，仅验证 DDL 结构（不涉及 PRAGMA/FK 行为）
     eng = create_engine("sqlite://")
-    from app.db.schema import metadata
+    from p2s_agent.core.db.schema import metadata
     metadata.create_all(eng)
     return eng
 
