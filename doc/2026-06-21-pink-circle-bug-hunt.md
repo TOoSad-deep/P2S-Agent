@@ -18,8 +18,182 @@ This pass used the pink bubble PNG to exercise the running Studio page, the `/pn
 | BUG-004 | High | **Deferred (documented)** | Evidence points to a screen-capture artifact, not a render bug; revisit only if reproduced in a clean browser session. |
 | BUG-005 | High | **Fixed** | Render resolution accepts either `_render.png` or `_webgl.png` across all three call sites. |
 | BUG-006 | High | **Fixed** | `activeDrawId` is now derived from the active run's `draw_session_id`, so a switched-to draw-card run reappears. |
+| BUG-007 | Medium | **Fixed** | A stale `?view=canvas` deep link with no run normalizes back to Studio (URL + page). |
+| BUG-008 | Low | **Fixed** | A default profile (`updated_at: 0.0`) renders "未更新 Never updated", not the 1970 epoch. |
+| BUG-009 | Medium | **Fixed** (layout) | Inspector panel stacks above the Preview dock so the branch-draft Submit stays clickable. Build-verified; visual confirmation pending a browser session. |
+| BUG-010 | High | **Fixed** | `refinement_summary.final_score`/`improved` now reconcile to the authoritative post-VLM-gate selected score. |
 
-Verification gate after the fixes: **1175 pytest + 127 vitest + `npm run build`**, all green. Each fix landed test-first (RED→GREEN) except the two component-level frontend changes (BUG-003 input guard, BUG-006 derivation), which the repo has no component-test harness for and were verified by `tsc` typecheck + build + reasoning (their trigger states require a full pipeline run with draw-session data the dev server can't synthesize cold).
+Verification gate after the round-1 fixes: **1175 pytest + 127 vitest + `npm run build`**, all green.
+Round-2 fixes (007–010) gate: **1176 pytest + 129 vitest + `npm run build`**, all green. Each fix landed test-first (RED→GREEN) except the two component-level frontend changes (BUG-003 input guard, BUG-006 derivation), which the repo has no component-test harness for and were verified by `tsc` typecheck + build + reasoning (their trigger states require a full pipeline run with draw-session data the dev server can't synthesize cold).
+
+## Follow-up Completeness Pass (2026-06-21)
+
+Scope: continued Computer Use testing on the running app at `http://localhost:5174/?view=canvas`, focusing on no-run Canvas entry, Studio configuration controls, preference profile UI, Seed GLSL, advanced strategy controls, and Canvas preview artifact availability. No model-consuming run was triggered and destructive preference actions were not clicked.
+
+Pass / stable observations:
+
+- Custom model form opens, shows label/model/base URL/API key fields, keeps "Add" disabled when required fields are empty, and exposes the local-browser API-key storage warning.
+- Seed GLSL expands to a textarea and file picker; a short Shadertoy-style `mainImage` snippet can be entered without layout breakage, and disabling Seed GLSL collapses the section.
+- Advanced strategy expands and exposes the expected controls: iteration limit, trigger threshold, high-score early stop, minimum improvement, no-improvement patience, optimizer budget, residual layers, VLM review, repair orientation, and protected hierarchy toggles.
+- Preference profile panel loads successfully and shows empty positive/negative preference lists with disabled Add buttons until input is provided.
+- `selected_render` is now available for both previously failing Canvas runs:
+
+  ```text
+  run_aadf9f48 selected_render: 200 image/png 10686
+  run_2e21ad10 selected_render: 200 image/png 13100
+  ```
+
+Verification run for this follow-up pass:
+
+```text
+npm test -- --run src/lib/branchCanvasModel.test.ts src/lib/branchCanvasLayout.test.ts src/lib/glsl-parser.test.ts
+Test Files  3 passed (3)
+Tests       91 passed (91)
+```
+
+## BUG-007: No-run Canvas deep link keeps `?view=canvas` while rendering Studio empty state
+
+Severity: Medium
+
+Repro:
+
+1. Open or remain on `http://localhost:5174/?view=canvas` without an active completed run/result in memory.
+2. Observe the page body.
+
+Actual:
+
+- The address bar stays at `?view=canvas`.
+- The visible UI is the Studio empty state: upload dropzone, AI/model/self-optimize controls, preprocess/candidate/quality/image-diff empty panels.
+- There is no visible Canvas empty state, no Canvas/Studio toggle, and no message explaining why the Canvas view is unavailable.
+
+Expected:
+
+Either the route should normalize back to Studio when Canvas cannot be shown, or the app should show an explicit Canvas empty state with a clear way to start/open a run.
+
+Likely cause:
+
+`frontend/src/App.tsx` derives an `effectivePage` that clamps to `"studio"` when `showCanvas` is false, but the URL query remains `view=canvas`.
+
+## BUG-008: Empty preference profile displays Unix epoch as "Updated At"
+
+Severity: Low
+
+Repro:
+
+1. Open the Preferences panel on an empty/default preference profile.
+2. Inspect the read-only metadata.
+3. Confirm the profile endpoint returns default metadata:
+
+   ```json
+   {"updated_at":0.0,"summary_source_event_count":0}
+   ```
+
+Actual:
+
+The UI displays `1970/1/1 (1970-01-01T00:00:00.000Z)` even though there are zero source events and no real update has occurred.
+
+Expected:
+
+Display `Never updated`, `未更新`, or hide the timestamp until `updated_at > 0`.
+
+Likely cause:
+
+`frontend/src/components/PreferencePanel.tsx` calls `relativeTime(profile.updated_at)` and `new Date(profile.updated_at * 1000).toISOString()` unconditionally, while the backend default profile intentionally uses `updated_at: 0.0`.
+
+## Model + Human Canvas Pass (2026-06-21)
+
+Scope: continued Computer Use testing focused on configured model calls, human-directed branch operations, and the Canvas inspector / preview sidebar. This pass used the same `pink_circle.png` via the real browser upload picker.
+
+Pass / stable observations:
+
+- `/api/models` returned three configured image-capable presets: Claude Opus, MiMo v2.5, and Qwen 3.7 Plus.
+- Studio upload through the macOS file picker worked for `pink_circle.png`.
+- AI Auto + Claude Opus created `run_db5348e8`, produced a real `llm_0` candidate with `llm_io`, selected the LLM GLSL, and completed successfully.
+- `run_db5348e8` final summary: `completed`, selected `llm_0`, final score `0.8023181124854739`, quality band `good`, refinement history length `2`.
+- Canvas run-node selection updates the Inspector, exposes title/Favorite/Continue actions, and the Preview dock loads both the reference image and node render.
+- Continue-from-final opens a branch draft in the Inspector without immediately submitting; the draft exposes feedback text, Refine/Polish/Continue modes, layout/palette/background/small-edit locks, Explore variants, Batch Draw, Fine controls, Cancel, and Submit.
+- Human-directed branch submit created `run_5d879ae2` from `run_db5348e8` with feedback `保持粉色玻璃球整体结构，增强左上高光和边缘透明感，背景保持白色。`.
+- The human branch completed and retained LLM evidence in `refinement_history[0].llm_io`; its selected render endpoint works:
+
+  ```text
+  run_5d879ae2 selected_render: 200 image/png 13185
+  ```
+
+## BUG-009: Preview dock can cover the branch-draft Submit button in the Canvas sidebar
+
+Severity: Medium
+
+Repro:
+
+1. Open Canvas for `run_db5348e8`.
+2. Select the active run node so the Preview dock opens.
+3. Click `Continue from final`.
+4. Enter branch feedback in the Inspector.
+5. Try to click `运行分支 Submit` while the Preview dock remains expanded.
+
+Actual:
+
+The Preview dock overlaps the lower part of the Inspector and covers the Submit area. The first click on the accessible `运行分支 Submit` element did not trigger submission. After collapsing the Preview dock, the same Submit button became visibly accessible and the branch submitted successfully.
+
+Expected:
+
+The Inspector action footer should remain reachable without requiring users to collapse Preview, or the Preview dock should avoid overlapping the Inspector / branch form.
+
+Likely area:
+
+Canvas side panels / Preview dock positioning and z-index. The draft form footer needs reserved space, scrolling, or layout coordination with the dock.
+
+## BUG-010: Human-directed branch score fields disagree after a rejected LLM refinement
+
+Severity: High
+
+Repro:
+
+1. Complete an AI Auto run (`run_db5348e8`) on `pink_circle.png`; final score is `0.8023181124854739`.
+2. In Canvas, select the run, choose `Continue from final`.
+3. Enter feedback: `保持粉色玻璃球整体结构，增强左上高光和边缘透明感，背景保持白色。`
+4. Enable `保持构图 Layout` and `保护背景 Background`.
+5. Submit the branch and wait for `run_5d879ae2` to complete.
+
+Observed API evidence from `run_5d879ae2`:
+
+```json
+{
+  "selected_candidate_id": "seed_0",
+  "selected_candidate_score": 0.7341226787398317,
+  "quality_final_score": 0.7341226787398317,
+  "objective_simple_ssim": 1,
+  "refinement_summary": {
+    "initial_score": 0.8023181124854739,
+    "final_score": 0.8023181124854739,
+    "improved": false
+  },
+  "history": [
+    {
+      "score_before": 0.8023,
+      "score_after": 0.7683,
+      "delta": -0.034,
+      "accepted": false,
+      "best_score_after": 0.8023
+    }
+  ]
+}
+```
+
+Observed UI evidence:
+
+- Canvas header shows `SSIM: 100%`.
+- Active child run node shows `score 0.734`.
+- Refinement proposal node shows `0.768` with a down arrow and `0.034`.
+- Current best node shows `0.734`.
+
+Expected:
+
+If the LLM refinement proposal was rejected and `best_score_after` remained `0.8023`, the branch's selected/final score and Current best should stay aligned with the retained best artifact. If the branch intentionally selected the lower-scoring seed/optimized result, the refinement summary should not claim final score `0.8023`.
+
+Likely area:
+
+GLSL branch refinement / optimizer bookkeeping: selected candidate metrics, top-level `quality_router`, `refinement_summary`, and Canvas node model are reading inconsistent score sources after a rejected refinement.
 
 ### BUG-002 — fix
 
@@ -47,6 +221,22 @@ The selection policy is **not** at fault: `select_best_candidate` (`backend/p2s_
 ### BUG-004 — deferred, assessment
 
 The React accessibility tree showed the Canvas fully mounted (header, nodes, inspector, edges) and the view became visible again after refocusing the tab; only the *captured* window was blank, alongside `SCStreamErrorDomain Code=-3811` capture errors in the tooling note. This is most consistent with a macOS ScreenCaptureKit capture artifact rather than an app render bug. The hidden-parent React-Flow-init hypothesis is plausible but unproven; a defensive "re-measure on visible" effect could be added if the blank state is ever reproduced in a clean browser session (no screen-capture tooling involved).
+
+### BUG-007 — fix
+
+`frontend/src/App.tsx` clamped `effectivePage` to `studio` when no run exists but left `?view=canvas` in the address bar. Added an effect that, when Canvas cannot be shown, normalizes both the URL (`history.replaceState` to the bare pathname) and the page state back to Studio.
+
+### BUG-008 — fix
+
+`frontend/src/components/PreferencePanel.tsx` rendered `updated_at: 0.0` (the default-profile sentinel) as the Unix epoch. `relativeTime` now returns "未更新 Never updated" for `epoch <= 0`, and the ISO timestamp span is hidden when `updated_at <= 0`. Unit test in `PreferencePanel.test.ts`.
+
+### BUG-009 — fix (layout)
+
+The Inspector (`Panel position="top-right"`) and Preview dock (`Panel position="bottom-right"`) are sibling React Flow panels with equal z-index; the later-rendered dock intercepted clicks on the branch-draft Submit when a tall draft form pushed the Inspector's footer into the bottom-right overlap zone. The Inspector panel now carries `zIndex: 6` (above the dock's default 5) so its footer wins pointer events. When the Inspector is short (no draft) the panels don't overlap, so the dock stays fully visible. Build/typecheck-verified; visual confirmation pending a real browser session.
+
+### BUG-010 — fix
+
+Root cause: the VLM final gate (`backend/p2s_agent/core/pipeline/graph.py`, in `_run_post_pipeline`) blends a semantic score into `selected.final_score` **after** `refinement_summary` recorded the objective refinement trajectory. So the selected/quality score the UI shows (blended, e.g. 0.734) disagreed with `refinement_summary.final_score` (objective best, e.g. 0.8023) for every VLM-judge-enabled run — most visibly after a rejected refinement. The fix reconciles `refinement_summary["final_score"]` to the authoritative `selected.final_score` and recomputes `improved` against the summary's own `initial_score`, immediately after the VLM gate. Regression test: `test_run_post_pipeline_reconciles_refinement_summary_with_vlm_final_gate` in `backend/tests/unit/test_graph.py`.
 
 ## BUG-001: Non-LLM pipeline drops the detected pink bubble appearance
 

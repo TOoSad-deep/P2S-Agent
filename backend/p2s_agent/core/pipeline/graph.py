@@ -942,6 +942,20 @@ def _run_post_pipeline(
             selected.final_score = blended
             save_json(run_dir / "judge" / "final_rubric.json", judge_summary)
 
+    # Reconcile the refinement summary with the authoritative selected score.
+    # The VLM final gate above may have blended a semantic score into
+    # selected.final_score AFTER refinement_summary recorded the objective
+    # refinement trajectory — leaving refinement_summary.final_score (objective
+    # best) disagreeing with the selected/quality score the UI shows (blended).
+    # Re-point final_score at the selected score so the branch's reported "final"
+    # agrees everywhere, and recompute `improved` against the summary's own
+    # initial_score. (BUG-010)
+    if judge_summary is not None and selected is not None:
+        refinement_summary["final_score"] = selected.final_score
+        refinement_summary["improved"] = (
+            selected.final_score > refinement_summary.get("initial_score", selected.final_score)
+        )
+
     # Sync selected record
     _sync_selected_record_for_response(
         selected,

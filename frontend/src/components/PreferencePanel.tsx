@@ -27,7 +27,10 @@ interface PreferencePanelProps {
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
-function relativeTime(epoch: number): string {
+export function relativeTime(epoch: number): string {
+  // A default/empty profile carries updated_at: 0.0 — never render it as the
+  // Unix epoch (1970). (BUG-008)
+  if (!epoch || epoch <= 0) return "未更新 Never updated";
   const diffMs = Date.now() - epoch * 1000;
   const diffSec = Math.floor(diffMs / 1000);
   if (diffSec < 60) return `${diffSec}s ago`;
@@ -373,8 +376,13 @@ export default function PreferencePanel({
                 更新时间 <span className="text-[var(--text-muted)] font-normal">Updated At</span>
               </p>
               <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                {relativeTime(profile.updated_at)}{" "}
-                <span className="opacity-60">({new Date(profile.updated_at * 1000).toISOString()})</span>
+                {relativeTime(profile.updated_at)}
+                {profile.updated_at > 0 && (
+                  <>
+                    {" "}
+                    <span className="opacity-60">({new Date(profile.updated_at * 1000).toISOString()})</span>
+                  </>
+                )}
               </p>
             </div>
           </div>

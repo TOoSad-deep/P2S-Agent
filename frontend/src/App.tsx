@@ -87,6 +87,17 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
+  // Normalize a stale `?view=canvas` deep link back to Studio when Canvas cannot
+  // be shown (no completed run yet). Without this the address bar keeps
+  // `?view=canvas` while the Studio empty state renders. (BUG-007)
+  useEffect(() => {
+    if (showCanvas) return
+    if (new URLSearchParams(window.location.search).get('view') === 'canvas') {
+      history.replaceState({}, '', window.location.pathname)
+    }
+    setPage('studio')
+  }, [showCanvas])
+
   const ssimValue =
     typeof result?.objective_metrics?.simple_ssim === 'number'
       ? result.objective_metrics.simple_ssim

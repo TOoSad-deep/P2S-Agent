@@ -795,6 +795,83 @@ def test_run_post_pipeline_runs_glsl_refinement(tmp_path, monkeypatch):
     assert (tmp_path / "selected_shader.glsl").read_text(encoding="utf-8") == improved_glsl
 
 
+def test_run_post_pipeline_reconciles_refinement_summary_with_vlm_final_gate(tmp_path, monkeypatch):
+    """BUG-010: the VLM final gate blends a (possibly lower) semantic score into
+    the selected candidate AFTER refinement_summary's objective trajectory is
+    finalized. refinement_summary.final_score must then agree with the
+    authoritative selected score, not keep the objective refinement best."""
+    glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
+    render = tmp_path / "candidates" / "llm_0_render.png"
+    render.parent.mkdir(parents=True, exist_ok=True)
+    render.write_bytes(b"\x89PNG")
+    cand = CandidateRecord(
+        id="llm_0",
+        source="llm",
+        enabled=True,
+        priority=5,
+        dsl=None,
+        output_kind="glsl",
+        validation_valid=True,
+        validation_errors=[],
+        compile_success=True,
+        compile_glsl=glsl,
+        compile_errors=[],
+        final_score=0.8,
+        selected=True,
+        objective_metrics={"mse": 0.1},
+        quality_router={"final_score": 0.8, "next_action": "accept"},
+    )
+    cand.render_path = str(render)
+
+    # Refinement runs but is REJECTED — best stays at the objective initial (0.8).
+    def fake_loop(*args, **kwargs):
+        return {
+            "best_glsl": glsl,
+            "best_score": 0.8,
+            "best_metrics": {"mse": 0.1},
+            "best_quality": {"final_score": 0.8, "next_action": "accept"},
+            "best_render_path": str(render),
+            "history": [{
+                "iteration": 1, "score_before": 0.8, "score_after": 0.77,
+                "accepted": False, "best_score_after": 0.8,
+            }],
+            "stop_reason": "no_improvement",
+        }
+
+    monkeypatch.setattr("p2s_agent.core.pipeline.graph.run_glsl_refinement_loop", fake_loop)
+    # VLM final gate blends to a LOWER authoritative score (0.5).
+    monkeypatch.setattr(
+        "p2s_agent.core.pipeline.graph.judge_rubric",
+        lambda *a, **k: {"semantic_scores": {"composition": 0.2}, "failure_type": "none"},
+    )
+    monkeypatch.setattr(
+        "p2s_agent.core.pipeline.graph.compute_final_score",
+        lambda metrics, semantic=None: 0.5,
+    )
+
+    result = _run_post_pipeline({
+        "selected_candidate_id": "llm_0",
+        "candidates": [cand],
+        "run_dir": str(tmp_path),
+        "selected_dsl": None,
+        "selected_glsl": glsl,
+        "selected_metrics": {"mse": 0.1},
+        "selected_quality": {"final_score": 0.8, "next_action": "accept"},
+        "refinement_mode": "on",
+        "max_refinement_iterations": 2,
+        "llm_enabled": False,
+        "glsl_render_enabled": True,
+        "vlm_judge_enabled": True,
+    })
+
+    # The VLM gate lowered the authoritative selected score to the blended value.
+    assert cand.final_score == 0.5
+    assert result["selected_quality"]["final_score"] == 0.5
+    # The reported refinement final must agree with the authoritative score.
+    assert result["refinement_summary"]["final_score"] == 0.5
+    assert result["refinement_summary"]["improved"] is False
+
+
 def test_run_post_pipeline_skips_glsl_refinement_when_render_disabled(tmp_path, monkeypatch):
     glsl = "void mainImage(out vec4 fragColor, in vec2 fragCoord){fragColor=vec4(1.0);}"
     cand = CandidateRecord(

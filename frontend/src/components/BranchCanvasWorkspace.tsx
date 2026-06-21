@@ -915,8 +915,12 @@ export default function BranchCanvasWorkspace({
           statusLabel={statusLabel}
         />
 
-        {/* Right floating inspector (collapsible) */}
-        <Panel position="top-right" style={{ margin: 8 }}>
+        {/* Right floating inspector (collapsible).
+            zIndex 6 keeps the Inspector — and its branch-draft Submit footer —
+            above the bottom-right Preview dock (default panel z-index 5). The two
+            overlap in the bottom-right corner when a tall draft form is open; the
+            dock would otherwise intercept the Submit click. (BUG-009) */}
+        <Panel position="top-right" style={{ margin: 8, zIndex: 6 }}>
           {inspectorOpen ? (
             <div
               className="canvas-panel"
