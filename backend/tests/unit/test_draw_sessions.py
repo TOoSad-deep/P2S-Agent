@@ -411,6 +411,8 @@ class TestSessionEvents:
     ):
         """A PermissionError on open() (lost TCC access) degrades to []."""
         draw_id = "draw-perm-err"
+        # read-cutover: bypass the DB so this asserts the file-read degradation path
+        monkeypatch.setattr("p2s_agent.core.db.shadow._ENABLED", False)
         append_session_event(draw_id, {"type": "status_changed"}, root=tmp_path)
         ev_path = tmp_path / "draw_sessions" / f"{draw_id}_events.jsonl"
         assert ev_path.exists()  # file is present; the failure is purely an open() denial

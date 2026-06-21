@@ -874,6 +874,8 @@ class TestPlanEvents:
     ):
         """If open() raises PermissionError (TCC loss on macOS Documents),
         load_plan_events must degrade gracefully and return []."""
+        # read-cutover: bypass the DB so this asserts the file-read degradation path
+        monkeypatch.setattr("p2s_agent.core.db.shadow._ENABLED", False)
         append_plan_event("fus-perm", {"type": "ev1", "ts": 1.0}, root=tmp_path)
         ev_path = tmp_path / "fusions" / "fus-perm_events.jsonl"
         assert ev_path.exists()

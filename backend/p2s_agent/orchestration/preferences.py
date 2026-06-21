@@ -102,6 +102,27 @@ def default_profile() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _pref_event_from_dict(obj: dict) -> "PreferenceEvent | None":
+    """Tolerant reconstruction of a PreferenceEvent from a dict (file line or DB payload)."""
+    try:
+        return PreferenceEvent(
+            event_id=obj.get("event_id", ""),
+            event_type=obj.get("event_type", ""),
+            timestamp=float(obj.get("timestamp", 0.0)),
+            run_id=obj.get("run_id"),
+            group_id=obj.get("group_id"),
+            feedback=obj.get("feedback"),
+            winner_run_id=obj.get("winner_run_id"),
+            loser_run_ids=list(obj.get("loser_run_ids") or []),
+            rating=obj.get("rating"),
+            reason=obj.get("reason"),
+            tags=list(obj.get("tags") or []),
+            context=dict(obj.get("context") or {}),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def append_preference_event(
     event: PreferenceEvent,
     *,
@@ -136,6 +157,10 @@ def load_preference_events(
     Returns:
         List of ``PreferenceEvent`` instances; empty list if file missing.
     """
+    db_payloads = shadow.read_events(root, "preference", None)  # read-cutover: DB first
+    if db_payloads:
+        evs = [e for e in (_pref_event_from_dict(o) for o in db_payloads if isinstance(o, dict)) if e is not None]
+        return evs[-limit:] if limit is not None else evs
     prefs_dir = _resolve_prefs_dir(root)
     path = prefs_dir / "events.jsonl"
     if not path.exists():
@@ -154,25 +179,9 @@ def load_preference_events(
                     continue
                 if not isinstance(obj, dict):
                     continue
-                # Tolerant reconstruction — missing keys get defaults.
-                try:
-                    ev = PreferenceEvent(
-                        event_id=obj.get("event_id", ""),
-                        event_type=obj.get("event_type", ""),
-                        timestamp=float(obj.get("timestamp", 0.0)),
-                        run_id=obj.get("run_id"),
-                        group_id=obj.get("group_id"),
-                        feedback=obj.get("feedback"),
-                        winner_run_id=obj.get("winner_run_id"),
-                        loser_run_ids=list(obj.get("loser_run_ids") or []),
-                        rating=obj.get("rating"),
-                        reason=obj.get("reason"),
-                        tags=list(obj.get("tags") or []),
-                        context=dict(obj.get("context") or {}),
-                    )
+                ev = _pref_event_from_dict(obj)
+                if ev is not None:
                     events.append(ev)
-                except (TypeError, ValueError):
-                    continue
     except OSError:
         return []
 
@@ -188,6 +197,9 @@ def load_preference_events(
 
 def load_profile(*, root: "Path | str | None" = None) -> dict:
     """Read profile.json; return ``default_profile()`` if missing or malformed."""
+    db_profile = shadow.read_profile(root)  # read-cutover: DB first
+    if db_profile is not None:
+        return db_profile
     prefs_dir = _resolve_prefs_dir(root)
     path = prefs_dir / "profile.json"
     if not path.exists():
@@ -257,6 +269,7 @@ def clear_preferences(*, root: "Path | str | None" = None) -> None:
             events_path.unlink()
     except OSError:
         pass
+    shadow.clear_pref_events(root)
 
     try:
         prefs_dir.mkdir(parents=True, exist_ok=True)

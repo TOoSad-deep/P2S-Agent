@@ -125,16 +125,18 @@ def load_plan(
     nested regions (parse each region dict → FusionRegion),
     int/float coercion, and lists defaulted.
     """
-    fusions_dir = _resolve_fusions_dir(root)
-    path = fusions_dir / f"{fusion_id}.json"
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(data, dict):
-        return None
+    data = shadow.read_fusion(root, fusion_id)  # read-cutover: DB first
+    if data is None:
+        fusions_dir = _resolve_fusions_dir(root)
+        path = fusions_dir / f"{fusion_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(data, dict):
+            return None
     try:
         _created = data.get("created_at")
         created_at_val = float(_created) if _created is not None else 0.0
@@ -212,6 +214,9 @@ def load_plan_events(
     Skips blank lines, non-JSON lines, and non-dict JSON values silently.
     Returns an empty list if the file does not exist.
     """
+    db_events = shadow.read_events(root, "fusion", fusion_id)  # read-cutover: DB first
+    if db_events:
+        return db_events
     fusions_dir = _resolve_fusions_dir(root)
     path = fusions_dir / f"{fusion_id}_events.jsonl"
     if not path.exists():

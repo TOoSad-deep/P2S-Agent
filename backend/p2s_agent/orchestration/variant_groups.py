@@ -209,16 +209,18 @@ def load_group(
 
     Returns ``None`` if the file is missing or JSON is malformed.
     """
-    groups_dir = _resolve_groups_dir(root)
-    path = groups_dir / f"{group_id}.json"
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(data, dict):
-        return None
+    data = shadow.read_group(root, group_id)  # read-cutover: DB first
+    if data is None:
+        groups_dir = _resolve_groups_dir(root)
+        path = groups_dir / f"{group_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(data, dict):
+            return None
     try:
         _created = data.get("created_at")
         created_at_val = float(_created) if _created is not None else 0.0
@@ -275,6 +277,9 @@ def load_group_events(
     Skips blank lines and non-JSON lines silently. Returns an empty list
     if the file does not exist.
     """
+    db_events = shadow.read_events(root, "variant_group", group_id)  # read-cutover: DB first
+    if db_events:
+        return db_events
     groups_dir = _resolve_groups_dir(root)
     path = groups_dir / f"{group_id}_events.jsonl"
     if not path.exists():

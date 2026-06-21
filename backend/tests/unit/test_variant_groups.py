@@ -342,6 +342,8 @@ class TestGroupEvents:
     ):
         """A PermissionError on open() (TCC loss) degrades to [] rather than 500."""
         group_id = "grp-perm"
+        # read-cutover: bypass the DB so this asserts the file-read degradation path
+        monkeypatch.setattr("p2s_agent.core.db.shadow._ENABLED", False)
         append_group_event(group_id, {"type": "ev1", "ts": 1.0}, root=tmp_path)
         target = tmp_path / "variant_groups" / f"{group_id}_events.jsonl"
 

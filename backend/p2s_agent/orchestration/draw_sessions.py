@@ -151,16 +151,18 @@ def load_session(
     ``int(...)`` coercion for requested_count and ``float(...)`` for
     created_at (mirrors ``load_group``'s field-by-field parsing).
     """
-    sessions_dir = _resolve_sessions_dir(root)
-    path = sessions_dir / f"{draw_id}.json"
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(data, dict):
-        return None
+    data = shadow.read_session(root, draw_id)  # read-cutover: DB first
+    if data is None:
+        sessions_dir = _resolve_sessions_dir(root)
+        path = sessions_dir / f"{draw_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(data, dict):
+            return None
     try:
         _created = data.get("created_at")
         created_at_val = float(_created) if _created is not None else 0.0
@@ -226,6 +228,9 @@ def load_session_events(
     Skips blank lines, non-JSON lines, and non-dict JSON values silently.
     Returns an empty list if the file does not exist.
     """
+    db_events = shadow.read_events(root, "draw_session", draw_id)  # read-cutover: DB first
+    if db_events:
+        return db_events
     sessions_dir = _resolve_sessions_dir(root)
     path = sessions_dir / f"{draw_id}_events.jsonl"
     if not path.exists():

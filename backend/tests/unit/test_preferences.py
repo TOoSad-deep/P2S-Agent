@@ -143,6 +143,8 @@ class TestAppendAndLoad:
 
     def test_load_preference_events_returns_empty_on_permission_error(self, tmp_path, monkeypatch):
         # A valid events.jsonl exists, but the read open() is denied (TCC/EPERM).
+        # read-cutover: bypass the DB so this asserts the file-read degradation path
+        monkeypatch.setattr("p2s_agent.core.db.shadow._ENABLED", False)
         append_preference_event(_make_event(event_id="e1"), root=tmp_path)
         events_path = tmp_path / "preferences" / "events.jsonl"
 

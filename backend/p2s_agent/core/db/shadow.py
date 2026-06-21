@@ -125,3 +125,72 @@ def mirror_fusion(results_root, record) -> None:
 
 def mirror_fusion_event(results_root, fusion_id, event) -> None:
     _mirror_event(results_root, "fusion", fusion_id, event, str(event.get("type", "")))
+
+
+# ---------------------------------------------------------------------------
+# Read-cutover: best-effort DB reads. Return None (or [] for events) on
+# disabled / error / miss so callers fall back to the file. When _ENABLED is
+# False the DB is bypassed entirely (pure file mode).
+# ---------------------------------------------------------------------------
+
+
+def _read_row(results_root, repo_name, getter, key):
+    if not _ENABLED:
+        return None
+    try:
+        import importlib
+        repo = importlib.import_module(f"p2s_agent.core.db.repositories.{repo_name}")
+        return getattr(repo, getter)(shadow_engine(results_root), key)
+    except Exception:
+        logger.debug("%s shadow read failed", repo_name, exc_info=True)
+        return None
+
+
+def read_group(results_root, group_id):
+    return _read_row(results_root, "variant_groups", "get_group", group_id)
+
+
+def read_session(results_root, draw_id):
+    return _read_row(results_root, "draw_sessions", "get_session", draw_id)
+
+
+def read_fusion(results_root, fusion_id):
+    return _read_row(results_root, "fusions", "get_fusion", fusion_id)
+
+
+def read_profile(results_root):
+    if not _ENABLED:
+        return None
+    try:
+        from p2s_agent.core.db.repositories import preferences as _r
+        row = _r.load_profile(shadow_engine(results_root))
+        return {k: v for k, v in row.items() if k != "id"} if row else None
+    except Exception:
+        logger.debug("preference profile shadow read failed", exc_info=True)
+        return None
+
+
+def clear_pref_events(results_root) -> None:
+    """Best-effort: drop all preference events from the DB (mirrors clear_preferences)."""
+    if not _ENABLED:
+        return
+    try:
+        from p2s_agent.core.db.repositories import events as _ev
+        _ev.delete_events(shadow_engine(results_root), "preference", None)
+    except Exception:
+        logger.debug("preference shadow clear failed", exc_info=True)
+
+
+def read_events(results_root, entity_type, entity_id) -> list:
+    """Return the event payloads for an entity (most-recent order preserved),
+    or [] on disabled / error / miss — callers fall back to the file."""
+    if not _ENABLED:
+        return []
+    try:
+        from p2s_agent.core.db.repositories import events as _ev
+        rows = _ev.load_events(shadow_engine(results_root),
+                               entity_type=entity_type, entity_id=entity_id)
+        return [r["payload"] for r in rows]
+    except Exception:
+        logger.debug("%s shadow read events failed", entity_type, exc_info=True)
+        return []

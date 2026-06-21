@@ -25,3 +25,14 @@ def load_events(engine, *, entity_type: str, entity_id) -> list:
             select(_events).where(cond).order_by(_events.c.event_id)
         ).mappings().all()
     return [dict(r) for r in rows]
+
+
+def delete_events(engine, entity_type: str, entity_id) -> int:
+    """Delete all events for an entity; returns rows removed. entity_id=None
+    matches the NULL-entity stream (e.g. preference)."""
+    from sqlalchemy import delete as _delete
+    cond = _events.c.entity_type == entity_type
+    cond = cond & (_events.c.entity_id.is_(None) if entity_id is None
+                   else _events.c.entity_id == entity_id)
+    with engine.begin() as conn:
+        return conn.execute(_delete(_events).where(cond)).rowcount
