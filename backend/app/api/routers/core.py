@@ -33,6 +33,8 @@ from p2s_agent.orchestration.run_index import (
     RunIndexError,
     RunLineageRecord,
     build_branch_tree,
+    load_run,
+    load_run_family,
     load_run_index,
     update_run_metadata,
 )
@@ -530,8 +532,7 @@ async def get_timeline(run_id: str) -> dict:
         }
 
     # Not in store — look in the run index.
-    records = load_run_index(path=store._RUN_INDEX_PATH)
-    rec = records.get(run_id)
+    rec = load_run(run_id, path=store._RUN_INDEX_PATH)  # targeted single-run read
     if rec is None:
         raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
 
@@ -561,7 +562,7 @@ async def get_branches(run_id: str) -> dict:
     Tries the run index first; falls back to a synthesised single-node
     tree for runs that exist only in the in-memory store.
     """
-    records = load_run_index(path=store._RUN_INDEX_PATH)
+    records = load_run_family(run_id, path=store._RUN_INDEX_PATH)  # by-root, not whole index
     if run_id in records:
         try:
             tree = build_branch_tree(records, run_id)
@@ -640,8 +641,7 @@ async def get_artifact(run_id: str, artifact_id: str) -> FileResponse:
         result = stored
         run_dir = stored.get("run_dir")
     else:
-        records = load_run_index(path=store._RUN_INDEX_PATH)
-        rec = records.get(run_id)
+        rec = load_run(run_id, path=store._RUN_INDEX_PATH)  # targeted single-run read
         if rec is None:
             raise HTTPException(status_code=404, detail=f"run_id '{run_id}' not found")
         run_dir = rec.run_dir

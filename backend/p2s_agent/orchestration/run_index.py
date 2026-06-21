@@ -386,6 +386,36 @@ def load_run_index(*, path: Path | str | None = None) -> dict[str, RunLineageRec
     return _fold_jsonl_cached(path=path)
 
 
+def load_run(run_id: str, *, path: Path | str | None = None) -> "RunLineageRecord | None":
+    """Load a single run by id from the DB (indexed PK) without scanning the
+    whole index. Falls back to the full fold when the DB misses/errors."""
+    try:
+        from p2s_agent.core.db.repositories import runs as runs_repo
+        row = runs_repo.get_run(_shadow_engine(path), run_id)
+        if row is not None:
+            return _dict_to_record(row)
+    except Exception:
+        logger.debug("load_run: DB read failed; folding JSONL", exc_info=True)
+    return load_run_index(path=path).get(run_id)
+
+
+def load_run_family(run_id: str, *, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
+    """Load only the runs sharing *run_id*'s root (indexed by root_run_id) — for
+    building a branch tree without scanning the whole index. Falls back to the
+    full index when the DB misses/errors."""
+    try:
+        from p2s_agent.core.db.repositories import runs as runs_repo
+        eng = _shadow_engine(path)
+        anchor = runs_repo.get_run(eng, run_id)
+        if anchor is not None:
+            family = runs_repo.get_runs_by_root(eng, anchor["root_run_id"])
+            if family:
+                return {rid: _dict_to_record(row) for rid, row in family.items()}
+    except Exception:
+        logger.debug("load_run_family: DB read failed; loading full index", exc_info=True)
+    return load_run_index(path=path)
+
+
 def _fold_jsonl_cached(*, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
     """Read the JSONL file and fold all events into a dict of RunLineageRecord.
 

@@ -29,3 +29,13 @@ def delete_runs(engine, run_ids) -> int:
     with engine.begin() as conn:
         res = conn.execute(_runs.delete().where(_runs.c.run_id.in_(ids)))
         return res.rowcount
+
+
+def get_runs_by_root(engine, root_run_id) -> dict:
+    """Runs sharing a root (indexed by root_run_id), keyed by run_id."""
+    from sqlalchemy import select
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(_runs).where(_runs.c.root_run_id == root_run_id)
+        ).mappings().all()
+    return {r["run_id"]: dict(r) for r in rows}
