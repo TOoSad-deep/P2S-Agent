@@ -1344,7 +1344,7 @@ def run_png_shader_pipeline(
         refinement=state.get("refinement_summary", {}),
     )
 
-    return {
+    result = {
         "run_id": effective_run_id,
         "run_dir": str(run_dir_obj.path),
         "input_spec": input_spec,
@@ -1363,3 +1363,12 @@ def run_png_shader_pipeline(
         "vlm_judge": state.get("vlm_judge"),
         "lineage": state.get("lineage"),
     }
+    # Snapshot the canonical result so /status can rebuild it from disk after the
+    # run is evicted from the in-memory store or the process restarts. Written
+    # here (not in the worker) so test fakes that monkeypatch this function
+    # bypass it entirely. Best-effort: a write failure must not fail the run.
+    try:
+        save_json(run_dir_obj.path / "result.json", result)
+    except Exception:
+        logger.warning("save result.json failed", exc_info=True)
+    return result
