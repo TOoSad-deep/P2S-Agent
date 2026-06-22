@@ -24,3 +24,12 @@ def test_preference_events_null_entity(repo_engine):
                         event_type="winner_selected", payload={"run_id": "r"}, ts=3.0)
     got = events.load_events(repo_engine, entity_type="preference", entity_id=None)
     assert len(got) == 1 and got[0]["payload"]["run_id"] == "r"
+
+
+def test_append_event_none_payload_becomes_empty_dict(repo_engine):
+    """An explicit payload=None must store {} (not JSON null) so reads get a dict."""
+    from p2s_agent.core.db.repositories import events
+    events.append_event(repo_engine, entity_type="x", entity_id="1",
+                        event_type="t", payload=None, ts=1.0)
+    got = events.load_events(repo_engine, entity_type="x", entity_id="1")
+    assert got[0]["payload"] == {}

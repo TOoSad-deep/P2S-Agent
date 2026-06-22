@@ -7,7 +7,14 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 
 def upsert(engine, table, pk: str, row: dict) -> None:
-    """INSERT row; on PK conflict, UPDATE the non-PK columns present in *row*."""
+    """Full-row upsert: INSERT *row*; on PK conflict, UPDATE the non-PK columns
+    present in *row*.
+
+    *row* MUST include every NOT NULL column — SQLite evaluates the INSERT's
+    NOT NULL constraints before the ON CONFLICT branch, so omitting one raises
+    IntegrityError even when the row already exists. For a partial field update
+    of an existing row use :func:`update_by_pk` instead.
+    """
     with engine.begin() as conn:
         stmt = sqlite_insert(table).values(**row)
         set_ = {k: stmt.excluded[k] for k in row if k != pk}

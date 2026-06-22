@@ -8,10 +8,12 @@ from p2s_agent.core.db.schema import events as _events
 
 def append_event(engine, *, entity_type: str, entity_id, event_type: str,
                  payload: dict, ts: float) -> None:
+    # Guard: an explicit payload=None would bind JSON ``null`` (defeating the
+    # NOT NULL/'{}' default and round-tripping back as Python None).
     with engine.begin() as conn:
         conn.execute(_events.insert().values(
-            entity_type=entity_type, entity_id=entity_id,
-            event_type=event_type, payload=payload, ts=ts))
+            entity_type=entity_type, entity_id=entity_id, event_type=event_type,
+            payload=payload if payload is not None else {}, ts=ts))
 
 
 def load_events(engine, *, entity_type: str, entity_id) -> list:
