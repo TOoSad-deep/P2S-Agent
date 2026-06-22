@@ -1,10 +1,24 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { SlidersHorizontal, RotateCcw, ChevronDown, ChevronRight } from "lucide-react";
 import { parseShader, updateShaderParam, type ShaderParameter } from "../lib/glsl-parser";
 
 interface PngShaderParamPanelProps {
   glsl: string | null;
   onGlslChange: (glsl: string) => void;
+}
+
+/** Decide the reset baseline when a new `glsl` prop arrives.
+ *
+ *  Both consumers feed the panel's own param edits back through the same `glsl`
+ *  prop, so an incoming value that equals our last emission is just an *echo* of
+ *  a live edit — the reset baseline must stay put. Any other value is a
+ *  genuinely external (new/different) shader and becomes the fresh baseline. */
+export function nextResetBaseline(
+  incomingGlsl: string,
+  prevBaseline: string,
+  lastEmitted: string | null,
+): string {
+  return incomingGlsl === lastEmitted ? prevBaseline : incomingGlsl;
 }
 
 interface ParamGroup {
@@ -433,11 +447,22 @@ function GroupSection({ group, currentGlsl, onGlslChange }: {
 export default function PngShaderParamPanel({ glsl, onGlslChange }: PngShaderParamPanelProps) {
   const [currentGlsl, setCurrentGlsl] = useState(glsl || "");
   const [originalGlsl, setOriginalGlsl] = useState(glsl || "");
+  // The last GLSL this panel pushed out via onGlslChange. Parents echo param
+  // edits straight back into the `glsl` prop, so we use this to tell our own
+  // edit-echo (keep the reset baseline) from an externally-loaded new shader
+  // (re-capture the baseline).
+  const lastEmittedRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (glsl) {
+      // Snapshot the ref now: the setOriginalGlsl updater runs lazily during the
+      // next render, by which point lastEmittedRef has already been advanced to
+      // `glsl` — reading it inside the updater would make every change look like
+      // an echo and freeze the baseline.
+      const lastEmitted = lastEmittedRef.current;
       setCurrentGlsl(glsl);
-      setOriginalGlsl(glsl);
+      setOriginalGlsl(prev => nextResetBaseline(glsl, prev, lastEmitted));
+      lastEmittedRef.current = glsl;
     }
   }, [glsl]);
 
@@ -445,11 +470,13 @@ export default function PngShaderParamPanel({ glsl, onGlslChange }: PngShaderPar
   const groups = useMemo(() => (parsed ? extractGroups(parsed.parameters) : []), [parsed]);
 
   const handleGlslChange = useCallback((newGlsl: string) => {
+    lastEmittedRef.current = newGlsl;
     setCurrentGlsl(newGlsl);
     onGlslChange(newGlsl);
   }, [onGlslChange]);
 
   const handleReset = useCallback(() => {
+    lastEmittedRef.current = originalGlsl;
     setCurrentGlsl(originalGlsl);
     onGlslChange(originalGlsl);
   }, [originalGlsl, onGlslChange]);
