@@ -214,13 +214,13 @@ def load_plan_events(
     Skips blank lines, non-JSON lines, and non-dict JSON values silently.
     Returns an empty list if the file does not exist.
     """
-    db_events = shadow.read_events(root, "fusion", fusion_id)  # read-cutover: DB first
-    if db_events:
-        return db_events
+    # File-first: the *_events.jsonl is the complete append-only log; the DB
+    # mirror is best-effort and can't re-sync a swallowed event, so it is read
+    # only when the file is absent (e.g. after the file is retired).
     fusions_dir = _resolve_fusions_dir(root)
     path = fusions_dir / f"{fusion_id}_events.jsonl"
     if not path.exists():
-        return []
+        return shadow.read_events(root, "fusion", fusion_id)
 
     events: list[dict[str, Any]] = []
     try:

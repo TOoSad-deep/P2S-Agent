@@ -157,14 +157,15 @@ def load_preference_events(
     Returns:
         List of ``PreferenceEvent`` instances; empty list if file missing.
     """
-    db_payloads = shadow.read_events(root, "preference", None)  # read-cutover: DB first
-    if db_payloads:
-        evs = [e for e in (_pref_event_from_dict(o) for o in db_payloads if isinstance(o, dict)) if e is not None]
-        return evs[-limit:] if limit is not None else evs
+    # File-first: events.jsonl is the complete append-only log; the DB mirror is
+    # best-effort and can't re-sync a swallowed event, so it is read only when
+    # the file is absent (e.g. after the file is retired).
     prefs_dir = _resolve_prefs_dir(root)
     path = prefs_dir / "events.jsonl"
     if not path.exists():
-        return []
+        db_payloads = shadow.read_events(root, "preference", None)
+        evs = [e for e in (_pref_event_from_dict(o) for o in db_payloads if isinstance(o, dict)) if e is not None]
+        return evs[-limit:] if limit is not None else evs
 
     events: list[PreferenceEvent] = []
     try:

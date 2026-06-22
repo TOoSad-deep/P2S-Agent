@@ -398,25 +398,28 @@ def load_run(run_id: str, *, path: Path | str | None = None) -> "RunLineageRecor
 
 
 def load_run_family(run_id: str, *, path: Path | str | None = None) -> dict[str, RunLineageRecord]:
-    """Load only the runs sharing *run_id*'s root (indexed by root_run_id) — for
-    building a branch tree without scanning the whole index.
+    """Load the runs sharing *run_id*'s root — for building a branch tree.
 
-    The HIT path returns the DB family only (kept O(family) for the branch-tree
-    endpoint), so its completeness depends on the DB being complete — which the
-    engine/init-guard concurrency fixes ensure in normal operation. The MISS
-    path (anchor absent from the DB) folds the full index via load_run_index
-    (DB ∪ JSONL). A run lost to a rare mid-session DB-write failure is therefore
-    never dropped from load_run_index / load_run / the JSONL — it would only be
-    transiently absent from this by-root tree until its next successful DB write.
+    The DB family (indexed by root_run_id) is UNIONed with the JSONL fold's runs
+    of the same root, so a run present on disk but missing from the DB is never
+    dropped from the tree (the DB wins on shared keys). On a DB miss for the
+    anchor itself, folds the full index.
     """
     try:
         from p2s_agent.core.db.repositories import runs as runs_repo
         eng = _shadow_engine(path)
         anchor = runs_repo.get_run(eng, run_id)
         if anchor is not None:
-            family = runs_repo.get_runs_by_root(eng, anchor["root_run_id"])
-            if family:
-                return {rid: _dict_to_record(row) for rid, row in family.items()}
+            root = anchor["root_run_id"]
+            fam = {rid: _dict_to_record(row)
+                   for rid, row in runs_repo.get_runs_by_root(eng, root).items()}
+            # Union with the JSONL fold (cached) so a JSONL-only sibling of the
+            # same root isn't missing from the tree; the DB wins on shared keys.
+            for rid, rec in _fold_jsonl_cached(path=path).items():
+                if rec.root_run_id == root:
+                    fam.setdefault(rid, rec)
+            if fam:
+                return fam
     except Exception:
         logger.debug("load_run_family: DB read failed; loading full index", exc_info=True)
     return load_run_index(path=path)

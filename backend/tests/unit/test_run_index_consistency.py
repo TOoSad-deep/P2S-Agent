@@ -40,6 +40,20 @@ def test_load_run_family_fallback_on_anchor_db_miss(tmp_path, monkeypatch):
     assert any(c["run_id"] == "CH" for c in tree["children"])
 
 
+def test_load_run_family_includes_jsonl_only_sibling(tmp_path, monkeypatch):
+    """The branch tree must include a sibling that's in the JSONL but missing
+    from the DB (anchor IS in the DB) — closes the by-root residual."""
+    idx = tmp_path / "run_index.jsonl"
+    append_run_created(_rec("R1"), path=idx)                          # JSONL + DB
+    monkeypatch.setattr(ri, "_SHADOW_DB_ENABLED", False)
+    append_run_created(_rec("C1", root="R1", parent="R1"), path=idx)  # JSONL only
+    monkeypatch.setattr(ri, "_SHADOW_DB_ENABLED", True)
+    fam = load_run_family("R1", path=idx)                             # anchor R1 in DB
+    assert {"R1", "C1"}.issubset(set(fam))                            # union closes the gap
+    tree = build_branch_tree(load_run_family("R1", path=idx), "R1")
+    assert any(c["run_id"] == "C1" for c in tree["children"])
+
+
 def test_prune_removes_db_only_run(tmp_path):
     """A run that exists only in the DB (not in the JSONL) must be prunable."""
     from p2s_agent.core.db.repositories import runs as r
