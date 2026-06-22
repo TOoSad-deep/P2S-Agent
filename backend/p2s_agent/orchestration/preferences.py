@@ -198,13 +198,13 @@ def load_preference_events(
 
 def load_profile(*, root: "Path | str | None" = None) -> dict:
     """Read profile.json; return ``default_profile()`` if missing or malformed."""
-    db_profile = shadow.read_profile(root)  # read-cutover: DB first
-    if db_profile is not None:
-        return db_profile
+    # File-first: profile.json is the authoritative snapshot (written first); the
+    # best-effort DB mirror is read only when the file is absent.
     prefs_dir = _resolve_prefs_dir(root)
     path = prefs_dir / "profile.json"
     if not path.exists():
-        return default_profile()
+        db_profile = shadow.read_profile(root)
+        return db_profile if db_profile is not None else default_profile()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):

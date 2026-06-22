@@ -125,17 +125,20 @@ def load_plan(
     nested regions (parse each region dict → FusionRegion),
     int/float coercion, and lists defaulted.
     """
-    data = shadow.read_fusion(root, fusion_id)  # read-cutover: DB first
-    if data is None:
-        fusions_dir = _resolve_fusions_dir(root)
-        path = fusions_dir / f"{fusion_id}.json"
-        if not path.exists():
-            return None
+    # File-first: <fusion_id>.json is the authoritative snapshot (written first);
+    # the best-effort DB mirror is read only when the file is absent.
+    fusions_dir = _resolve_fusions_dir(root)
+    path = fusions_dir / f"{fusion_id}.json"
+    if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
         if not isinstance(data, dict):
+            return None
+    else:
+        data = shadow.read_fusion(root, fusion_id)
+        if data is None:
             return None
     try:
         _created = data.get("created_at")

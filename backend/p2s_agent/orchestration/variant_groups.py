@@ -209,17 +209,20 @@ def load_group(
 
     Returns ``None`` if the file is missing or JSON is malformed.
     """
-    data = shadow.read_group(root, group_id)  # read-cutover: DB first
-    if data is None:
-        groups_dir = _resolve_groups_dir(root)
-        path = groups_dir / f"{group_id}.json"
-        if not path.exists():
-            return None
+    # File-first: <group_id>.json is the authoritative snapshot (written first);
+    # the best-effort DB mirror is read only when the file is absent.
+    groups_dir = _resolve_groups_dir(root)
+    path = groups_dir / f"{group_id}.json"
+    if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
         if not isinstance(data, dict):
+            return None
+    else:
+        data = shadow.read_group(root, group_id)
+        if data is None:
             return None
     try:
         _created = data.get("created_at")

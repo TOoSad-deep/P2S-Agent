@@ -151,17 +151,20 @@ def load_session(
     ``int(...)`` coercion for requested_count and ``float(...)`` for
     created_at (mirrors ``load_group``'s field-by-field parsing).
     """
-    data = shadow.read_session(root, draw_id)  # read-cutover: DB first
-    if data is None:
-        sessions_dir = _resolve_sessions_dir(root)
-        path = sessions_dir / f"{draw_id}.json"
-        if not path.exists():
-            return None
+    # File-first: <draw_id>.json is the authoritative snapshot (written first);
+    # the best-effort DB mirror is read only when the file is absent.
+    sessions_dir = _resolve_sessions_dir(root)
+    path = sessions_dir / f"{draw_id}.json"
+    if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
         if not isinstance(data, dict):
+            return None
+    else:
+        data = shadow.read_session(root, draw_id)
+        if data is None:
             return None
     try:
         _created = data.get("created_at")
