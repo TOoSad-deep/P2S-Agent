@@ -22,6 +22,7 @@
 | **V4.2 区域 / 蒙版** | 框选区域(modify/protect);protect 区显著退化时**硬否决** | ✅ |
 | **V4.3 / V4.4 偏好记忆** | 跨 run 偏好档案(事件→profile),回流 prompt 与辅助排序 | ✅ |
 | **V4.5 局部融合** | 多张抽卡 base+source 合成 `composite_target.png` → 融合 run(融成一个连续 shader,非拼贴) | ✅ |
+| **Shader Playground** | 独立三栏页面(源码 / 渲染画布 / 可调参数),粘贴任意 GLSL → Render → 实时调参,与 Agent 闭环解耦 | ✅ |
 
 > 完整架构、流程图与设计推导见 [`doc/2026-06-16-architecture-and-sop-overview.md`](doc/2026-06-16-architecture-and-sop-overview.md)。
 
@@ -68,6 +69,7 @@ cp backend/.env.example backend/.env   # 填入 LLM/VLM 的 API key
 
 - 前端:**http://localhost:5174**(Vite 代理 `/png-shader` 与 `/api` 到后端 `:8001`)
 - 后端:**http://localhost:8001**(FastAPI,`/docs` 有交互式 API 文档)
+- Shader Playground(独立页):**http://localhost:5174/playground.html**(无需后端,纯前端 GLSL 渲染 + 参数面板)
 
 ---
 
@@ -85,6 +87,10 @@ cp backend/.env.example backend/.env   # 填入 LLM/VLM 的 API key
 
 > **交互规则:单击 = 非破坏性预览**(更新检查器+预览坞,不改当前 run)· **双击 = 切换 active run / 折叠组**。
 > `列表 | 画布` 子标签可切换列表视图(时间线 + 分支树 + 对比条)。
+
+### 🅒 Shader Playground —— 独立 GLSL 试玩页(`/playground.html`)
+三栏布局:左**源码编辑**(Render / Clear / Example)· 中**实时画布**(共用主应用的渲染器生命周期与错误上报)· 右**可调参数面板**(沿用 `PngShaderParamPanel`,Reset 还原 baseline)。
+不依赖后端、不进 Agent 闭环,适合粘贴已有 shader 做对比 / 调参 / 演示。
 
 ---
 
@@ -176,12 +182,13 @@ P2S-Agent/
 ├── frontend/                   # React 19 + Vite + Three.js + React Flow
 │   ├── src/
 │   │   ├── App.tsx             # 单 usePngShader() + PngShaderProvider + 双页 shell
-│   │   ├── pages/              # StudioPage / CanvasPage
+│   │   ├── pages/              # StudioPage / CanvasPage / ShaderPlayground
 │   │   ├── context/            # PngShaderContext
-│   │   ├── components/         # 面板 / 画布节点 / 检查器 / 表单
+│   │   ├── components/         # 面板 / 画布节点 / 检查器 / 表单 / PlaygroundCanvas
 │   │   ├── hooks/              # usePngShader / useModels / useStrategyConfig
-│   │   └── lib/                # 候选/布局模型、策略预设、refine 选项(+ vitest)
-│   ├── package.json · vite.config.ts
+│   │   ├── lib/                # 候选/布局模型、策略预设、refine 选项、playground 示例(+ vitest)
+│   │   └── playground.tsx      # 独立入口(对应 frontend/playground.html)
+│   ├── index.html · playground.html · package.json · vite.config.ts  # 多页构建
 ├── doc/                        # 架构总览 + 各版本设计文档
 └── start.sh                    # 启停脚本
 ```
@@ -198,11 +205,20 @@ cd backend && python3 -m pytest tests/ -q
 cd frontend && npm run build
 
 # 前端纯逻辑单测(vitest,lib 目录)
-cd frontend && npx vitest run
+cd frontend && npx vitest run    # 等价于 npm test
 ```
 
+> 当前规模(2026-06-24):**1299** pytest + **135** vitest + `npm run build` 全绿。
 > 路线图既定原则:**每版可独立验收,不跳测试门禁**——后端单测优先,前端至少 `npm run build` 通过。
 > 注:`npm run lint` 当前是空壳(ESLint 未安装),依赖严格 `tsc`(`noUnusedLocals`)兜底。
+
+## 最近更新
+
+- **2026-06-24** `fix(param-panel)` — 「Reset」改为还原**进入调参前的 baseline**,而不是首次渲染值。
+- **2026-06-23** `fix(db)` — events `payload=None` 守护;明确 `upsert` 全行写入合同。
+- **2026-06-22** Shader Playground 合并主干(独立 3 栏页面,源码 + 渲染 + 参数)。
+- **2026-06-22** `fix(db)` 系列 — 四模块 snapshot loader 改为 file-first;修复分支树 / 事件流读一致性残留。
+- 详细变更见 `git log` 与 `doc/` 下版本设计文档。
 
 ## License
 
